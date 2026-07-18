@@ -1,4 +1,4 @@
-from engine import BaseModule, Orchestrator, Tier
+from engine import BaseModule, Orchestrator, StepSpec, Tier
 from engine.context import ExecutionContext
 
 
@@ -16,6 +16,16 @@ class AddOne(BaseModule):
 
     def run(self, context: ExecutionContext) -> dict:
         return {"value": context.get("value", 0) + 1}
+
+
+class Echo(BaseModule):
+    """Reads whatever key its manifest/pipeline wires as `heard`, for mapping tests."""
+
+    name = "echo"
+    tier = Tier.AGENT
+
+    def run(self, context: ExecutionContext) -> dict:
+        return {"echoed": context.get("heard")}
 
 
 class Fails(BaseModule):
@@ -51,3 +61,27 @@ def test_continue_on_error_runs_remaining_steps():
     assert context.get("value") == 11  # Fails() never wrote "value", AddOne still ran
     names_and_success = [(step.name, step.success) for step in context.history]
     assert names_and_success == [("double", True), ("fails", False), ("add_one", True)]
+
+
+def test_step_spec_maps_an_earlier_steps_output_into_a_differently_named_field():
+    # Double() writes "value"; Echo only ever reads "heard" — a StepSpec seed is
+    # what a no-code pipeline builder uses to wire "Step 1 output -> Step 2 input"
+    # when the names don't already line up.
+    steps = [
+        StepSpec(module=Double()),
+        StepSpec(module=Echo(), seed=lambda ctx: {"heard": ctx.get("value")}),
+    ]
+    orchestrator = Orchestrator(steps)
+    context = orchestrator.run({"value": 5})
+
+    assert context.get("value") == 10
+    assert context.get("echoed") == 10
+    assert [s.name for s in context.history] == ["double", "echo"]
+
+
+def test_step_spec_list_can_mix_bare_modules_and_specs():
+    steps = [Double(), StepSpec(module=AddOne())]
+    orchestrator = Orchestrator(steps)
+    context = orchestrator.run({"value": 5})
+
+    assert context.get("value") == 11

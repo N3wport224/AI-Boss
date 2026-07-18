@@ -60,7 +60,7 @@ just sitting in the same dict.
 |---|---|
 | `engine/base.py` | `Tier` enum + `BaseModule` abstract contract every module implements |
 | `engine/context.py` | `ExecutionContext` (shared state) + `StepRecord` (one step's audit trail) |
-| `engine/orchestrator.py` | Sequential runner; merges outputs, records history, optionally persists to `StateStore`, controls stop-vs-continue on error, emits live progress events via `on_event` |
+| `engine/orchestrator.py` | Sequential runner; merges outputs, records history, optionally persists to `StateStore`, controls stop-vs-continue on error, emits live progress events via `on_event`. Also defines `StepSpec`, for steps that need per-step seeded/mapped inputs rather than just running a bare module. |
 | `engine/registry.py` | Reads `*.yaml` manifests in a tier folder (`load_manifests`), dynamically imports and instantiates the referenced class (`instantiate`/`discover`) |
 | `engine/state_store.py` | SQLite persistence of run/step history for the `status` CLI command |
 
@@ -73,12 +73,28 @@ branches, or a non-critical logging agent at the tail).
 `on_event` callback. If given, it's called with a stream of events as the run
 happens — `step_started` / `step_completed` / `step_failed` for each module,
 plus `run_completed` / `run_failed` at the end (each carries the final
-`context`). A module can call `context.emit(kind, message)` from inside its own
-`run()` to add its own events (e.g. `"thought"`, `"tool_call"`) into that same
-stream, automatically tagged with which tier/module produced them
-(`ExecutionContext.active_module`, set by the orchestrator before each
-`module.run()` call). The CLI ignores this entirely (`on_event=None`, a no-op);
-the dashboard uses it to drive the live tracker described below.
+`context`). Per-step events carry an `index` (the step's position in the
+pipeline) alongside `tier`/`name`, specifically so a pipeline that uses the
+same module twice — entirely possible once pipelines are built by picking
+modules freely rather than one-per-tier — doesn't have two tracker rows
+fighting over the same identity. A module can call `context.emit(kind,
+message)` from inside its own `run()` to add its own events (e.g. `"thought"`,
+`"tool_call"`) into that same stream, automatically tagged with which
+tier/module produced them (`ExecutionContext.active_module`, set by the
+orchestrator before each `module.run()` call). The CLI ignores this entirely
+(`on_event=None`, a no-op); the dashboard uses it to drive the live tracker
+described below.
+
+Each pipeline "step" the orchestrator runs is a `StepSpec(module, seed)`, not
+just a bare module — `seed` is a function of the *current* `ExecutionContext`,
+called right before that step's `module.run()`. For the default case (bare
+`BaseModule` instances, e.g. `Orchestrator([Double(), AddOne()])`) it's a
+no-op wrapped in automatically by `_as_step()`. For a pipeline assembled by the
+visual builder, `seed` is where a field mapping actually happens: `seed = lambda
+ctx: {"notify_slack": ctx.get("insight")}` copies whatever's currently sitting
+under the `insight` key (written by an earlier step) into `notify_slack` right
+before this step reads it — the mapping is resolved at run time, once the
+source step has actually executed, not baked in ahead of time.
 
 ## 4. Unified control layer
 
@@ -146,7 +162,77 @@ code — the web layer adds zero orchestration logic of its own, only HTTP
 plumbing and input coercion (`webapp/main.py::_coerce_inputs`, which applies
 each field's declared `type` and `default` from the manifest).
 
-## 5. Step-by-step: how this was built (and how to extend it)
+## 5. The no-code visual pipeline builder
+
+Everything through §4 assumes one fixed pipeline (automation → workflow →
+agent, in that order). The builder lets a user compose their *own* pipeline —
+any modules, any order, any number of steps — entirely from the dashboard.
+
+**Manifests declare `outputs` too, not just `inputs`.** `outputs: [{name,
+label}]` names the keys a module's `run()` meaningfully writes into context
+(e.g. `fetch_raw_metrics` declares `raw_metrics`). This is purely descriptive —
+nothing enforces that a module's return dict matches its declared outputs — it
+exists so the builder's "map from an earlier step" dropdown has something to
+offer. `GET /api/modules` includes `outputs` alongside `inputs` for exactly
+this reason.
+
+**A pipeline definition** (what the builder POSTs, and what ends up on disk)
+is a name/description plus an ordered list of steps, each `{tier, name,
+inputs, mappings}`:
+
+```yaml
+name: Custom Churn Chain
+slug: custom_churn_chain
+description: Built visually
+steps:
+  - tier: automation
+    name: fetch_raw_metrics
+    inputs: {signups: 128, churn: 14, revenue: 4210.5}
+    mappings: {}
+  - tier: workflow
+    name: analyze_metrics
+    inputs: {risk_threshold: 0.1}
+    mappings: {}
+  - tier: agent
+    name: churn_response_agent
+    inputs: {}
+    mappings: {notify_slack: {step: 1, output: insight}}
+```
+
+A field is either in `inputs` (a literal, same as a module card's form) or in
+`mappings` (sourced from an earlier step's declared output) — never both.
+`webapp/main.py::_build_steps_from_definition` turns this into a list of
+`StepSpec`s: each step's `seed` merges its static `inputs` with, for every
+mapped field, `ctx.get(mapping["output"])` at the moment that step runs.
+
+**Storage and validation** (`webapp/pipelines.py`) follow the same convention
+as every other tier: `pipelines/<slug>.yaml`, one file per pipeline, plain
+enough to read, diff, and hand-edit. `validate_pipeline()` runs before
+anything is saved: every step's `(tier, name)` must resolve to a real,
+discovered module, and every mapping must reference an *earlier* step index
+whose module actually declares that output name — a typo or a forward
+reference comes back as a `400` with a specific message, not a pipeline that
+silently does the wrong thing (or crashes) when launched.
+
+**One-click save-and-launch.** `POST /api/pipelines` validates, writes the
+YAML file, and immediately launches the pipeline through the exact same
+background-thread-plus-SSE mechanism as a single-module or full-pipeline run
+(`_launch_steps`, shared with the other run endpoints) — the builder's live
+tracker, agent thought accordion, and completion toast are the *same* frontend
+code as everywhere else, just pointed at a differently-assembled step list.
+Once saved, a pipeline gets its own card in the dashboard's **Saved Pipelines**
+section (`GET /api/pipelines` to list, `POST /api/pipelines/{slug}/run` to
+relaunch it later without rebuilding it).
+
+**What this deliberately doesn't do:** step reordering (only appending and
+removing the last step — reordering would require rewriting every later
+step's mapping indices, more complexity than the builder needs right now) and
+nested-field mapping (an output like `insight` is mapped as a whole dict; there's
+no UI for "just its `risk_level` key" — the target field either wants that
+whole value or it doesn't). Both are addressable later without changing the
+storage format.
+
+## 6. Step-by-step: how this was built (and how to extend it)
 
 1. **Define the contract.** `BaseModule` with `name`, `tier`, `description`, and a
    single `run(context) -> dict` method. Every tier implements the same shape on
@@ -199,13 +285,39 @@ each field's declared `type` and `default` from the manifest).
     request thread and the client to subscribe separately.
 16. **Build the tracker, thought accordion, and toasts** (`webapp/static/app.js`,
     `styles.css`) on top of that stream via `EventSource`.
-17. **Extend from here:** to add a real module, drop a `<name>.py` + `<name>.yaml`
+17. **Add `StepSpec` to the orchestrator** (`engine/orchestrator.py`): a
+    module plus a `seed(context) -> dict` function run right before it, so a
+    pipeline step can pull static values *and* values mapped from an earlier
+    step's output — without this, a heterogeneous, user-composed pipeline has
+    no way to feed differently-named fields into each other.
+18. **Tag events with a step `index`**, not just `tier`/`name` — needed the
+    moment a pipeline can legitimately contain the same module twice.
+19. **Add `outputs` to manifests** (mirroring `inputs`) so the builder knows
+    what's available to map from at each point in a pipeline.
+20. **Build pipeline storage + validation** (`webapp/pipelines.py`): the same
+    `pipelines/<slug>.yaml` convention as every other tier folder, with
+    `validate_pipeline()` checking every module reference and mapping before
+    anything is saved or run.
+21. **Wire save-and-launch + re-run endpoints** (`webapp/main.py`): `POST
+    /api/pipelines` (validate, save, launch) and `POST
+    /api/pipelines/{slug}/run` (relaunch a saved one), both reusing
+    `_build_steps_from_definition` + the existing background-thread/SSE
+    launch path — no new execution mechanism needed.
+22. **Build the visual sequencer** (`webapp/static/app.js`, `index.html`,
+    `styles.css`): a step-by-step builder UI where each field gets a
+    "static value vs. map from Step N" dropdown, reusing the same tracker/
+    thought-accordion/toast code the rest of the dashboard already had.
+23. **Add pipeline tests** (`tests/test_pipelines.py`): save-and-launch end to
+    end, a mapping actually changing a module's behavior (not just being
+    accepted), and both validation failure modes (unknown module, bad
+    mapping reference).
+24. **Extend from here:** to add a real module, drop a `<name>.py` + `<name>.yaml`
     pair into the right tier folder (see the README's "Adding a new module"
-    section) — it appears in both `cli.py list` and the dashboard with no
-    engine or webapp code changes. Call `context.emit(...)` from inside it if
-    you want its own progress to show up in the live tracker.
+    section) — it appears in `cli.py list`, the dashboard, and the pipeline
+    builder's module picker with no engine or webapp code changes. Declare
+    `outputs` too if you want other steps to be able to map from it.
 
-## 6. Roadmap
+## 7. Roadmap
 
 The current engine is intentionally a single-process, synchronous, SQLite-backed
 core — enough to prove the three-tier handoff and be genuinely useful for small
@@ -235,6 +347,17 @@ pipelines. Grow it only when a real need shows up:
 - **Auth on the dashboard** — the current `webapp/` has no auth layer, fine for
   local/single-user use; add it before exposing the control center beyond
   localhost.
+- **Pipeline step reordering + nested-field mapping** — the builder only
+  supports appending/removing the *last* step (reordering would invalidate
+  earlier steps' mapping indices) and maps a whole output value, not a nested
+  key within it (e.g. just `insight.risk_level`). Both are solvable without
+  changing the storage format; neither was needed to prove the mechanism.
+- **Committing saved pipelines to git automatically** — `POST /api/pipelines`
+  writes `pipelines/<slug>.yaml` to disk (so it's a normal file to `git add`
+  and commit like anything else), but it deliberately does **not** run `git
+  commit`/`push` itself. Auto-committing from a live web handler is a bigger
+  trust boundary than a local save — add it explicitly, behind its own opt-in,
+  if that's actually wanted later.
 
 Each step above is additive — none require rewriting `BaseModule`, the manifest
 format, or the example modules.

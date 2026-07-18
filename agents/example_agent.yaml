@@ -13,3 +13,6 @@ inputs:
     label: Notify Slack channel
     type: toggle
     default: false
+outputs:
+  - name: agent_decision
+    label: Agent Decision

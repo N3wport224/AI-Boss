@@ -20,9 +20,10 @@ from fastapi.responses import FileResponse, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 
-from engine import Orchestrator, StateStore, discover
+from engine import Orchestrator, StateStore, StepSpec, discover
 from engine.registry import instantiate, load_manifests
 
+from . import pipelines as pipeline_store
 from .events import RunEventBus
 
 ROOT = Path(__file__).resolve().parent.parent
@@ -40,6 +41,24 @@ bus = RunEventBus()
 
 class RunRequest(BaseModel):
     inputs: dict[str, Any] = {}
+
+
+class MappingSpec(BaseModel):
+    step: int
+    output: str
+
+
+class PipelineStepSpec(BaseModel):
+    tier: str
+    name: str
+    inputs: dict[str, Any] = {}
+    mappings: dict[str, MappingSpec] = {}
+
+
+class PipelineDefinition(BaseModel):
+    name: str
+    description: str = ""
+    steps: list[PipelineStepSpec]
 
 
 def _manifest_by_name(tier: str, name: str) -> dict:
@@ -83,6 +102,35 @@ def _run_in_background(orchestrator: Orchestrator, inputs: dict, stream_id: int)
     threading.Thread(target=worker, daemon=True).start()
 
 
+def _build_steps_from_definition(definition: dict) -> list[StepSpec]:
+    """Turn a saved pipeline definition into StepSpecs, wiring each field mapping
+    to read from whatever context key the source step's output actually landed
+    under — resolved at run time, once that earlier step has actually executed.
+    """
+    steps = []
+    for step in definition["steps"]:
+        manifest = _manifest_by_name(step["tier"], step["name"])
+        module = instantiate(manifest["entrypoint"])
+        static_inputs = _coerce_inputs(manifest, step.get("inputs") or {})
+        mappings = step.get("mappings") or {}
+
+        def seed(ctx, static=static_inputs, maps=mappings):
+            resolved = dict(static)
+            for field, mapping in maps.items():
+                resolved[field] = ctx.get(mapping["output"])
+            return resolved
+
+        steps.append(StepSpec(module=module, seed=seed))
+    return steps
+
+
+def _launch_steps(steps: list[StepSpec]) -> int:
+    orchestrator = Orchestrator(steps, state_store=store, stop_on_error=False)
+    stream_id = bus.create()
+    _run_in_background(orchestrator, {}, stream_id)
+    return stream_id
+
+
 @app.get("/api/modules")
 def list_modules():
     result = {}
@@ -98,6 +146,7 @@ def list_modules():
                     "tier": tier,
                     "description": manifest.get("description", ""),
                     "inputs": manifest.get("inputs", []),
+                    "outputs": manifest.get("outputs", []),
                     "status": "error" if last_success is False else "ready",
                 }
             )
@@ -122,6 +171,39 @@ def run_pipeline(request: RunRequest):
     orchestrator = Orchestrator(_build_pipeline(), state_store=store, stop_on_error=False)
     stream_id = bus.create()
     _run_in_background(orchestrator, request.inputs, stream_id)
+    return {"stream_id": stream_id}
+
+
+@app.get("/api/pipelines")
+def list_saved_pipelines():
+    return pipeline_store.list_pipelines()
+
+
+@app.post("/api/pipelines")
+def save_and_launch_pipeline(definition: PipelineDefinition):
+    """One-click save-and-launch for a pipeline built in the visual sequencer:
+    persists it to pipelines/<slug>.yaml (the same convention as every other
+    module folder) and immediately runs it through the same background-thread
+    + SSE mechanism as any other run."""
+    try:
+        saved = pipeline_store.save_pipeline(definition.model_dump(), TIER_DIRS)
+    except pipeline_store.PipelineValidationError as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
+
+    steps = _build_steps_from_definition(saved)
+    stream_id = _launch_steps(steps)
+    return {"pipeline": saved, "stream_id": stream_id}
+
+
+@app.post("/api/pipelines/{slug}/run")
+def run_saved_pipeline(slug: str):
+    try:
+        definition = pipeline_store.load_pipeline(slug)
+    except FileNotFoundError:
+        raise HTTPException(status_code=404, detail=f"No saved pipeline named '{slug}'.")
+
+    steps = _build_steps_from_definition(definition)
+    stream_id = _launch_steps(steps)
     return {"stream_id": stream_id}
 
 

@@ -24,6 +24,7 @@ def load_manifests(directory: Path) -> list[dict]:
     for manifest_path in sorted(Path(directory).glob("*.yaml")):
         manifest = yaml.safe_load(manifest_path.read_text()) or {}
         manifest.setdefault("inputs", [])
+        manifest.setdefault("outputs", [])
         manifests.append(manifest)
     return manifests
 

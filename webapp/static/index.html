@@ -21,11 +21,51 @@
         <span class="legend-item"><i class="dot dot-running"></i>Running</span>
         <span class="legend-item"><i class="dot dot-error"></i>Error</span>
       </div>
+      <button id="builder-toggle" class="btn btn-secondary" type="button">+ New Pipeline</button>
       <button id="run-pipeline-btn" class="btn btn-primary">Run Full Pipeline</button>
     </div>
   </header>
 
   <main id="app">
+    <section class="builder-section">
+      <div class="builder-header">
+        <h2>Visual Pipeline Builder</h2>
+        <p class="card-desc">Chain any automations, workflows, and agents into a custom sequence — no code.</p>
+      </div>
+      <div id="builder-panel" class="builder-panel hidden">
+        <div class="form-fields">
+          <div class="field">
+            <label for="builder-name">Pipeline name</label>
+            <input type="text" id="builder-name" placeholder="e.g. weekly_churn_response" />
+          </div>
+          <div class="field">
+            <label for="builder-description">Description</label>
+            <input type="text" id="builder-description" placeholder="What does this pipeline do?" />
+          </div>
+        </div>
+
+        <div id="builder-steps" class="builder-steps"></div>
+        <button id="builder-add-step" class="btn btn-run" type="button">+ Add Step</button>
+
+        <p id="builder-error" class="builder-error hidden"></p>
+
+        <div class="builder-actions">
+          <button id="builder-launch" class="btn btn-primary" type="button">Save &amp; Launch</button>
+        </div>
+
+        <div class="tracker hidden" id="builder-tracker"></div>
+        <div class="result-panel hidden" id="builder-result"></div>
+      </div>
+    </section>
+
+    <section class="tier-section tier-pipeline hidden" id="saved-pipelines-section">
+      <div class="tier-heading">
+        <span class="bar"></span>
+        <h2>Saved Pipelines</h2>
+      </div>
+      <div class="card-grid" id="saved-pipelines-grid"></div>
+    </section>
+
     <div id="pipeline-result" class="pipeline-result hidden"></div>
     <div id="sections"></div>
   </main>

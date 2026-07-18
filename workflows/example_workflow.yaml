@@ -8,3 +8,6 @@ inputs:
     label: Risk threshold
     type: number
     default: 0.1
+outputs:
+  - name: insight
+    label: Churn Insight

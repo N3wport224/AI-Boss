@@ -16,3 +16,6 @@ inputs:
     label: Revenue ($)
     type: number
     default: 4210.50
+outputs:
+  - name: raw_metrics
+    label: Raw Metrics
