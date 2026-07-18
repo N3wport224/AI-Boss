@@ -10,9 +10,41 @@ from pathlib import Path
 
 import yaml
 
+from engine.redaction import _is_secret_key
 from engine.registry import instantiate, load_manifests
 
 OPTIONAL_ENV_KEYS = ["ANTHROPIC_API_KEY"]
+
+
+def environment_report(env_example_path: Path) -> list[dict]:
+    """One entry per environment variable the project declares (the keys in
+    .env.example plus anything the health check watches): whether it's set,
+    and a safe preview. Secret-shaped names (per the same key heuristic the
+    redactor uses) only ever reveal their length — everything else shows its
+    actual value, since LOG_LEVEL=INFO isn't worth hiding."""
+    declared: list[str] = []
+    if env_example_path.exists():
+        for line in env_example_path.read_text().splitlines():
+            line = line.strip()
+            if not line or line.startswith("#") or "=" not in line:
+                continue
+            declared.append(line.split("=", 1)[0].strip())
+    for key in OPTIONAL_ENV_KEYS:
+        if key not in declared:
+            declared.append(key)
+
+    entries = []
+    for key in declared:
+        value = os.environ.get(key)
+        is_secret = _is_secret_key(key)
+        if not value:
+            preview = None
+        elif is_secret:
+            preview = f"set ({len(value)} characters, hidden)"
+        else:
+            preview = value
+        entries.append({"name": key, "set": bool(value), "secret": is_secret, "preview": preview})
+    return entries
 
 
 def _check_manifests(tier_dirs: dict) -> tuple[bool, str]:

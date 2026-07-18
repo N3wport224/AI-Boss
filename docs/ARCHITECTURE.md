@@ -656,6 +656,107 @@ only a JSON parse error or timeout falls back to an empty issue list.
     level, two separate pipeline launches) sharing one `StateStore`, and
     restore's additive/idempotent guarantee (restoring twice inserts
     nothing new; an existing key is never clobbered). 100 tests total.
+64. **Add a generic HTTP request automation** (`automations/http_request.py`
+    + manifest): calls any user-supplied URL via `httpx` (already in the
+    dependency tree for FastAPI's test client — no new dependency) with
+    per-run method/headers/body/timeout. A non-2xx response is a *result*
+    (`http_response.ok: false`), not an exception — only unreachable hosts,
+    timeouts, or malformed inputs raise, and the raised message includes
+    the method + URL (httpx's own "[Errno 111] Connection refused" doesn't
+    say *what* couldn't be reached). Introduced a new manifest key,
+    `include_in_full_pipeline: false`, so a module that makes real outbound
+    calls can opt out of the fixed one-click demo pipeline while staying
+    runnable standalone and in hand-built pipelines — the demo pipeline
+    stays fast, deterministic, and offline.
+65. **Add conditional (skip-unless) pipeline steps**
+    (`engine/conditions.py`'s `evaluate_condition` + `OPERATORS`;
+    `StepSpec.condition`/`condition_label`; a `step_skipped` event; a
+    `condition: {source, operator, value}` key per saved-pipeline step; a
+    **Run only if…** row per builder step): the condition is evaluated
+    right before the step would seed and run — false means skip (no seed,
+    no run, no StepRecord), never failure, and the run continues.
+    Evaluation is deliberately total: numeric-looking values compare as
+    numbers (everything the dashboard sends is text), a missing key or
+    type mismatch is just false, and a condition callable that *raises*
+    counts as false (skipping is the safe failure mode for a broken
+    condition). Conditions reference context keys, never step indexes, so
+    the builder's reorder/remove logic needs no condition rewiring — unlike
+    mappings. Parallel-group branches accept conditions at the engine level
+    too (a skipped branch neither seeds nor runs, and a skipped failing
+    branch doesn't fail its group).
+66. **Add a per-module circuit breaker** (`module_health` table +
+    `record_module_failure`/`record_module_success`/`reset_breaker` in
+    `StateStore`; `_record_breaker_event` observing every run's
+    step_completed/step_failed events in `webapp/main.py`; `GET
+    /api/breakers`, `POST /api/breakers/{tier}/{name}/reset`): N
+    *consecutive* failures (default 3, per-module
+    `circuit_breaker_threshold` manifest override) trips the breaker, and
+    every launch path — module run, full pipeline, saved pipelines,
+    schedules — then refuses with a 409 naming the tripped module. A
+    success resets the streak but never closes an open breaker (only an
+    explicit reset does, so a flaky module can't re-arm itself); a
+    schedule blocked by a breaker records that as its `last_status` via
+    the scheduler's existing exception handling rather than silently not
+    running. Deliberately excluded from backup snapshots: breaker state is
+    transient health data about *this* install's recent runs, not durable
+    work product.
+67. **Add XLSX run-history export** (`GET /api/runs.xlsx`, `openpyxl` —
+    imported lazily inside the endpoint so serving the dashboard never
+    pays for it): same runs as the CSV export plus a second **Steps**
+    sheet (run_id, module, tier, success, error, timestamps) — per-step
+    detail is the one thing the flat CSV genuinely can't carry, which is
+    what justifies the second format existing at all.
+68. **Add full-text search across run history** (`StateStore.search_steps`,
+    `GET /api/runs/search`, a search box in Recent Runs): case-insensitive
+    `LIKE` over every recorded step's output JSON and error text, newest
+    first, each hit carrying a ±60-char snippet and which side
+    (`output`/`error`) matched. No post-hoc redaction needed: step outputs
+    are redacted *before* they're logged (entry 52), so the stored text —
+    and therefore any snippet of it — is already safe. Declared before the
+    `/api/runs/{run_id}` route so FastAPI matches `/api/runs/search`
+    correctly.
+69. **Add an environment/config viewer** (`health.environment_report`, `GET
+    /api/environment`, an **Environment & Config** dashboard section):
+    `.env.example` is treated as the source of truth for which env vars
+    the project declares; each is reported set/missing, with values shown
+    verbatim for non-secret names but only *length* for secret-shaped ones
+    (reusing the redactor's key heuristic — the page never receives the
+    actual secret). Alongside: the live values of the app's operational
+    knobs (step timeout, breaker threshold, rate limit, upload cap, cache
+    age, watcher/scheduler intervals, SSE retention, DB path), read from
+    the running objects rather than restating constants.
+70. **Expose `ParallelGroup` in the visual builder** (closing the roadmap
+    gap flagged in Batch 5): a saved-pipeline step can now be `{type:
+    "parallel", name?, branches: [module steps...]}` — validated to have
+    ≥2 branches, each branch's mappings only referencing steps strictly
+    *before* the group (branches run concurrently; there is no sibling
+    ordering to depend on). A later step's mapping may reference the
+    group's slot, offering the union of its branches' declared outputs —
+    outputs merge into the shared context either way, so resolution at
+    run time is unchanged. The builder gained **+ Add Parallel Group**,
+    per-branch module selectors/fields/mappings keyed `"slot:branch"`
+    (`getBuilderStepRef` resolves either key shape; move/remove dependency
+    checks and index rewiring iterate branch fieldSources too), and the
+    tracker renders a group header plus one indented row per branch keyed
+    by the same `index`+`branch_index` the SSE events carry. The DAG
+    endpoint renders a group as one node carrying its branch list, with
+    branch mappings aggregated onto the group's slot.
+71. **Add tests for all of Batch 6**: the HTTP module against a real
+    loopback `http.server` (headers/body echo, non-2xx-is-a-result,
+    malformed-header rejection) and through the real module-run endpoint;
+    condition evaluation as a table of operator cases plus engine-level
+    skip/continue/raising-condition behavior and API-level gated pipelines
+    (skip when unmet, run when met, YAML round-trip, bad-operator/missing
+    -source rejection); breaker trip/reset at store level and end-to-end
+    (three real failed runs → 409 → reset → accepted again), including
+    that a suite-level fixture resets breaker state so a tripped breaker
+    can't leak into other test files; XLSX parsed back with `openpyxl`
+    asserting both sheets and row integrity; run-history search hitting
+    outputs and error text of genuinely failed runs; environment view
+    asserting a set secret exposes its length but never its value; and
+    parallel-group pipelines saved, run (branch-tagged events asserted),
+    rejected below two branches, rejected for sibling-referencing
+    mappings, and graphed. 145 tests total.
 
 ## 9. Roadmap
 
@@ -679,14 +780,10 @@ pipelines. Grow it only when a real need shows up:
 - **Auth on the dashboard** — the current `webapp/` has no auth layer, fine for
   local/single-user use; add it before exposing the control center beyond
   localhost.
-- **`ParallelGroup` isn't exposed in the no-code visual builder** — Batch 5
-  added concurrent branch execution at the engine level
-  (`engine.ParallelGroup`), but authoring one requires writing Python
-  directly; the builder's linear step model has no UI yet for "these N
-  steps run together." A real, separate UI feature if it's ever needed.
-  Relatedly: two branches writing the same output key is undefined
-  (whichever merges back into context last wins) — there's no detection or
-  warning for this today.
+- **Parallel-branch output collisions aren't detected** — two branches of a
+  `ParallelGroup` writing the same output key is undefined (whichever
+  merges back into context last wins). The builder and validator could
+  warn when two branches declare the same output name; today they don't.
 - **Committing saved pipelines to git automatically** — `POST /api/pipelines`
   writes `pipelines/<slug>.yaml` to disk (so it's a normal file to `git add`
   and commit like anything else), but it deliberately does **not** run `git

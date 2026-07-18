@@ -10,6 +10,18 @@ const STEP_ICON = {
   running: "🟡",
   done: "🟢",
   failed: "🔴",
+  skipped: "⏭️",
+};
+
+const CONDITION_OPERATORS = ["equals", "not_equals", "contains", "gt", "lt", "truthy", "falsy"];
+const CONDITION_OPERATOR_LABELS = {
+  equals: "equals",
+  not_equals: "does not equal",
+  contains: "contains",
+  gt: "is greater than",
+  lt: "is less than",
+  truthy: "has any value",
+  falsy: "is empty/false",
 };
 
 const THEME_STORAGE_KEY = "aiboss-theme";
@@ -671,12 +683,22 @@ function createRunLog() {
 
 function logSystemEvent(log, event) {
   const ts = new Date().toLocaleTimeString();
+  const stepLabel = event.parallel
+    ? `Step ${event.index + 1} branch ${event.branch_index + 1}`
+    : `Step ${event.index + 1}`;
   if (event.kind === "step_started") {
-    log.system.push(`[${ts}] Step ${event.index + 1} (${event.tier}: ${event.name}) started`);
+    log.system.push(`[${ts}] ${stepLabel} (${event.tier}: ${event.name}) started`);
   } else if (event.kind === "step_completed") {
-    log.system.push(`[${ts}] Step ${event.index + 1} (${event.tier}: ${event.name}) completed in ${event.duration_ms}ms`);
+    log.system.push(`[${ts}] ${stepLabel} (${event.tier}: ${event.name}) completed in ${event.duration_ms}ms`);
   } else if (event.kind === "step_failed") {
-    log.system.push(`[${ts}] Step ${event.index + 1} (${event.tier}: ${event.name}) FAILED after ${event.duration_ms}ms: ${event.error}`);
+    log.system.push(`[${ts}] ${stepLabel} (${event.tier}: ${event.name}) FAILED after ${event.duration_ms}ms: ${event.error}`);
+  } else if (event.kind === "step_skipped") {
+    const why = event.condition ? ` (condition not met: ${event.condition})` : "";
+    log.system.push(`[${ts}] ${stepLabel} (${event.tier}: ${event.name}) skipped${why}`);
+  } else if (event.kind === "group_started") {
+    log.system.push(`[${ts}] Step ${event.index + 1}: parallel group "${event.name}" started (${event.branch_count} branches)`);
+  } else if (event.kind === "group_completed") {
+    log.system.push(`[${ts}] Step ${event.index + 1}: parallel group "${event.name}" finished${event.had_failure ? " with a failing branch" : ""}`);
   } else if (event.kind === "thought" || event.kind === "tool_call") {
     log.thoughts.push(`[${event.tier}: ${event.name}] ${event.kind === "tool_call" ? "🔧" : "💭"} ${event.message}`);
   }
@@ -744,22 +766,33 @@ function renderRunLogTabs(container, log, rawContext) {
 // ---- Live progress tracker + agent thought stream ----
 // Rows are keyed by *step index*, not module name — a pipeline can legitimately
 // use the same module twice, and name-keying would make both rows update together.
+// A parallel group renders one indented row per branch, keyed "index:branchIndex"
+// (the same composite the SSE events carry as index + branch_index).
+
+function trackerRowHtml(key, tier, name, label) {
+  const thoughtControls =
+    tier === "agent" ? `<button class="thought-toggle hidden" type="button" data-index="${key}">Thoughts</button>` : "";
+  const thoughtBox = tier === "agent" ? `<div class="thought-box hidden" data-index="${key}"></div>` : "";
+  return `
+    <div class="tracker-step ${key.includes(":") ? "tracker-branch" : ""}" data-tier="${tier}" data-index="${key}">
+      <span class="tracker-icon">${STEP_ICON.pending}</span>
+      <span class="tracker-label">${label}</span>
+      ${thoughtControls}
+    </div>
+    ${thoughtBox}`;
+}
 
 function renderTracker(container, steps) {
   container.innerHTML = steps
     .map((s, index) => {
-      const thoughtControls =
-        s.tier === "agent"
-          ? `<button class="thought-toggle hidden" type="button" data-index="${index}">Thoughts</button>`
-          : "";
-      const thoughtBox = s.tier === "agent" ? `<div class="thought-box hidden" data-index="${index}"></div>` : "";
-      return `
-        <div class="tracker-step" data-tier="${s.tier}" data-index="${index}">
-          <span class="tracker-icon">${STEP_ICON.pending}</span>
-          <span class="tracker-label">Step ${index + 1}: [${s.tier}] ${s.name}</span>
-          ${thoughtControls}
-        </div>
-        ${thoughtBox}`;
+      if (s.parallel) {
+        const header = `<div class="tracker-group-head">Step ${index + 1}: ⫲ ${s.name || "parallel group"} (${s.branches.length} branches)</div>`;
+        const rows = s.branches
+          .map((b, bi) => trackerRowHtml(`${index}:${bi}`, b.tier, b.name, `Branch ${bi + 1}: [${b.tier}] ${b.name}`))
+          .join("");
+        return header + rows;
+      }
+      return trackerRowHtml(String(index), s.tier, s.name, `Step ${index + 1}: [${s.tier}] ${s.name}`);
     })
     .join("");
 
@@ -771,6 +804,10 @@ function renderTracker(container, steps) {
   });
 }
 
+function trackerEventKey(event) {
+  return event.parallel ? `${event.index}:${event.branch_index}` : String(event.index);
+}
+
 function setStepStatus(container, index, status, error) {
   const row = container.querySelector(`.tracker-step[data-index="${index}"]`);
   if (!row) return;
@@ -778,6 +815,7 @@ function setStepStatus(container, index, status, error) {
   icon.textContent = STEP_ICON[status];
   icon.classList.toggle("spin", status === "running");
   row.classList.toggle("failed", status === "failed");
+  row.classList.toggle("skipped", status === "skipped");
   if (error) row.title = error;
 
   if (row.dataset.tier === "agent" && status === "running") {
@@ -798,14 +836,17 @@ function appendThought(container, index, kind, message) {
 }
 
 function handleTrackerEvent(container, event) {
+  const key = trackerEventKey(event);
   if (event.kind === "step_started") {
-    setStepStatus(container, event.index, "running");
+    setStepStatus(container, key, "running");
   } else if (event.kind === "step_completed") {
-    setStepStatus(container, event.index, "done");
-    recordStepDuration(container, event.index, event.duration_ms);
+    setStepStatus(container, key, "done");
+    recordStepDuration(container, key, event.duration_ms);
   } else if (event.kind === "step_failed") {
-    setStepStatus(container, event.index, "failed", event.error);
-    recordStepDuration(container, event.index, event.duration_ms);
+    setStepStatus(container, key, "failed", event.error);
+    recordStepDuration(container, key, event.duration_ms);
+  } else if (event.kind === "step_skipped") {
+    setStepStatus(container, key, "skipped", event.condition ? `Skipped — condition not met: ${event.condition}` : "Skipped");
   } else if (event.kind === "thought" || event.kind === "tool_call") {
     appendThought(container, event.index, event.kind, event.message);
   }
@@ -879,21 +920,30 @@ function renderCard(module) {
     ? `<div class="form-fields">${module.inputs.map((f) => renderField(module.tier, module.name, f, module.inputs)).join("")}</div>`
     : "";
 
+  const tripped = module.breaker?.tripped;
+  const breakerHtml = tripped
+    ? `<div class="breaker-banner">
+         ⛔ Circuit breaker open — ${module.breaker.consecutive_failures} consecutive failure${module.breaker.consecutive_failures === 1 ? "" : "s"} (trips at ${module.breaker.threshold}). Runs are blocked.
+         <button class="btn breaker-reset-btn" data-tier="${module.tier}" data-name="${module.name}" type="button">Reset breaker</button>
+       </div>`
+    : "";
+
   return `
-    <div class="card" id="${cardId}" data-search-text="${searchText}">
+    <div class="card ${tripped ? "breaker-tripped" : ""}" id="${cardId}" data-search-text="${searchText}">
       <div class="card-head">
         <h3 class="card-title">${module.name}</h3>
         <div class="card-head-actions">
           ${favoriteButtonHtml(favKey)}
           <button class="code-toggle" data-tier="${module.tier}" data-name="${module.name}" type="button" title="View source">&lt;/&gt;</button>
-          <div class="status-slot">${statusPill(module.status)}</div>
+          <div class="status-slot">${tripped ? statusPill("tripped") : statusPill(module.status)}</div>
         </div>
       </div>
       <p class="card-desc">${module.description}</p>
+      ${breakerHtml}
       <div class="code-panel hidden"></div>
       ${fieldsHtml}
       <div class="run-row">
-        <button class="btn btn-run" data-tier="${module.tier}" data-name="${module.name}">Run</button>
+        <button class="btn btn-run" data-tier="${module.tier}" data-name="${module.name}" ${tripped ? "disabled" : ""}>Run</button>
         <label class="force-refresh-toggle" title="Skip the cached result (if any) and run fresh">
           <input type="checkbox" class="force-refresh-check" id="refresh__${cardId}" />
           Force refresh
@@ -978,6 +1028,18 @@ function renderSections(modulesByTier) {
   });
   sectionsEl.querySelectorAll(".code-toggle").forEach((btn) => {
     btn.addEventListener("click", () => toggleModuleSource(btn.dataset.tier, btn.dataset.name));
+  });
+  sectionsEl.querySelectorAll(".breaker-reset-btn").forEach((btn) => {
+    btn.addEventListener("click", async () => {
+      try {
+        const res = await fetch(`/api/breakers/${btn.dataset.tier}/${btn.dataset.name}/reset`, { method: "POST" });
+        if (!res.ok) throw new Error((await res.json()).detail || `HTTP ${res.status}`);
+        showToast(`Circuit breaker reset for ${btn.dataset.name}.`, "success");
+        await loadModules(); // re-render: banner gone, Run re-enabled
+      } catch (err) {
+        showToast(`Reset failed: ${err.message}`, "error");
+      }
+    });
   });
   wireFavoriteToggles(sectionsEl);
   wireVariableChips(sectionsEl);
@@ -1137,7 +1199,41 @@ runPipelineBtn.addEventListener("click", runFullPipeline);
 // ---- No-code visual pipeline builder ----
 
 function blankBuilderStep() {
+  return { tier: "", name: "", module: null, fieldSources: {}, condition: null };
+}
+
+function blankBuilderBranch() {
   return { tier: "", name: "", module: null, fieldSources: {} };
+}
+
+function blankBuilderGroup() {
+  // Two empty branches: the backend refuses a group with fewer than two, and
+  // an empty group would be pointless anyway.
+  return { parallel: true, name: "", branches: [blankBuilderBranch(), blankBuilderBranch()] };
+}
+
+// Resolve a builder step key — "2" for a top-level step, "2:1" for branch 1
+// of the group in slot 2 — to the object whose module/fieldSources it owns.
+function getBuilderStepRef(key) {
+  const [i, b] = String(key).split(":");
+  const step = builderSteps[Number(i)];
+  return b === undefined ? step : step.branches[Number(b)];
+}
+
+// Every fieldSources map in the whole builder — top-level module steps plus
+// every group branch — for mapping-dependency checks and index rewiring.
+// Mappings always reference *top-level* slot indexes, wherever they live.
+function allBuilderFieldSources() {
+  const result = [];
+  for (const step of builderSteps) {
+    if (step.parallel) for (const branch of step.branches) result.push(branch.fieldSources || {});
+    else result.push(step.fieldSources || {});
+  }
+  return result;
+}
+
+function stepFieldSourceMaps(step) {
+  return step.parallel ? step.branches.map((b) => b.fieldSources || {}) : [step.fieldSources || {}];
 }
 
 function defaultFieldSources(module) {
@@ -1154,17 +1250,16 @@ function moveBuilderStep(from, to) {
   const earlierIndex = Math.min(from, to);
   const laterIndex = Math.max(from, to);
 
-  const stepMovingToEarlierSlot = builderSteps[laterIndex].fieldSources || {};
-  const dependsOnStepAbove = Object.values(stepMovingToEarlierSlot).some(
-    (source) => source.type === "mapping" && source.step === earlierIndex
+  const dependsOnStepAbove = stepFieldSourceMaps(builderSteps[laterIndex]).some((sources) =>
+    Object.values(sources).some((source) => source.type === "mapping" && source.step === earlierIndex)
   );
   if (dependsOnStepAbove) {
     showBuilderError("Can't move this step above a step it maps a field from.");
     return;
   }
 
-  for (const step of builderSteps) {
-    for (const source of Object.values(step.fieldSources || {})) {
+  for (const sources of allBuilderFieldSources()) {
+    for (const source of Object.values(sources)) {
       if (source.type !== "mapping") continue;
       if (source.step === earlierIndex) source.step = laterIndex;
       else if (source.step === laterIndex) source.step = earlierIndex;
@@ -1184,15 +1279,19 @@ function removeBuilderStep(index) {
   if (builderSteps.length <= 1) return;
 
   const hasDependents = builderSteps.some(
-    (step, i) => i !== index && Object.values(step.fieldSources || {}).some((source) => source.type === "mapping" && source.step === index)
+    (step, i) =>
+      i !== index &&
+      stepFieldSourceMaps(step).some((sources) =>
+        Object.values(sources).some((source) => source.type === "mapping" && source.step === index)
+      )
   );
   if (hasDependents) {
     showBuilderError("Can't remove this step — another step maps a field from it.");
     return;
   }
 
-  for (const step of builderSteps) {
-    for (const source of Object.values(step.fieldSources || {})) {
+  for (const sources of allBuilderFieldSources()) {
+    for (const source of Object.values(sources)) {
       if (source.type === "mapping" && source.step > index) {
         source.step -= 1;
       }
@@ -1203,9 +1302,10 @@ function removeBuilderStep(index) {
   renderBuilder();
 }
 
-function renderBuilderField(stepIndex, field, source, priorOutputs) {
-  const controlId = `bfield__${stepIndex}__${field.name}`;
-  const srcId = `bsrc__${stepIndex}__${field.name}`;
+function renderBuilderField(stepKey, field, source, priorOutputs) {
+  const idKey = String(stepKey).replace(":", "-"); // ids stay selector-safe; data-step keeps the raw key
+  const controlId = `bfield__${idKey}__${field.name}`;
+  const srcId = `bsrc__${idKey}__${field.name}`;
   const isMapped = source.type === "mapping";
 
   const sourceOptions = ['<option value="static">Static value</option>']
@@ -1220,7 +1320,7 @@ function renderBuilderField(stepIndex, field, source, priorOutputs) {
 
   const control = isMapped
     ? `<div class="mapping-tag">↳ Step ${source.step + 1}: ${source.output}${source.nestedPath ? `.${source.nestedPath}` : ""}</div>
-       <input type="text" class="nested-path-input" data-step="${stepIndex}" data-field="${field.name}"
+       <input type="text" class="nested-path-input" data-step="${stepKey}" data-field="${field.name}"
               placeholder="nested key (optional, e.g. risk_level)" value="${source.nestedPath || ""}" />`
     : renderControl(controlId, field, source.value);
 
@@ -1231,47 +1331,132 @@ function renderBuilderField(stepIndex, field, source, priorOutputs) {
     <div class="field builder-field">
       <label>${field.label || field.name}</label>
       <div class="mapping-row">
-        <select class="source-select" id="${srcId}" data-step="${stepIndex}" data-field="${field.name}">${sourceOptions}</select>
+        <select class="source-select" id="${srcId}" data-step="${stepKey}" data-field="${field.name}">${sourceOptions}</select>
         <div class="mapping-control">${control}</div>
       </div>
       ${chips}
     </div>`;
 }
 
-function renderBuilderStep(index, step) {
-  const priorOutputs = builderSteps.slice(0, index).flatMap((s, i) =>
-    (s.module?.outputs || []).map((o) => ({ stepIndex: i, name: o.name, label: o.label || o.name }))
-  );
-
-  const moduleOptions = ['<option value="">Select a module…</option>']
+function moduleOptionsHtml(selectedTier, selectedName) {
+  return ['<option value="">Select a module…</option>']
     .concat(
       TIER_ORDER.flatMap((tier) =>
         (currentModulesByTier[tier] || []).map(
           (m) =>
-            `<option value="${tier}::${m.name}"${step.tier === tier && step.name === m.name ? " selected" : ""}>[${tier}] ${m.name}</option>`
+            `<option value="${tier}::${m.name}"${selectedTier === tier && selectedName === m.name ? " selected" : ""}>[${tier}] ${m.name}</option>`
         )
       )
     )
     .join("");
+}
 
-  const fieldsHtml = step.module
-    ? step.module.inputs.map((field) => renderBuilderField(index, field, step.fieldSources[field.name], priorOutputs)).join("")
-    : '<p class="card-desc">Pick a module above to configure its inputs.</p>';
+// Outputs available to a step in slot `index`: every earlier top-level step's
+// declared outputs — for a parallel group, the union of its branches'.
+function priorOutputsForSlot(index) {
+  const outputs = [];
+  builderSteps.slice(0, index).forEach((s, i) => {
+    const modules = s.parallel ? s.branches.map((b) => b.module).filter(Boolean) : s.module ? [s.module] : [];
+    for (const m of modules) {
+      for (const o of m.outputs || []) outputs.push({ stepIndex: i, name: o.name, label: o.label || o.name });
+    }
+  });
+  return outputs;
+}
 
+function stepControlsHtml(index) {
   const canRemove = builderSteps.length > 1;
   const canMoveUp = index > 0;
   const canMoveDown = index < builderSteps.length - 1;
+  return `
+    <button class="move-step-btn" data-index="${index}" data-dir="up" type="button" title="Move step up" ${canMoveUp ? "" : "disabled"}>▲</button>
+    <button class="move-step-btn" data-index="${index}" data-dir="down" type="button" title="Move step down" ${canMoveDown ? "" : "disabled"}>▼</button>
+    ${canRemove ? `<button class="remove-step-btn" data-index="${index}" type="button" title="Remove step">×</button>` : ""}`;
+}
+
+function renderBuilderGroup(index, step) {
+  const priorOutputs = priorOutputsForSlot(index);
+
+  const branchesHtml = step.branches
+    .map((branch, bi) => {
+      const key = `${index}:${bi}`;
+      const fieldsHtml = branch.module
+        ? branch.module.inputs.map((f) => renderBuilderField(key, f, branch.fieldSources[f.name], priorOutputs)).join("")
+        : '<p class="card-desc">Pick a module for this branch.</p>';
+      const canRemoveBranch = step.branches.length > 2;
+      return `
+        <div class="builder-branch">
+          <div class="builder-step-head">
+            <span class="branch-badge">${String.fromCharCode(97 + bi)}</span>
+            <select class="module-select" data-index="${key}">${moduleOptionsHtml(branch.tier, branch.name)}</select>
+            ${canRemoveBranch ? `<button class="remove-branch-btn" data-index="${key}" type="button" title="Remove branch">×</button>` : ""}
+          </div>
+          <div class="builder-step-fields">${fieldsHtml}</div>
+        </div>`;
+    })
+    .join("");
+
+  return `
+    <div class="builder-step builder-group" data-index="${index}">
+      <div class="builder-step-head">
+        <span class="step-badge group-badge">${index + 1}</span>
+        <span class="group-label">⫲ Parallel group</span>
+        <input type="text" class="group-name-input" data-index="${index}" placeholder="group name (optional)" value="${step.name || ""}" />
+        ${stepControlsHtml(index)}
+      </div>
+      <p class="card-desc group-hint">Branches run at the same time and must not depend on each other — each may map fields from steps <em>above</em> this group only.</p>
+      <div class="builder-branches">${branchesHtml}</div>
+      <button class="btn btn-secondary btn-small add-branch-btn" data-index="${index}" type="button">+ Add branch</button>
+    </div>`;
+}
+
+function renderBuilderStep(index, step) {
+  if (step.parallel) return renderBuilderGroup(index, step);
+
+  const priorOutputs = priorOutputsForSlot(index);
+  const fieldsHtml = step.module
+    ? step.module.inputs.map((field) => renderBuilderField(index, field, step.fieldSources[field.name], priorOutputs)).join("")
+    : '<p class="card-desc">Pick a module above to configure its inputs.</p>';
 
   return `
     <div class="builder-step" data-index="${index}">
       <div class="builder-step-head">
         <span class="step-badge">${index + 1}</span>
-        <select class="module-select" data-index="${index}">${moduleOptions}</select>
-        <button class="move-step-btn" data-index="${index}" data-dir="up" type="button" title="Move step up" ${canMoveUp ? "" : "disabled"}>▲</button>
-        <button class="move-step-btn" data-index="${index}" data-dir="down" type="button" title="Move step down" ${canMoveDown ? "" : "disabled"}>▼</button>
-        ${canRemove ? `<button class="remove-step-btn" data-index="${index}" type="button" title="Remove step">×</button>` : ""}
+        <select class="module-select" data-index="${index}">${moduleOptionsHtml(step.tier, step.name)}</select>
+        ${stepControlsHtml(index)}
       </div>
+      ${step.module ? renderBuilderCondition(index, step) : ""}
       <div class="builder-step-fields">${fieldsHtml}</div>
+    </div>`;
+}
+
+// The optional skip-unless-condition row for one builder step. Conditions
+// reference context *keys* (strings resolved at run time), never step indexes,
+// so reordering or removing other steps needs no condition rewiring — unlike
+// mappings, which point at a specific earlier step.
+function renderBuilderCondition(index, step) {
+  const cond = step.condition;
+  const enabled = cond !== null && cond !== undefined;
+  const operator = cond?.operator || "equals";
+  const needsValue = !["truthy", "falsy"].includes(operator);
+
+  const operatorOptions = CONDITION_OPERATORS.map(
+    (op) => `<option value="${op}"${op === operator ? " selected" : ""}>${CONDITION_OPERATOR_LABELS[op]}</option>`
+  ).join("");
+
+  const controls = enabled
+    ? `<input type="text" class="condition-source" data-index="${index}" placeholder="context key, e.g. insight.risk_level" value="${cond.source || ""}" />
+       <select class="condition-operator" data-index="${index}">${operatorOptions}</select>
+       ${needsValue ? `<input type="text" class="condition-value" data-index="${index}" placeholder="value" value="${cond.value ?? ""}" />` : ""}`
+    : "";
+
+  return `
+    <div class="builder-condition ${enabled ? "active" : ""}">
+      <label class="condition-enable-label">
+        <input type="checkbox" class="condition-enable" data-index="${index}" ${enabled ? "checked" : ""} />
+        Run only if…
+      </label>
+      ${controls}
     </div>`;
 }
 
@@ -1281,26 +1466,45 @@ function renderBuilder() {
   wireVariableChips(builderStepsEl);
 }
 
+// A later step may have been mapping from slot `index`'s old module — its
+// outputs may no longer exist, so reset every later step's (and branch's)
+// mappings back to that module's static defaults.
+function resetMappingsAfterSlot(index) {
+  for (let i = index + 1; i < builderSteps.length; i++) {
+    const step = builderSteps[i];
+    if (step.parallel) {
+      for (const branch of step.branches) {
+        if (branch.module) branch.fieldSources = defaultFieldSources(branch.module);
+      }
+    } else if (step.module) {
+      step.fieldSources = defaultFieldSources(step.module);
+    }
+  }
+}
+
 function attachBuilderStepListeners() {
   builderStepsEl.querySelectorAll(".module-select").forEach((sel) => {
     sel.addEventListener("change", (e) => {
-      const index = Number(e.target.dataset.index);
+      const key = e.target.dataset.index;
+      const [slotStr, branchStr] = key.split(":");
+      const slot = Number(slotStr);
       const [tier, name] = e.target.value.split("::");
+      const module = tier && name ? (currentModulesByTier[tier] || []).find((m) => m.name === name) : null;
 
-      if (!tier || !name) {
-        builderSteps[index] = blankBuilderStep();
+      if (branchStr !== undefined) {
+        builderSteps[slot].branches[Number(branchStr)] = module
+          ? { tier, name, module, fieldSources: defaultFieldSources(module) }
+          : blankBuilderBranch();
+      } else if (!module) {
+        builderSteps[slot] = blankBuilderStep();
       } else {
-        const module = (currentModulesByTier[tier] || []).find((m) => m.name === name);
-        builderSteps[index] = { tier, name, module, fieldSources: defaultFieldSources(module) };
+        // A condition references context keys, not the module itself, so it
+        // survives swapping which module the step runs.
+        const condition = builderSteps[slot]?.condition ?? null;
+        builderSteps[slot] = { tier, name, module, fieldSources: defaultFieldSources(module), condition };
       }
 
-      // A later step may have been mapping from this step's old module — its
-      // outputs may no longer exist, so reset every later step's mappings.
-      for (let i = index + 1; i < builderSteps.length; i++) {
-        if (builderSteps[i].module) {
-          builderSteps[i].fieldSources = defaultFieldSources(builderSteps[i].module);
-        }
-      }
+      resetMappingsAfterSlot(slot);
       renderBuilder();
     });
   });
@@ -1308,6 +1512,30 @@ function attachBuilderStepListeners() {
   builderStepsEl.querySelectorAll(".remove-step-btn").forEach((btn) => {
     btn.addEventListener("click", (e) => {
       removeBuilderStep(Number(e.currentTarget.dataset.index));
+    });
+  });
+
+  builderStepsEl.querySelectorAll(".add-branch-btn").forEach((btn) => {
+    btn.addEventListener("click", (e) => {
+      builderSteps[Number(e.currentTarget.dataset.index)].branches.push(blankBuilderBranch());
+      renderBuilder();
+    });
+  });
+
+  builderStepsEl.querySelectorAll(".remove-branch-btn").forEach((btn) => {
+    btn.addEventListener("click", (e) => {
+      const [slotStr, branchStr] = e.currentTarget.dataset.index.split(":");
+      const step = builderSteps[Number(slotStr)];
+      if (step.branches.length <= 2) return; // groups need at least two branches
+      step.branches.splice(Number(branchStr), 1);
+      resetMappingsAfterSlot(Number(slotStr));
+      renderBuilder();
+    });
+  });
+
+  builderStepsEl.querySelectorAll(".group-name-input").forEach((input) => {
+    input.addEventListener("input", (e) => {
+      builderSteps[Number(e.target.dataset.index)].name = e.target.value;
     });
   });
 
@@ -1321,16 +1549,16 @@ function attachBuilderStepListeners() {
 
   builderStepsEl.querySelectorAll(".source-select").forEach((sel) => {
     sel.addEventListener("change", (e) => {
-      const stepIndex = Number(e.target.dataset.step);
+      const ref = getBuilderStepRef(e.target.dataset.step);
       const fieldName = e.target.dataset.field;
       const value = e.target.value;
 
       if (value === "static") {
-        const field = builderSteps[stepIndex].module.inputs.find((f) => f.name === fieldName);
-        builderSteps[stepIndex].fieldSources[fieldName] = { type: "static", value: field.default };
+        const field = ref.module.inputs.find((f) => f.name === fieldName);
+        ref.fieldSources[fieldName] = { type: "static", value: field.default };
       } else {
         const [, stepStr, output] = value.split(":");
-        builderSteps[stepIndex].fieldSources[fieldName] = { type: "mapping", step: Number(stepStr), output };
+        ref.fieldSources[fieldName] = { type: "mapping", step: Number(stepStr), output };
       }
       renderBuilder();
     });
@@ -1341,10 +1569,9 @@ function attachBuilderStepListeners() {
     const handler = (e) => {
       const wrapper = e.target.closest(".field.builder-field");
       const srcSelect = wrapper.querySelector(".source-select");
-      const stepIndex = Number(srcSelect.dataset.step);
+      const ref = getBuilderStepRef(srcSelect.dataset.step);
       const fieldName = srcSelect.dataset.field;
-      builderSteps[stepIndex].fieldSources[fieldName].value =
-        e.target.type === "checkbox" ? e.target.checked : e.target.value;
+      ref.fieldSources[fieldName].value = e.target.type === "checkbox" ? e.target.checked : e.target.value;
     };
     control.addEventListener("input", handler);
     control.addEventListener("change", handler);
@@ -1352,15 +1579,43 @@ function attachBuilderStepListeners() {
 
   builderStepsEl.querySelectorAll(".nested-path-input").forEach((input) => {
     input.addEventListener("input", (e) => {
-      const stepIndex = Number(e.target.dataset.step);
+      const ref = getBuilderStepRef(e.target.dataset.step);
       const fieldName = e.target.dataset.field;
-      const source = builderSteps[stepIndex].fieldSources[fieldName];
+      const source = ref.fieldSources[fieldName];
       source.nestedPath = e.target.value.trim();
 
       // Update the mapping-tag label in place instead of a full re-render,
       // which would steal focus from the input mid-keystroke.
       const tag = e.target.closest(".mapping-control")?.querySelector(".mapping-tag");
       if (tag) tag.textContent = `↳ Step ${source.step + 1}: ${source.output}${source.nestedPath ? `.${source.nestedPath}` : ""}`;
+    });
+  });
+
+  builderStepsEl.querySelectorAll(".condition-enable").forEach((box) => {
+    box.addEventListener("change", (e) => {
+      const index = Number(e.target.dataset.index);
+      builderSteps[index].condition = e.target.checked ? { source: "", operator: "equals", value: "" } : null;
+      renderBuilder();
+    });
+  });
+
+  builderStepsEl.querySelectorAll(".condition-source").forEach((input) => {
+    input.addEventListener("input", (e) => {
+      builderSteps[Number(e.target.dataset.index)].condition.source = e.target.value.trim();
+    });
+  });
+
+  builderStepsEl.querySelectorAll(".condition-operator").forEach((sel) => {
+    sel.addEventListener("change", (e) => {
+      const index = Number(e.target.dataset.index);
+      builderSteps[index].condition.operator = e.target.value;
+      renderBuilder(); // truthy/falsy hide the value input; others show it
+    });
+  });
+
+  builderStepsEl.querySelectorAll(".condition-value").forEach((input) => {
+    input.addEventListener("input", (e) => {
+      builderSteps[Number(e.target.dataset.index)].condition.value = e.target.value;
     });
   });
 }
@@ -1389,6 +1644,12 @@ builderAddStepBtn.addEventListener("click", () => {
   renderBuilder();
 });
 
+document.getElementById("builder-add-group").addEventListener("click", () => {
+  if (builderPanelEl.classList.contains("hidden")) openBuilder();
+  builderSteps.push(blankBuilderGroup());
+  renderBuilder();
+});
+
 function showBuilderError(message) {
   builderErrorEl.textContent = message;
   builderErrorEl.classList.remove("hidden");
@@ -1399,11 +1660,19 @@ builderLaunchBtn.addEventListener("click", async () => {
 
   const name = builderNameEl.value.trim();
   if (!name) return showBuilderError("Pipeline name is required.");
-  if (builderSteps.length === 0 || builderSteps.some((s) => !s.module)) {
-    return showBuilderError("Every step needs a module selected.");
+  if (builderSteps.length === 0) return showBuilderError("Every step needs a module selected.");
+  for (const s of builderSteps) {
+    if (s.parallel) {
+      if (s.branches.some((b) => !b.module)) return showBuilderError("Every parallel branch needs a module selected.");
+    } else if (!s.module) {
+      return showBuilderError("Every step needs a module selected.");
+    }
+  }
+  if (builderSteps.some((s) => !s.parallel && s.condition && !s.condition.source.trim())) {
+    return showBuilderError("A 'Run only if' condition needs a context key to check (or untick it).");
   }
 
-  const steps = builderSteps.map((step) => {
+  const moduleStepPayload = (step) => {
     const inputs = {};
     const mappings = {};
     for (const [fieldName, source] of Object.entries(step.fieldSources)) {
@@ -1414,8 +1683,16 @@ builderLaunchBtn.addEventListener("click", async () => {
         inputs[fieldName] = source.value;
       }
     }
-    return { tier: step.tier, name: step.name, inputs, mappings };
-  });
+    const spec = { tier: step.tier, name: step.name, inputs, mappings };
+    if (step.condition) spec.condition = step.condition;
+    return spec;
+  };
+
+  const steps = builderSteps.map((step) =>
+    step.parallel
+      ? { type: "parallel", name: step.name.trim(), branches: step.branches.map(moduleStepPayload) }
+      : moduleStepPayload(step)
+  );
 
   builderLaunchBtn.disabled = true;
   builderLaunchBtn.textContent = "Launching...";
@@ -1436,7 +1713,11 @@ builderLaunchBtn.addEventListener("click", async () => {
     }
 
     const { stream_id } = await res.json();
-    const trackerSteps = builderSteps.map((s) => ({ tier: s.tier, name: s.name }));
+    const trackerSteps = builderSteps.map((s) =>
+      s.parallel
+        ? { parallel: true, name: s.name, branches: s.branches.map((b) => ({ tier: b.tier, name: b.name })) }
+        : { tier: s.tier, name: s.name }
+    );
     builderTrackerEl.classList.remove("hidden");
     builderResultEl.classList.remove("hidden");
     renderTracker(builderTrackerEl, trackerSteps);
@@ -1648,7 +1929,11 @@ async function runSavedPipeline(slug, name, pipelinesList) {
   const logContainer = card.querySelector(".log-tabs-wrap");
 
   const definition = pipelinesList.find((p) => p.slug === slug);
-  const trackerSteps = (definition?.steps || []).map((s) => ({ tier: s.tier, name: s.name }));
+  const trackerSteps = (definition?.steps || []).map((s) =>
+    s.type === "parallel"
+      ? { parallel: true, name: s.name || "", branches: (s.branches || []).map((b) => ({ tier: b.tier, name: b.name })) }
+      : { tier: s.tier, name: s.name }
+  );
 
   button.disabled = true;
   renderTracker(tracker, trackerSteps);
@@ -1867,6 +2152,51 @@ runsPurgeBtn.addEventListener("click", async () => {
   const body = await res.json();
   showToast(`Purged ${body.removed_count} old run(s) from history.`, "success");
   await refreshTelemetry();
+});
+
+// ---- Full-text search across run history (step outputs + errors) ----
+
+const runsSearchInput = document.getElementById("runs-search-input");
+const runsSearchBtn = document.getElementById("runs-search-btn");
+const runsSearchResultsEl = document.getElementById("runs-search-results");
+
+async function searchRunHistory() {
+  const query = runsSearchInput.value.trim();
+  if (!query) {
+    runsSearchResultsEl.classList.add("hidden");
+    runsSearchResultsEl.innerHTML = "";
+    return;
+  }
+
+  const res = await fetch(`/api/runs/search?q=${encodeURIComponent(query)}`);
+  const body = await res.json();
+  runsSearchResultsEl.classList.remove("hidden");
+
+  if (!body.results.length) {
+    runsSearchResultsEl.innerHTML = `<div class="runs-empty">No step outputs or errors match "${escapeHtml(query)}".</div>`;
+    return;
+  }
+
+  runsSearchResultsEl.innerHTML = body.results
+    .map(
+      (r) => `
+      <div class="runs-search-hit ${r.success ? "" : "hit-failed"}">
+        <span class="hit-meta">Run #${r.run_id} · [${r.tier}] ${r.step} · in ${r.matched_in}${r.success ? "" : " · ❌ failed step"}</span>
+        <span class="hit-snippet">…${escapeHtml(r.snippet)}…</span>
+      </div>`
+    )
+    .join("");
+}
+
+runsSearchBtn.addEventListener("click", searchRunHistory);
+runsSearchInput.addEventListener("keydown", (e) => {
+  if (e.key === "Enter") searchRunHistory();
+});
+runsSearchInput.addEventListener("input", () => {
+  if (!runsSearchInput.value.trim()) {
+    runsSearchResultsEl.classList.add("hidden");
+    runsSearchResultsEl.innerHTML = "";
+  }
 });
 
 // ---- Folder watcher (polls for auto-ingested files) ----
@@ -2112,6 +2442,52 @@ memoryClearBtn.addEventListener("click", async () => {
 
 setInterval(loadMemory, 5000);
 
+// ---- Environment & config viewer ----
+
+const envVarsListEl = document.getElementById("env-vars-list");
+const envSettingsListEl = document.getElementById("env-settings-list");
+const envRefreshBtn = document.getElementById("env-refresh-btn");
+
+async function loadEnvironment() {
+  const res = await fetch("/api/environment");
+  const body = await res.json();
+
+  envVarsListEl.className = "runs-table";
+  envVarsListEl.innerHTML = body.environment
+    .map(
+      (v) => `
+      <div class="schedule-row">
+        <div class="schedule-row-main">
+          <strong>${escapeHtml(v.name)}${v.secret ? " 🔒" : ""}</strong>
+          <span class="schedule-row-meta">${
+            v.set ? escapeHtml(v.preview) : "not set" + (v.secret ? "" : " — declared in .env.example")
+          }</span>
+        </div>
+        <span class="status-pill ${v.set ? "ready" : "error"}"><i class="dot dot-${v.set ? "ready" : "error"}"></i>${v.set ? "set" : "missing"}</span>
+      </div>`
+    )
+    .join("");
+
+  envSettingsListEl.className = "runs-table";
+  envSettingsListEl.innerHTML = body.settings
+    .map(
+      (s) => `
+      <div class="schedule-row">
+        <div class="schedule-row-main">
+          <strong>${escapeHtml(s.name)}</strong>
+          <span class="schedule-row-meta">${escapeHtml(s.detail)}</span>
+        </div>
+        <span class="env-setting-value">${escapeHtml(s.value)}</span>
+      </div>`
+    )
+    .join("");
+}
+
+envRefreshBtn.addEventListener("click", async () => {
+  await loadEnvironment();
+  showToast("Environment view refreshed.", "success");
+});
+
 // ---- Regex tester ----
 
 const regexPatternEl = document.getElementById("regex-pattern");
@@ -2190,3 +2566,4 @@ pollWatcherStatus();
 renderNotificationsPanel();
 loadSchedules();
 loadMemory();
+loadEnvironment();

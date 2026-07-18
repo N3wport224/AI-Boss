@@ -282,6 +282,40 @@ def test_runs_csv_export_has_a_header_and_rows():
     assert len(lines) >= 2
 
 
+def test_runs_xlsx_export_carries_runs_and_per_step_detail():
+    import io
+
+    from openpyxl import load_workbook
+
+    # Run something first so both sheets have at least one data row.
+    res = client.post(
+        "/api/modules/automation/fetch_raw_metrics/run",
+        json={"inputs": {"signups": 5, "churn": 1, "revenue": 10}, "force_refresh": True},
+    )
+    with client.stream("GET", f"/api/stream/{res.json()['stream_id']}") as response:
+        for line in response.iter_lines():
+            if line.startswith("data: ") and '"run_completed"' in line:
+                break
+
+    res = client.get("/api/runs.xlsx")
+    assert res.status_code == 200
+    assert "spreadsheetml" in res.headers["content-type"]
+
+    workbook = load_workbook(io.BytesIO(res.content))
+    assert workbook.sheetnames == ["Runs", "Steps"]
+
+    runs_rows = list(workbook["Runs"].values)
+    assert runs_rows[0] == ("id", "started_at", "finished_at", "status", "duration_seconds")
+    assert len(runs_rows) >= 2
+
+    steps_rows = list(workbook["Steps"].values)
+    assert steps_rows[0] == ("run_id", "step", "tier", "success", "error", "started_at", "finished_at")
+    assert len(steps_rows) >= 2
+    # Every step row's run_id points at a run present in the Runs sheet.
+    run_ids = {row[0] for row in runs_rows[1:]}
+    assert all(row[0] in run_ids for row in steps_rows[1:])
+
+
 def test_duplicate_pipeline_creates_a_distinct_copy():
     client.post(
         "/api/pipelines",
@@ -304,3 +338,86 @@ def test_duplicate_pipeline_creates_a_distinct_copy():
 def test_duplicate_unknown_pipeline_404s():
     res = client.post("/api/pipelines/does_not_exist/duplicate")
     assert res.status_code == 404
+
+
+def test_run_history_search_finds_step_outputs_and_errors():
+    # Produce a step whose output contains a distinctive marker value.
+    res = client.post(
+        "/api/modules/automation/fetch_raw_metrics/run",
+        json={"inputs": {"signups": 987654, "churn": 1, "revenue": 10}, "force_refresh": True},
+    )
+    with client.stream("GET", f"/api/stream/{res.json()['stream_id']}") as response:
+        for line in response.iter_lines():
+            if line.startswith("data: ") and '"run_completed"' in line:
+                break
+
+    hits = client.get("/api/runs/search", params={"q": "987654"}).json()
+    assert hits["query"] == "987654"
+    assert len(hits["results"]) >= 1
+    top = hits["results"][0]
+    assert top["step"] == "fetch_raw_metrics"
+    assert top["matched_in"] == "output"
+    assert "987654" in top["snippet"]
+    assert top["success"] is True
+    assert isinstance(top["run_id"], int)
+
+
+def test_run_history_search_matches_error_text_of_failed_steps():
+    res = client.post(
+        "/api/modules/automation/http_request/run",
+        json={"inputs": {"url": "http://127.0.0.1:9/search-marker-path", "timeout": 2}},
+    )
+    with client.stream("GET", f"/api/stream/{res.json()['stream_id']}") as response:
+        for line in response.iter_lines():
+            if line.startswith("data: ") and ('"run_completed"' in line or '"run_failed"' in line):
+                break
+
+    hits = client.get("/api/runs/search", params={"q": "search-marker-path"}).json()
+    assert len(hits["results"]) >= 1
+    top = hits["results"][0]
+    assert top["step"] == "http_request"
+    assert top["matched_in"] == "error"
+    assert top["success"] is False
+
+    # Leave no failure streak behind for other tests.
+    from webapp.main import store as main_store
+    main_store.reset_breaker("automation", "http_request")
+
+
+def test_run_history_search_with_blank_query_returns_nothing():
+    res = client.get("/api/runs/search", params={"q": "   "})
+    assert res.json()["results"] == []
+
+
+def test_environment_view_lists_declared_vars_and_settings(monkeypatch):
+    monkeypatch.setenv("LOG_LEVEL", "DEBUG")
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "sk-test-1234567890")
+
+    body = client.get("/api/environment").json()
+
+    env = {entry["name"]: entry for entry in body["environment"]}
+    # Everything declared in .env.example shows up.
+    assert {"ANTHROPIC_API_KEY", "DATABASE_URL", "LOG_LEVEL"} <= set(env)
+
+    # Non-secret set var shows its actual value.
+    assert env["LOG_LEVEL"]["set"] is True
+    assert env["LOG_LEVEL"]["secret"] is False
+    assert env["LOG_LEVEL"]["preview"] == "DEBUG"
+
+    # Secret-shaped set var reveals only its length, never the value.
+    key_entry = env["ANTHROPIC_API_KEY"]
+    assert key_entry["set"] is True
+    assert key_entry["secret"] is True
+    assert "sk-test" not in (key_entry["preview"] or "")
+    assert str(len("sk-test-1234567890")) in key_entry["preview"]
+
+    # Unset var is reported as missing with no preview.
+    assert env["DATABASE_URL"]["set"] is False
+    assert env["DATABASE_URL"]["preview"] is None
+
+    # Runtime settings reflect live config values.
+    settings = {s["name"]: s["value"] for s in body["settings"]}
+    assert settings["Circuit breaker threshold"] == "3"
+    assert settings["Run rate limit"] == "30 requests / 10 s"
+    assert settings["Upload / ingest size limit"] == "20 MB"
+    assert "orchestrator.db" in settings["State store"]

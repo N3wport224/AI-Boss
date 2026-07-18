@@ -24,7 +24,16 @@ from fastapi.responses import FileResponse, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 
-from engine import Orchestrator, StateStore, StepSpec, interpolate_template_fields, redact_secrets, resolve_path
+from engine import (
+    Orchestrator,
+    ParallelGroup,
+    StateStore,
+    StepSpec,
+    evaluate_condition,
+    interpolate_template_fields,
+    redact_secrets,
+    resolve_path,
+)
 from engine.registry import instantiate, load_manifests
 
 from . import cache, graph, health, ingestion, linting, perf, pipelines as pipeline_store
@@ -138,11 +147,25 @@ class MappingSpec(BaseModel):
     output: str
 
 
+class ConditionSpec(BaseModel):
+    source: str  # context key, may be a dotted path (e.g. "insight.risk_level")
+    operator: str  # one of engine.conditions.OPERATORS
+    value: Any = None  # literal to compare against (unused for truthy/falsy)
+
+
 class PipelineStepSpec(BaseModel):
-    tier: str
-    name: str
+    # A module step ({tier, name, ...}) or, when type == "parallel", a group
+    # of branches run concurrently in this slot ({type, branches, name?}).
+    tier: str = ""
+    name: str = ""
     inputs: dict[str, Any] = {}
     mappings: dict[str, MappingSpec] = {}
+    condition: Optional[ConditionSpec] = None
+    type: Optional[str] = None
+    branches: Optional[list["PipelineStepSpec"]] = None
+
+
+PipelineStepSpec.model_rebuild()
 
 
 class PipelineDefinition(BaseModel):
@@ -201,6 +224,12 @@ def _build_pipeline() -> list[StepSpec]:
         for manifest in load_manifests(TIER_DIRS[tier]):
             if not manifest.get("enabled", True):
                 continue
+            # Modules that make a real outbound call (e.g. http_request) opt
+            # out of the fixed one-click demo pipeline so it stays fast,
+            # deterministic, and offline; they're still runnable standalone
+            # and includable in any hand-built pipeline via the builder.
+            if not manifest.get("include_in_full_pipeline", True):
+                continue
             module = instantiate(manifest["entrypoint"])
             defaults = _coerce_inputs(manifest, {})
 
@@ -211,6 +240,63 @@ def _build_pipeline() -> list[StepSpec]:
     return steps
 
 
+# ---- Circuit breaker ----
+# After N *consecutive* failures (per module, threshold overridable with a
+# `circuit_breaker_threshold` manifest key) the breaker trips and every
+# launch path — module card, full pipeline, saved pipelines, schedules —
+# refuses to run that module until it's explicitly reset. A success closes
+# a failure streak but never closes an already-open breaker.
+
+DEFAULT_BREAKER_THRESHOLD = 3
+
+
+def _breaker_threshold(tier: str, name: str) -> int:
+    try:
+        manifest = _manifest_by_name(tier, name)
+    except HTTPException:
+        return DEFAULT_BREAKER_THRESHOLD
+    return int(manifest.get("circuit_breaker_threshold", DEFAULT_BREAKER_THRESHOLD))
+
+
+def _record_breaker_event(event: dict) -> None:
+    kind = event.get("kind")
+    if kind == "step_completed":
+        store.record_module_success(event["tier"], event["name"])
+    elif kind == "step_failed":
+        tier, name = event["tier"], event["name"]
+        health = store.record_module_failure(tier, name, _breaker_threshold(tier, name))
+        if health["tripped"] and health["consecutive_failures"] == _breaker_threshold(tier, name):
+            print(f"[breaker] circuit opened for {tier}/{name} after {health['consecutive_failures']} consecutive failures")
+
+
+def _module_refs_from_steps(steps: list[dict]) -> list[tuple[str, str]]:
+    """(tier, name) of every module a definition's steps would run — branches
+    of a parallel group included."""
+    refs = []
+    for step in steps:
+        if pipeline_store.is_parallel_step(step):
+            refs.extend((b["tier"], b["name"]) for b in step.get("branches") or [])
+        else:
+            refs.append((step["tier"], step["name"]))
+    return refs
+
+
+def _ensure_breakers_closed(module_refs: list[tuple[str, str]]) -> None:
+    tripped = []
+    for tier, name in dict.fromkeys(module_refs):  # de-dupe, keep order
+        health = store.get_module_health(tier, name)
+        if health["tripped"]:
+            tripped.append(f"{tier}/{name} ({health['consecutive_failures']} consecutive failures)")
+    if tripped:
+        raise HTTPException(
+            status_code=409,
+            detail=(
+                f"Circuit breaker open for {', '.join(tripped)}. "
+                "Reset it from the module card to allow runs again."
+            ),
+        )
+
+
 def _run_in_background(
     orchestrator: Orchestrator,
     inputs: dict,
@@ -219,6 +305,7 @@ def _run_in_background(
 ) -> None:
     def handle_event(event: dict) -> None:
         bus.publish(stream_id, event)
+        _record_breaker_event(event)
         if on_step_completed is not None and event.get("kind") == "step_completed":
             on_step_completed(event["output"])
 
@@ -260,27 +347,53 @@ def _replay_cached_result(tier: str, name: str, output: dict) -> dict:
     return {"stream_id": stream_id, "cached": True}
 
 
-def _build_steps_from_definition(definition: dict) -> list[StepSpec]:
-    """Turn a saved pipeline definition into StepSpecs, wiring each field mapping
-    to read from whatever context key the source step's output actually landed
-    under — resolved at run time, once that earlier step has actually executed.
-    """
+def _module_step_to_spec(step: dict) -> StepSpec:
+    """One module step's StepSpec: static inputs, run-time-resolved mappings
+    (a mapping may be a dotted path into a nested output key), template-field
+    interpolation, and an optional skip-unless condition."""
+    manifest = _manifest_by_name(step["tier"], step["name"])
+    module = instantiate(manifest["entrypoint"])
+    static_inputs = _coerce_inputs(manifest, step.get("inputs") or {})
+    mappings = step.get("mappings") or {}
+
+    def seed(ctx, static=static_inputs, maps=mappings, manifest=manifest):
+        resolved = dict(static)
+        for field, mapping in maps.items():
+            resolved[field] = resolve_path(mapping["output"], ctx.get)
+        return interpolate_template_fields(manifest, resolved, ctx.get)
+
+    condition_fn, condition_label = None, ""
+    raw_condition = step.get("condition") or None
+    if raw_condition:
+        source = raw_condition["source"]
+        operator = raw_condition["operator"]
+        value = raw_condition.get("value")
+
+        def condition_fn(ctx, source=source, operator=operator, value=value):
+            return evaluate_condition(resolve_path(source, ctx.get), operator, value)
+
+        condition_label = f"{source} {operator}" + ("" if operator in ("truthy", "falsy") else f" {value}")
+
+    return StepSpec(
+        module=module,
+        seed=seed,
+        timeout_seconds=DEFAULT_STEP_TIMEOUT_SECONDS,
+        condition=condition_fn,
+        condition_label=condition_label,
+    )
+
+
+def _build_steps_from_definition(definition: dict) -> list:
+    """Turn a saved pipeline definition into the orchestrator's step list —
+    StepSpecs for module steps, ParallelGroups (of branch StepSpecs) for
+    `type: "parallel"` steps."""
     steps = []
     for step in definition["steps"]:
-        manifest = _manifest_by_name(step["tier"], step["name"])
-        module = instantiate(manifest["entrypoint"])
-        static_inputs = _coerce_inputs(manifest, step.get("inputs") or {})
-        mappings = step.get("mappings") or {}
-
-        def seed(ctx, static=static_inputs, maps=mappings, manifest=manifest):
-            resolved = dict(static)
-            for field, mapping in maps.items():
-                # mapping["output"] may be a dotted path (e.g. "insight.risk_level")
-                # reaching into a nested key of the source step's declared output.
-                resolved[field] = resolve_path(mapping["output"], ctx.get)
-            return interpolate_template_fields(manifest, resolved, ctx.get)
-
-        steps.append(StepSpec(module=module, seed=seed, timeout_seconds=DEFAULT_STEP_TIMEOUT_SECONDS))
+        if pipeline_store.is_parallel_step(step):
+            branches = [_module_step_to_spec(branch) for branch in step.get("branches") or []]
+            steps.append(ParallelGroup(steps=branches, name=step.get("name") or "parallel_group"))
+        else:
+            steps.append(_module_step_to_spec(step))
     return steps
 
 
@@ -301,7 +414,7 @@ def _run_scheduled(steps: list[StepSpec], inputs: dict) -> None:
     def worker() -> None:
         thread = threading.current_thread()
         try:
-            orchestrator.run(inputs)
+            orchestrator.run(inputs, on_event=_record_breaker_event)
         finally:
             with _active_run_threads_lock:
                 _active_run_threads.discard(thread)
@@ -313,11 +426,16 @@ def _run_scheduled(steps: list[StepSpec], inputs: dict) -> None:
 
 
 def _trigger_schedule(schedule: dict) -> None:
+    # Raising here is deliberate: the Scheduler records the exception text as
+    # the schedule's last_status, so a schedule blocked by an open breaker
+    # says so in the Schedules panel instead of silently not running.
     if schedule["kind"] == "pipeline":
         definition = pipeline_store.load_pipeline(schedule["name"])
+        _ensure_breakers_closed(_module_refs_from_steps(definition["steps"]))
         steps = _build_steps_from_definition(definition)
         _run_scheduled(steps, {})
     else:
+        _ensure_breakers_closed([(schedule["tier"], schedule["name"])])
         manifest = _manifest_by_name(schedule["tier"], schedule["name"])
         module = instantiate(manifest["entrypoint"])
         inputs = _coerce_inputs(manifest, schedule["inputs"])
@@ -339,6 +457,7 @@ def list_modules():
             if not manifest.get("enabled", True):
                 continue
             last_success = store.latest_step_status(manifest["name"])
+            health = store.get_module_health(tier, manifest["name"])
             modules.append(
                 {
                     "name": manifest["name"],
@@ -347,6 +466,11 @@ def list_modules():
                     "inputs": manifest.get("inputs", []),
                     "outputs": manifest.get("outputs", []),
                     "status": "error" if last_success is False else "ready",
+                    "breaker": {
+                        "tripped": health["tripped"],
+                        "consecutive_failures": health["consecutive_failures"],
+                        "threshold": int(manifest.get("circuit_breaker_threshold", DEFAULT_BREAKER_THRESHOLD)),
+                    },
                 }
             )
         result[tier] = modules
@@ -366,6 +490,7 @@ async def module_source(tier: str, name: str):
 def run_module(tier: str, name: str, payload: RunRequest, http_request: Request):
     _enforce_run_rate_limit(http_request)
     manifest = _manifest_by_name(tier, name)
+    _ensure_breakers_closed([(tier, name)])
     module = instantiate(manifest["entrypoint"])
     inputs = _coerce_inputs(manifest, payload.inputs)
     # A template field can reference {a_sibling_field} on this same card; there's
@@ -392,10 +517,25 @@ def run_module(tier: str, name: str, payload: RunRequest, http_request: Request)
 @app.post("/api/pipeline/run")
 def run_pipeline(payload: RunRequest, http_request: Request):
     _enforce_run_rate_limit(http_request)
-    orchestrator = Orchestrator(_build_pipeline(), state_store=store, stop_on_error=False)
+    steps = _build_pipeline()
+    _ensure_breakers_closed([(s.module.tier.value, s.module.name) for s in steps])
+    orchestrator = Orchestrator(steps, state_store=store, stop_on_error=False)
     stream_id = bus.create()
     _run_in_background(orchestrator, payload.inputs, stream_id)
     return {"stream_id": stream_id}
+
+
+@app.get("/api/breakers")
+def list_breakers():
+    """Every module the breaker has ever seen fail (or succeed after failing) —
+    modules with no history simply aren't listed, which reads as 'closed'."""
+    return store.all_module_health()
+
+
+@app.post("/api/breakers/{tier}/{name}/reset")
+def reset_module_breaker(tier: str, name: str):
+    _manifest_by_name(tier, name)  # 404 for a module that doesn't exist
+    return store.reset_breaker(tier, name)
 
 
 @app.get("/api/pipelines")
@@ -410,6 +550,7 @@ def save_and_launch_pipeline(definition: PipelineDefinition, http_request: Reque
     module folder) and immediately runs it through the same background-thread
     + SSE mechanism as any other run."""
     _enforce_run_rate_limit(http_request)
+    _ensure_breakers_closed(_module_refs_from_steps(definition.model_dump()["steps"]))
     try:
         saved = pipeline_store.save_pipeline(definition.model_dump(), TIER_DIRS)
     except pipeline_store.PipelineValidationError as exc:
@@ -428,6 +569,7 @@ def run_saved_pipeline(slug: str, http_request: Request):
     except FileNotFoundError:
         raise HTTPException(status_code=404, detail=f"No saved pipeline named '{slug}'.")
 
+    _ensure_breakers_closed(_module_refs_from_steps(definition["steps"]))
     steps = _build_steps_from_definition(definition)
     stream_id = _launch_steps(steps)
     return {"stream_id": stream_id}
@@ -543,6 +685,63 @@ def recent_runs_csv(limit: int = 100):
     )
 
 
+@app.get("/api/runs.xlsx")
+def recent_runs_xlsx(limit: int = 100):
+    """Same run history as the CSV export, in a spreadsheet with a second
+    'Steps' sheet holding per-step detail — the one thing a flat CSV can't
+    carry. openpyxl is imported lazily so simply serving the dashboard never
+    pays for the dependency."""
+    from openpyxl import Workbook
+
+    workbook = Workbook()
+
+    runs_sheet = workbook.active
+    runs_sheet.title = "Runs"
+    runs_sheet.append(["id", "started_at", "finished_at", "status", "duration_seconds"])
+    runs = store.recent_runs(limit)
+    for run in runs:
+        duration = None
+        if run["started_at"] and run["finished_at"]:
+            duration = round(
+                (datetime.fromisoformat(run["finished_at"]) - datetime.fromisoformat(run["started_at"])).total_seconds(),
+                3,
+            )
+        runs_sheet.append([run["id"], run["started_at"], run["finished_at"], run["status"], duration])
+
+    steps_sheet = workbook.create_sheet("Steps")
+    steps_sheet.append(["run_id", "step", "tier", "success", "error", "started_at", "finished_at"])
+    for run in runs:
+        for step in store.steps_for_run(run["id"]):
+            steps_sheet.append(
+                [
+                    run["id"],
+                    step["name"],
+                    step["tier"],
+                    bool(step["success"]),
+                    step["error"] or "",
+                    step["started_at"],
+                    step["finished_at"],
+                ]
+            )
+
+    buffer = io.BytesIO()
+    workbook.save(buffer)
+    buffer.seek(0)
+    return StreamingResponse(
+        buffer,
+        media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+        headers={"Content-Disposition": "attachment; filename=run_history.xlsx"},
+    )
+
+
+@app.get("/api/runs/search")
+def search_run_history(q: str = "", limit: int = 20):
+    """Full-text keyword search across past run step outputs and errors —
+    the run-history counterpart to /api/artifacts/search. Step outputs are
+    redacted before they're ever logged, so snippets are already safe."""
+    return {"query": q, "results": store.search_steps(q, limit)}
+
+
 @app.post("/api/runs/purge")
 def purge_runs(older_than_hours: float = 24 * 30):
     """Delete finished runs (and their steps) older than `older_than_hours`
@@ -616,6 +815,31 @@ def performance():
 @app.get("/api/health")
 def health_check():
     return health.run_health_checks(TIER_DIRS, store)
+
+
+@app.get("/api/environment")
+def environment_view():
+    """Browsable environment + runtime-config view: which declared env vars
+    are set (secret-shaped values only reveal their length), plus the live
+    values of the app's operational knobs. Extends the health check's one-line
+    environment note into something you can actually read."""
+    from webapp.events import _RETENTION_SECONDS
+
+    settings = [
+        {"name": "Step timeout", "value": f"{DEFAULT_STEP_TIMEOUT_SECONDS:g} s", "detail": "Max wall-clock time one module step may run before it fails."},
+        {"name": "Circuit breaker threshold", "value": str(DEFAULT_BREAKER_THRESHOLD), "detail": "Consecutive failures before a module's breaker trips (per-module override: circuit_breaker_threshold in its manifest)."},
+        {"name": "Run rate limit", "value": f"{_run_rate_limiter.max_requests} requests / {_run_rate_limiter.window_seconds:g} s", "detail": "Cap on run-triggering API calls, per client."},
+        {"name": "Upload / ingest size limit", "value": f"{ingestion.MAX_UPLOAD_BYTES // (1024 * 1024)} MB", "detail": "Largest file the upload endpoint or folder watcher will ingest."},
+        {"name": "Result cache max age", "value": "3600 s", "detail": "Cached module results older than this are treated as a miss."},
+        {"name": "Folder watcher interval", "value": f"{_watcher.interval:g} s", "detail": "How often watched_input/ is polled for new files."},
+        {"name": "Scheduler poll interval", "value": f"{_scheduler.poll_interval:g} s", "detail": "How often due schedules are checked."},
+        {"name": "SSE stream retention", "value": f"{_RETENTION_SECONDS:g} s", "detail": "How long a finished run's event stream stays replayable for reconnects."},
+        {"name": "State store", "value": store.db_path, "detail": "SQLite database holding runs, steps, schedules, memory, and breaker state."},
+    ]
+    return {
+        "environment": health.environment_report(ROOT / ".env.example"),
+        "settings": settings,
+    }
 
 
 @app.get("/api/backup/export")

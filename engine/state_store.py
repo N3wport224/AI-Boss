@@ -60,6 +60,15 @@ CREATE TABLE IF NOT EXISTS memory (
     value TEXT NOT NULL,
     updated_at TEXT NOT NULL
 );
+
+CREATE TABLE IF NOT EXISTS module_health (
+    tier TEXT NOT NULL,
+    name TEXT NOT NULL,
+    consecutive_failures INTEGER NOT NULL DEFAULT 0,
+    tripped INTEGER NOT NULL DEFAULT 0,
+    updated_at TEXT NOT NULL,
+    PRIMARY KEY (tier, name)
+);
 """
 
 
@@ -196,6 +205,43 @@ class StateStore:
                 self._conn.commit()
         return len(run_ids)
 
+    def search_steps(self, query: str, limit: int = 20) -> list[dict]:
+        """Case-insensitive keyword search across every recorded step's output
+        JSON and error text — the run-history counterpart to artifact content
+        search. Returns newest matches first, each with a short snippet of
+        wherever the match was found."""
+        needle = query.lower().strip()
+        if not needle:
+            return []
+
+        with self._lock:
+            rows = self._conn.execute(
+                "SELECT run_id, name, tier, success, output, error, finished_at FROM steps "
+                "WHERE lower(output) LIKE ? OR lower(coalesce(error, '')) LIKE ? "
+                "ORDER BY id DESC LIMIT ?",
+                (f"%{needle}%", f"%{needle}%", limit),
+            ).fetchall()
+
+        results = []
+        for run_id, name, tier, success, output, error, finished_at in rows:
+            haystack, matched_in = (error, "error") if error and needle in error.lower() else (output, "output")
+            idx = haystack.lower().find(needle)
+            start = max(0, idx - 60)
+            end = min(len(haystack), idx + len(needle) + 60)
+            snippet = " ".join(haystack[start:end].split())
+            results.append(
+                {
+                    "run_id": run_id,
+                    "step": name,
+                    "tier": tier,
+                    "success": bool(success),
+                    "matched_in": matched_in,
+                    "snippet": snippet,
+                    "finished_at": finished_at,
+                }
+            )
+        return results
+
     def record_ingested_file(self, file_hash: str, filename: str, kind: str) -> None:
         """Record a successfully-ingested file's hash for future dedupe checks.
         INSERT OR IGNORE: if this exact hash was already recorded, keep the
@@ -283,6 +329,84 @@ class StateStore:
         with self._lock:
             self._conn.execute("DELETE FROM memory")
             self._conn.commit()
+
+    # ---- Circuit breaker (module health) ----
+    # Deliberately *not* part of export_snapshot/restore_snapshot: breaker
+    # state is transient health data about this installation's recent runs,
+    # not durable work product worth carrying into a restored copy.
+
+    def _module_health_row(self, tier: str, name: str) -> dict:
+        row = self._conn.execute(
+            "SELECT consecutive_failures, tripped, updated_at FROM module_health WHERE tier = ? AND name = ?",
+            (tier, name),
+        ).fetchone()
+        if row is None:
+            return {"tier": tier, "name": name, "consecutive_failures": 0, "tripped": False, "updated_at": None}
+        return {
+            "tier": tier,
+            "name": name,
+            "consecutive_failures": row[0],
+            "tripped": bool(row[1]),
+            "updated_at": row[2],
+        }
+
+    def record_module_failure(self, tier: str, name: str, trip_threshold: int) -> dict:
+        """Bump a module's consecutive-failure count, tripping its circuit
+        breaker once the count reaches `trip_threshold`. Once tripped, the
+        breaker stays open (and the count keeps climbing if anything still
+        manages to run it) until `reset_breaker` is called."""
+        now = datetime.now(timezone.utc).isoformat()
+        with self._lock:
+            self._conn.execute(
+                "INSERT INTO module_health (tier, name, consecutive_failures, tripped, updated_at) "
+                "VALUES (:tier, :name, 1, :initial_tripped, :now) "
+                "ON CONFLICT(tier, name) DO UPDATE SET "
+                "consecutive_failures = consecutive_failures + 1, "
+                "tripped = CASE WHEN consecutive_failures + 1 >= :threshold THEN 1 ELSE tripped END, "
+                "updated_at = :now",
+                {
+                    "tier": tier,
+                    "name": name,
+                    "initial_tripped": int(1 >= trip_threshold),
+                    "threshold": trip_threshold,
+                    "now": now,
+                },
+            )
+            self._conn.commit()
+            return self._module_health_row(tier, name)
+
+    def record_module_success(self, tier: str, name: str) -> None:
+        """A success closes the 'consecutive' failure streak — but does NOT
+        silently close an already-tripped breaker: once open, only an explicit
+        reset closes it, so a flaky module can't quietly re-arm itself."""
+        with self._lock:
+            self._conn.execute(
+                "UPDATE module_health SET consecutive_failures = 0, updated_at = ? "
+                "WHERE tier = ? AND name = ? AND tripped = 0",
+                (datetime.now(timezone.utc).isoformat(), tier, name),
+            )
+            self._conn.commit()
+
+    def get_module_health(self, tier: str, name: str) -> dict:
+        with self._lock:
+            return self._module_health_row(tier, name)
+
+    def all_module_health(self) -> list[dict]:
+        with self._lock:
+            rows = self._conn.execute(
+                "SELECT tier, name FROM module_health ORDER BY tier, name"
+            ).fetchall()
+            return [self._module_health_row(tier, name) for tier, name in rows]
+
+    def reset_breaker(self, tier: str, name: str) -> dict:
+        with self._lock:
+            self._conn.execute(
+                "UPDATE module_health SET consecutive_failures = 0, tripped = 0, updated_at = ? "
+                "WHERE tier = ? AND name = ?",
+                (datetime.now(timezone.utc).isoformat(), tier, name),
+            )
+            self._conn.commit()
+            return self._module_health_row(tier, name)
 
     _SCHEDULE_COLUMNS = (
         "id", "kind", "tier", "name", "inputs", "interval_seconds",

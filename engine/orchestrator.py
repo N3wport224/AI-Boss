@@ -34,11 +34,20 @@ class StepSpec:
     `timeout_seconds`, if set, bounds how long this step's `module.run()` may run
     before it's treated as a failure (a `TimeoutError`, handled the same as any
     other exception the module raises).
+
+    `condition`, if set, is evaluated against the context right before the step
+    would seed and run; a falsy result skips the step entirely (no seed, no
+    module.run(), a `step_skipped` event instead of started/completed). Skipping
+    is not a failure — the run continues to the next step either way.
+    `condition_label` is a human-readable rendering of the condition, carried on
+    the skip event so dashboards can say *why* a step was skipped.
     """
 
     module: BaseModule
     seed: SeedFn = field(default=lambda ctx: {})
     timeout_seconds: Optional[float] = None
+    condition: Optional[Callable[[ExecutionContext], bool]] = None
+    condition_label: str = ""
 
 
 @dataclass
@@ -77,6 +86,18 @@ def _await_result(future, module_name: str, timeout_seconds: Optional[float]):
             "forcibly stop a running thread, so it may still be executing in the "
             "background — this only stops the orchestrator from waiting on it.)"
         ) from None
+
+
+def _condition_allows(step: StepSpec, context: ExecutionContext) -> bool:
+    """True if the step should run. A condition that *raises* counts as False —
+    skipping a step is the safe failure mode for a broken condition, and the
+    declarative evaluator (engine.conditions) never raises anyway."""
+    if step.condition is None:
+        return True
+    try:
+        return bool(step.condition(context))
+    except Exception:
+        return False
 
 
 def _run_module(module: BaseModule, context: ExecutionContext, timeout_seconds: Optional[float]) -> dict:
@@ -139,6 +160,17 @@ class Orchestrator:
                 continue
 
             module = step.module
+            if not _condition_allows(step, context):
+                emit(
+                    {
+                        "kind": "step_skipped",
+                        "index": index,
+                        "tier": module.tier.value,
+                        "name": module.name,
+                        "condition": step.condition_label,
+                    }
+                )
+                continue
             context.update(step.seed(context))
             context.active_module = (module.tier.value, module.name)
             emit({"kind": "step_started", "index": index, "tier": module.tier.value, "name": module.name})
@@ -211,17 +243,37 @@ class Orchestrator:
         branch failed. Seeding happens sequentially (a plain dict merge, no
         need for concurrency) before any branch's module.run() is submitted,
         so no branch ever sees a sibling's output during setup."""
-        branches = [_as_step(b) for b in group.steps]
-        for branch in branches:
+        all_branches = [_as_step(b) for b in group.steps]
+        emit({"kind": "group_started", "index": index, "name": group.name, "branch_count": len(all_branches)})
+
+        # Conditions are evaluated against context as it stood before the
+        # group began (same view every branch's seed gets); a skipped branch
+        # neither seeds nor runs.
+        branches = []
+        for branch_index, branch in enumerate(all_branches):
+            if not _condition_allows(branch, context):
+                emit(
+                    {
+                        "kind": "step_skipped",
+                        "index": index,
+                        "branch_index": branch_index,
+                        "parallel": True,
+                        "tier": branch.module.tier.value,
+                        "name": branch.module.name,
+                        "condition": branch.condition_label,
+                    }
+                )
+                continue
+            branches.append((branch_index, branch))
+
+        for _, branch in branches:
             context.update(branch.seed(context))
 
-        emit({"kind": "group_started", "index": index, "name": group.name, "branch_count": len(branches)})
-
         started_ats = [datetime.now(timezone.utc) for _ in branches]
-        futures = [_EXECUTOR.submit(branch.module.run, context) for branch in branches]
+        futures = [_EXECUTOR.submit(branch.module.run, context) for _, branch in branches]
 
         any_failed = False
-        for branch_index, (branch, future, started_at) in enumerate(zip(branches, futures, started_ats)):
+        for (branch_index, branch), future, started_at in zip(branches, futures, started_ats):
             module = branch.module
             emit(
                 {

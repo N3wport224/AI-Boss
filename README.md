@@ -368,10 +368,10 @@ A few things live in the header/subheader on every page load:
 - **Parallel branch execution** — `engine.ParallelGroup` runs a set of
   independent steps concurrently in one pipeline slot (each still gets its
   own `StepRecord`/tracker events, tagged `parallel: true` with a
-  `branch_index`), then merges their outputs back before the next step. Not
-  yet exposed in the no-code visual builder (a genuinely separate UI
-  surface) — construct one directly in Python: `Orchestrator([Double(),
-  ParallelGroup(steps=[StepA(), StepB()]), AddOne()])`. Branches must be
+  `branch_index`), then merges their outputs back before the next step.
+  Construct one in Python (`Orchestrator([Double(),
+  ParallelGroup(steps=[StepA(), StepB()]), AddOne()])`) or visually via the
+  builder's **+ Add Parallel Group** (see below). Branches must be
   genuinely independent; two branches writing the same output key is
   undefined (whichever merges last wins).
 - **SSE reconnect/replay** — the live run stream now records events in an
@@ -401,6 +401,61 @@ A few things live in the header/subheader on every page load:
   card padding and text size to fit more on screen at once, persisted in
   `localStorage` the same way the theme is.
 
+## Resilience, conditions, and outbound HTTP
+
+- **Generic HTTP request module** — `automations/http_request.py` calls any
+  user-supplied URL (method, JSON-object headers, JSON-or-raw body, and
+  timeout all configurable per run) and returns a structured
+  `http_response` (status code, ok flag, headers, parsed-JSON-or-text body,
+  elapsed ms). A non-2xx status is a *result*, not a failure — only an
+  unreachable host, timeout, or malformed input raises. It deliberately
+  opts out of the fixed one-click demo pipeline
+  (`include_in_full_pipeline: false` in its manifest) so that stays fast
+  and offline; it's fully runnable standalone and in hand-built pipelines.
+- **Conditional pipeline steps** — every builder step has a **Run only
+  if…** row: pick a context key (dot-paths reach into nested outputs, e.g.
+  `insight.risk_level`), an operator (`equals`, `does not equal`,
+  `contains`, `gt`, `lt`, `truthy`, `falsy`), and a value. When the
+  condition doesn't hold at the moment the step would run, the step is
+  *skipped* — a `step_skipped` event (⏭️ in the tracker, with the reason in
+  its tooltip), not a failure, and the run continues. Engine-level:
+  `StepSpec(condition=lambda ctx: ..., condition_label="...")`; a condition
+  that raises counts as false. Conditions reference context keys, never
+  step numbers, so reordering steps needs no condition rewiring.
+- **Module circuit breaker** — after N *consecutive* failures (default 3;
+  per-module override via `circuit_breaker_threshold` in its manifest) a
+  module's breaker trips: every launch path — its Run button, the full
+  pipeline, saved pipelines, schedules — refuses to run it (HTTP 409, and
+  a blocked schedule records the reason as its last status). The card shows
+  a ⛔ banner with a **Reset breaker** button (`POST
+  /api/breakers/{tier}/{name}/reset`; `GET /api/breakers` lists state). A
+  success closes a failure streak but never closes an already-open breaker —
+  only an explicit reset does, so a flaky module can't quietly re-arm itself.
+- **XLSX export** — **Export XLSX** next to the CSV export downloads the
+  same run history as a spreadsheet with a second **Steps** sheet of
+  per-step detail (module, tier, success, error, timing) — the thing a flat
+  CSV can't carry. Uses `openpyxl`, imported lazily.
+- **Run-history search** — a search box in Recent Runs does full-text,
+  case-insensitive search across every recorded step's output JSON and
+  error text (`GET /api/runs/search?q=`), newest first, with a snippet and
+  a ❌ marker on hits found in a failed step's error. Step outputs are
+  redacted before they're ever logged, so snippets can't leak secrets.
+- **Environment & config viewer** — a dashboard section listing every env
+  var declared in `.env.example` (set/missing, with secret-shaped names
+  only ever revealing their value's *length*) plus the live values of the
+  app's operational knobs: step timeout, breaker threshold, rate limit,
+  upload cap, cache age, watcher/scheduler intervals, SSE retention, and
+  the state-store path (`GET /api/environment`).
+- **Parallel groups in the visual builder** — **+ Add Parallel Group** adds
+  a slot whose branches (two or more) run concurrently: pick a module per
+  branch, map branch fields from any step *above* the group, optionally
+  name the group. Saved as `type: parallel` + `branches:` in the pipeline
+  YAML; a later step can map from the group's slot (it offers every
+  branch's declared outputs), and the live tracker shows one indented row
+  per branch under a group header. Validation enforces ≥2 branches and
+  blocks branch mappings that reference the group itself or anything after
+  it.
+
 ## Tech stack
 
 - **Language:** Python 3.11+ — first-class async/sync support and native SDKs
@@ -418,8 +473,11 @@ A few things live in the header/subheader on every page load:
 - **Pipeline builder:** no new tech — user-built pipelines are just another YAML
   manifest folder (`pipelines/`), validated and executed through the same
   `Orchestrator`/`StepSpec` machinery as everything else.
-- **Ingestion:** stdlib `csv` for CSV parsing, `pypdf` for PDF text extraction —
-  the only two new runtime dependencies added since the initial scaffold.
+- **Ingestion:** stdlib `csv` for CSV parsing, `pypdf` for PDF text extraction.
+- **Exports:** `openpyxl` for the XLSX run-history export (lazily imported);
+  CSV export is stdlib.
+- **Outbound HTTP:** `httpx` (already a FastAPI test dependency) powers the
+  `http_request` automation module — no new dependency for it.
 - **Linting:** `ruff` invoked as a subprocess, scoped to exactly the file a
   module's own manifest `entrypoint` resolves to.
 - **Performance ticker:** `psutil`, reading only this process's own resource

@@ -1,4 +1,6 @@
 from .base import BaseModule, Tier
+from .conditions import OPERATORS as CONDITION_OPERATORS
+from .conditions import evaluate_condition
 from .context import ExecutionContext, StepRecord
 from .orchestrator import Orchestrator, ParallelGroup, StepSpec
 from .redaction import redact_secrets
@@ -20,4 +22,6 @@ __all__ = [
     "interpolate_template_fields",
     "resolve_path",
     "redact_secrets",
+    "evaluate_condition",
+    "CONDITION_OPERATORS",
 ]

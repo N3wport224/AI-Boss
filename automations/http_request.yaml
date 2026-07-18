@@ -1,0 +1,31 @@
+name: http_request
+tier: automation
+entrypoint: automations.http_request:HttpRequestAutomation
+description: Calls an arbitrary URL (method/headers/body configurable) and returns the response.
+enabled: true
+include_in_full_pipeline: false  # makes a real outbound call; kept out of the fixed offline demo pipeline
+inputs:
+  - name: url
+    label: URL
+    type: text
+    default: "http://127.0.0.1:8000/api/health"
+  - name: method
+    label: Method
+    type: select
+    options: [GET, POST, PUT, PATCH, DELETE]
+    default: GET
+  - name: headers
+    label: Headers (JSON object)
+    type: template
+    default: "{}"
+  - name: body
+    label: Body (JSON or raw text)
+    type: template
+    default: ""
+  - name: timeout
+    label: Timeout (seconds)
+    type: number
+    default: 10
+outputs:
+  - name: http_response
+    label: HTTP Response

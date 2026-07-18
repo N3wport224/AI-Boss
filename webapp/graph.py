@@ -10,24 +10,41 @@ immediately before it.
 
 def build_pipeline_graph(definition: dict) -> dict:
     steps = definition.get("steps") or []
-    nodes = [
-        {"index": index, "tier": step["tier"], "name": step["name"]}
-        for index, step in enumerate(steps)
-    ]
+
+    nodes = []
+    for index, step in enumerate(steps):
+        if step.get("type") == "parallel":
+            branches = step.get("branches") or []
+            label = step.get("name") or "parallel"
+            branch_names = ", ".join(b["name"] for b in branches)
+            nodes.append(
+                {
+                    "index": index,
+                    "tier": "parallel",
+                    "name": f"{label} ⫲ [{branch_names}]",
+                    "branches": [{"tier": b["tier"], "name": b["name"]} for b in branches],
+                }
+            )
+        else:
+            nodes.append({"index": index, "tier": step["tier"], "name": step["name"]})
 
     edges = []
     for index, step in enumerate(steps):
         if index > 0:
             edges.append({"from": index - 1, "to": index, "kind": "sequence"})
-        for field, mapping in (step.get("mappings") or {}).items():
-            edges.append(
-                {
-                    "from": mapping["step"],
-                    "to": index,
-                    "kind": "mapping",
-                    "field": field,
-                    "output": mapping["output"],
-                }
-            )
+        # A group's slot aggregates its branches' mapping edges — each branch
+        # may pull from any earlier top-level step, same as a module step.
+        branch_steps = step.get("branches") or [step]
+        for sub in branch_steps:
+            for field, mapping in (sub.get("mappings") or {}).items():
+                edges.append(
+                    {
+                        "from": mapping["step"],
+                        "to": index,
+                        "kind": "mapping",
+                        "field": field,
+                        "output": mapping["output"],
+                    }
+                )
 
     return {"nodes": nodes, "edges": edges}

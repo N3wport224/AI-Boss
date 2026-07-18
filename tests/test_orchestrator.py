@@ -306,3 +306,69 @@ def test_context_memory_falls_back_to_a_local_dict_with_no_state_store_attached(
     assert context.memory.get("anything") is None
     context.memory.set("anything", "value")
     assert context.memory.get("anything") == "value"
+
+
+def test_conditional_step_skips_when_condition_is_false_and_run_continues():
+    events = []
+    conditional = StepSpec(
+        module=Double(),
+        condition=lambda ctx: ctx.get("value", 0) > 100,
+        condition_label="value gt 100",
+    )
+    orchestrator = Orchestrator([conditional, AddOne()])
+    context = orchestrator.run({"value": 5}, on_event=events.append)
+
+    assert context.get("value") == 6  # Double never ran, AddOne did
+
+    kinds = [e["kind"] for e in events]
+    assert "step_skipped" in kinds
+    skipped = next(e for e in events if e["kind"] == "step_skipped")
+    assert skipped["name"] == "double"
+    assert skipped["condition"] == "value gt 100"
+    assert kinds[-1] == "run_completed"  # skipping is not a failure
+
+    assert [s.name for s in context.history] == ["add_one"]  # no record for the skipped step
+
+
+def test_conditional_step_runs_normally_when_condition_is_true():
+    conditional = StepSpec(module=Double(), condition=lambda ctx: ctx.get("value", 0) > 1)
+    context = Orchestrator([conditional]).run({"value": 5})
+    assert context.get("value") == 10
+
+
+def test_condition_can_read_an_earlier_steps_output():
+    # Double turns 5 into 10; AddOne only runs if value is exactly 10.
+    gated = StepSpec(module=AddOne(), condition=lambda ctx: ctx.get("value") == 10)
+    context = Orchestrator([Double(), gated]).run({"value": 5})
+    assert context.get("value") == 11
+
+
+def test_a_raising_condition_skips_the_step_instead_of_crashing_the_run():
+    def broken_condition(ctx):
+        raise RuntimeError("condition bug")
+
+    conditional = StepSpec(module=Double(), condition=broken_condition)
+    context = Orchestrator([conditional, AddOne()]).run({"value": 5})
+    assert context.get("value") == 6  # Double skipped, run survived
+
+
+def test_parallel_group_branch_condition_skips_only_that_branch():
+    events = []
+    group = ParallelGroup(
+        steps=[
+            SleepAndEcho("runs", 0.01),
+            StepSpec(module=AlwaysFails(), condition=lambda ctx: False, condition_label="never"),
+        ]
+    )
+    orchestrator = Orchestrator([group], stop_on_error=False)
+    context = orchestrator.run({}, on_event=events.append)
+
+    assert context.get("runs") is True
+    # The failing branch was skipped, so the group had no failure at all.
+    group_completed = next(e for e in events if e["kind"] == "group_completed")
+    assert group_completed["had_failure"] is False
+
+    skipped = next(e for e in events if e["kind"] == "step_skipped")
+    assert skipped["parallel"] is True
+    assert skipped["branch_index"] == 1
+    assert skipped["name"] == "always_fails"

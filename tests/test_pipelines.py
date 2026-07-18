@@ -272,3 +272,182 @@ def test_run_saved_pipeline_by_slug_then_unknown_slug_404s():
 
     missing = client.post("/api/pipelines/does_not_exist/run")
     assert missing.status_code == 404
+
+
+def _conditional_pipeline_payload(name):
+    """3-step chain whose agent step only runs when the workflow's nested
+    insight.risk_level lands on "high" — churn/signups decide which way it goes."""
+    return {
+        "name": name,
+        "steps": [
+            {"tier": "automation", "name": "fetch_raw_metrics", "inputs": {"signups": 40, "churn": 20, "revenue": 500}},
+            {"tier": "workflow", "name": "analyze_metrics", "inputs": {"risk_threshold": 0.1}},
+            {
+                "tier": "agent",
+                "name": "churn_response_agent",
+                "inputs": {"notify_slack": False},
+                "condition": {"source": "insight.risk_level", "operator": "equals", "value": "high"},
+            },
+        ],
+    }
+
+
+def test_conditional_step_runs_when_condition_on_an_earlier_output_is_met():
+    payload = _conditional_pipeline_payload("Gated High")
+    # churn 20 of 40 signups = 0.5 churn rate > 0.1 threshold -> "high" -> agent runs
+
+    res = client.post("/api/pipelines", json=payload)
+    assert res.status_code == 200
+
+    events = _collect_stream(res.json()["stream_id"])
+    assert events[-1]["kind"] == "run_completed"
+    assert "agent_decision" in events[-1]["context"]
+    assert not any(e["kind"] == "step_skipped" for e in events)
+
+
+def test_conditional_step_is_skipped_when_condition_is_not_met():
+    payload = _conditional_pipeline_payload("Gated Low")
+    payload["steps"][0]["inputs"] = {"signups": 1000, "churn": 1, "revenue": 500}
+    # churn rate 0.001 < 0.1 -> "low" -> the agent step must be skipped
+
+    res = client.post("/api/pipelines", json=payload)
+    assert res.status_code == 200
+
+    events = _collect_stream(res.json()["stream_id"])
+    assert events[-1]["kind"] == "run_completed"  # skipping is not a failure
+    assert "agent_decision" not in events[-1]["context"]
+
+    skipped = next(e for e in events if e["kind"] == "step_skipped")
+    assert skipped["name"] == "churn_response_agent"
+    assert skipped["index"] == 2
+    assert "insight.risk_level equals high" == skipped["condition"]
+
+
+def test_condition_survives_the_saved_yaml_round_trip():
+    payload = _conditional_pipeline_payload("Gated Persisted")
+    res = client.post("/api/pipelines", json=payload)
+    assert res.status_code == 200
+    _collect_stream(res.json()["stream_id"])
+
+    saved = pipeline_store.load_pipeline("gated_persisted")
+    assert saved["steps"][2]["condition"] == {
+        "source": "insight.risk_level",
+        "operator": "equals",
+        "value": "high",
+    }
+    # Steps without a condition don't carry a `condition: null` key in the YAML.
+    assert "condition" not in saved["steps"][0]
+
+
+def test_condition_with_unknown_operator_is_rejected():
+    payload = _conditional_pipeline_payload("Bad Operator")
+    payload["steps"][2]["condition"]["operator"] = "matches_regex"
+
+    res = client.post("/api/pipelines", json=payload)
+    assert res.status_code == 400
+    assert "operator" in res.json()["detail"]
+
+
+def test_condition_without_a_source_key_is_rejected():
+    payload = _conditional_pipeline_payload("No Source")
+    payload["steps"][2]["condition"]["source"] = "  "
+
+    res = client.post("/api/pipelines", json=payload)
+    assert res.status_code == 400
+    assert "context key" in res.json()["detail"]
+
+
+def _parallel_pipeline_payload(name):
+    return {
+        "name": name,
+        "steps": [
+            {"tier": "automation", "name": "fetch_raw_metrics", "inputs": {"signups": 40, "churn": 20, "revenue": 500}},
+            {
+                "type": "parallel",
+                "name": "fanout",
+                "branches": [
+                    {"tier": "workflow", "name": "analyze_metrics", "inputs": {"risk_threshold": 0.1}},
+                    {"tier": "automation", "name": "http_request", "inputs": {"url": "http://127.0.0.1:9/x", "timeout": 1}},
+                ],
+            },
+        ],
+    }
+
+
+def test_parallel_group_pipeline_saves_runs_and_emits_branch_tagged_events():
+    payload = _parallel_pipeline_payload("Fanout Chain")
+    # Replace the failing http_request branch with a second deterministic module.
+    payload["steps"][1]["branches"][1] = {
+        "tier": "automation", "name": "fetch_raw_metrics",
+        "inputs": {"signups": 1, "churn": 0, "revenue": 1},
+    }
+    payload["steps"].append(
+        {
+            "tier": "agent",
+            "name": "churn_response_agent",
+            "inputs": {"notify_slack": False},
+            "mappings": {"notify_slack": {"step": 1, "output": "insight"}},  # maps FROM the group slot
+        }
+    )
+
+    res = client.post("/api/pipelines", json=payload)
+    assert res.status_code == 200
+
+    events = _collect_stream(res.json()["stream_id"])
+    assert events[-1]["kind"] == "run_completed"
+
+    group_started = next(e for e in events if e["kind"] == "group_started")
+    assert group_started["name"] == "fanout"
+    assert group_started["branch_count"] == 2
+
+    branch_events = [e for e in events if e.get("parallel") and e["kind"] == "step_completed"]
+    assert {e["branch_index"] for e in branch_events} == {0, 1}
+    assert all(e["index"] == 1 for e in branch_events)
+
+    # The agent's mapped field read the analyze branch's output from the group.
+    assert "agent_decision" in events[-1]["context"]
+
+    # Saved YAML round-trips the group structure.
+    saved = pipeline_store.load_pipeline("fanout_chain")
+    assert saved["steps"][1]["type"] == "parallel"
+    assert len(saved["steps"][1]["branches"]) == 2
+    assert "condition" not in saved["steps"][0]
+
+
+def test_parallel_group_with_fewer_than_two_branches_is_rejected():
+    payload = _parallel_pipeline_payload("Lonely Group")
+    payload["steps"][1]["branches"] = payload["steps"][1]["branches"][:1]
+
+    res = client.post("/api/pipelines", json=payload)
+    assert res.status_code == 400
+    assert "two branches" in res.json()["detail"]
+
+
+def test_parallel_branch_mapping_may_only_reference_steps_before_the_group():
+    payload = _parallel_pipeline_payload("Bad Branch Mapping")
+    # Branch tries to map from the group's own slot (index 1) — not allowed.
+    payload["steps"][1]["branches"][0]["mappings"] = {"risk_threshold": {"step": 1, "output": "insight"}}
+
+    res = client.post("/api/pipelines", json=payload)
+    assert res.status_code == 400
+    assert "branch 1" in res.json()["detail"]
+    assert "earlier step" in res.json()["detail"]
+
+
+def test_pipeline_graph_renders_a_parallel_group_as_one_slot_with_branch_detail():
+    payload = _parallel_pipeline_payload("Graphed Fanout")
+    payload["steps"][1]["branches"][1] = {
+        "tier": "automation", "name": "fetch_raw_metrics", "inputs": {},
+        "mappings": {"signups": {"step": 0, "output": "raw_metrics.signups"}},
+    }
+    res = client.post("/api/pipelines", json=payload)
+    assert res.status_code == 200
+    _collect_stream(res.json()["stream_id"])
+
+    graph = client.get("/api/pipelines/graphed_fanout/graph").json()
+    group_node = graph["nodes"][1]
+    assert group_node["tier"] == "parallel"
+    assert [b["name"] for b in group_node["branches"]] == ["analyze_metrics", "fetch_raw_metrics"]
+
+    mapping_edges = [e for e in graph["edges"] if e["kind"] == "mapping"]
+    assert {"from": 0, "to": 1, "kind": "mapping", "field": "signups", "output": "raw_metrics.signups"} in mapping_edges

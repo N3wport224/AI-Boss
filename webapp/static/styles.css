@@ -306,6 +306,46 @@ h1 {
 .dot-ready { background: var(--ready); }
 .dot-running { background: var(--running); box-shadow: 0 0 8px 1px var(--running); }
 .dot-error { background: var(--error); }
+.dot-tripped { background: var(--error); box-shadow: 0 0 8px 1px var(--error); }
+
+.card.breaker-tripped {
+  border-color: var(--error);
+}
+
+.breaker-banner {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  flex-wrap: wrap;
+  font-size: 0.82rem;
+  color: var(--error);
+  background: rgba(248, 113, 113, 0.08);
+  border: 1px dashed var(--error);
+  border-radius: 8px;
+  padding: 10px 12px;
+  margin-bottom: 12px;
+}
+
+.breaker-reset-btn {
+  background: none;
+  border: 1px solid var(--error);
+  color: var(--error);
+  border-radius: 8px;
+  padding: 6px 12px;
+  font-size: 0.8rem;
+  cursor: pointer;
+  margin-left: auto;
+}
+
+.breaker-reset-btn:hover {
+  background: var(--error);
+  color: #fff;
+}
+
+.btn-run:disabled {
+  opacity: 0.4;
+  cursor: not-allowed;
+}
 
 .btn {
   border: none;
@@ -437,6 +477,24 @@ main {
 .tier-pipeline .bar { background: var(--accent-pipeline); }
 .tier-favorites .bar { background: var(--accent-favorite); }
 .tier-runs .bar { background: var(--text-dim); }
+.tier-env .bar { background: var(--accent-pipeline); }
+
+.env-subhead {
+  font-size: 0.85rem;
+  font-weight: 600;
+  color: var(--text-dim);
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+  margin: 16px 0 8px;
+}
+
+.env-setting-value {
+  font-family: "SF Mono", "Fira Code", monospace;
+  font-size: 0.82rem;
+  color: var(--accent-pipeline);
+  white-space: nowrap;
+  flex-shrink: 0;
+}
 .tier-ingestion .bar { background: var(--accent-ingestion); }
 
 .card.search-hidden {
@@ -570,6 +628,7 @@ body.density-compact .tier-section {
 .status-pill.ready { color: var(--ready); }
 .status-pill.running { color: var(--running); }
 .status-pill.error { color: var(--error); }
+.status-pill.tripped { color: var(--error); }
 
 .status-pill .dot-running { animation: pulse 1s infinite ease-in-out; }
 
@@ -1035,6 +1094,141 @@ body.density-compact .tier-section {
   cursor: default;
 }
 
+.builder-group {
+  border: 1px dashed var(--accent-pipeline);
+}
+
+.group-label {
+  font-size: 0.85rem;
+  font-weight: 600;
+  color: var(--accent-pipeline);
+  white-space: nowrap;
+}
+
+.group-name-input {
+  flex: 1;
+  background: var(--card-bg);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  padding: 8px 11px;
+  color: var(--text);
+  font-size: 0.85rem;
+}
+
+.group-hint {
+  margin: 0 0 10px;
+}
+
+.builder-branches {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  margin-bottom: 10px;
+}
+
+.builder-branch {
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  padding: 10px 12px;
+  background: var(--bg-elevated);
+}
+
+.branch-badge {
+  width: 22px;
+  height: 22px;
+  border-radius: 50%;
+  border: 1px solid var(--accent-pipeline);
+  color: var(--accent-pipeline);
+  background: none;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  font-weight: 700;
+  font-size: 0.72rem;
+  flex-shrink: 0;
+}
+
+.remove-branch-btn {
+  background: none;
+  border: 1px solid var(--border);
+  color: var(--error);
+  border-radius: 6px;
+  width: 26px;
+  height: 28px;
+  cursor: pointer;
+  flex-shrink: 0;
+}
+
+.add-branch-btn {
+  align-self: flex-start;
+}
+
+.tracker-group-head {
+  font-size: 0.8rem;
+  font-weight: 600;
+  color: var(--accent-pipeline);
+  padding: 6px 2px 2px;
+}
+
+.tracker-step.tracker-branch {
+  margin-left: 18px;
+}
+
+.builder-condition {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+  margin: 0 0 12px 36px; /* aligns under the module select, past the step badge */
+}
+
+.builder-condition.active {
+  padding: 8px 10px;
+  margin-left: 36px;
+  border: 1px dashed var(--accent-pipeline);
+  border-radius: 8px;
+  background: rgba(250, 204, 21, 0.04);
+}
+
+.condition-enable-label {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 0.82rem;
+  color: var(--text-dim);
+  cursor: pointer;
+  white-space: nowrap;
+}
+
+.builder-condition .condition-source,
+.builder-condition .condition-value {
+  flex: 1;
+  min-width: 140px;
+  background: var(--card-bg);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  padding: 7px 10px;
+  color: var(--text);
+  font-size: 0.82rem;
+}
+
+.builder-condition .condition-operator {
+  flex-shrink: 0;
+  width: auto;
+  background: var(--card-bg);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  padding: 7px 10px;
+  color: var(--text);
+  font-size: 0.82rem;
+}
+
+.tracker-step.skipped .tracker-label {
+  color: var(--text-dim);
+  text-decoration: line-through;
+  text-decoration-thickness: 1px;
+}
+
 .builder-step-fields {
   display: flex;
   flex-direction: column;
@@ -1159,6 +1353,55 @@ body.density-compact .tier-section {
   color: var(--text-dim);
   font-size: 0.85rem;
   padding: 6px 2px;
+}
+
+.runs-search-bar {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-bottom: 12px;
+}
+
+#runs-search-input {
+  flex: 1;
+  background: var(--bg-elevated);
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  padding: 7px 10px;
+  color: var(--text);
+  font-size: 0.85rem;
+}
+
+#runs-search-results {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  margin-bottom: 12px;
+}
+
+.runs-search-hit {
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+  padding: 8px 10px;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: var(--bg-elevated);
+}
+
+.runs-search-hit.hit-failed {
+  border-color: var(--error);
+}
+
+.runs-search-hit .hit-meta {
+  font-size: 0.75rem;
+  color: var(--text-dim);
+}
+
+.runs-search-hit .hit-snippet {
+  font-size: 0.82rem;
+  font-family: "SF Mono", "Fira Code", monospace;
+  word-break: break-word;
 }
 
 .run-compare-bar {
