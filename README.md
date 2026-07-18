@@ -70,11 +70,20 @@ python cli.py status    # inspect recent run history from the SQLite state store
 The dashboard renders every automation, workflow, and agent as a card, grouped
 into three visually separated sections. Cards with declared `inputs` (see any
 `example_*.yaml`) show a small form — text, number, dropdown, or toggle — right
-in the card. Click **Run** and the card's status pill goes Blue (running) →
-Green (ready/succeeded) or Red (error), with the module's output shown inline.
-A **Run Full Pipeline** button at the top runs all three tiers in sequence, the
-same tier-1 → tier-2 → tier-3 handoff `cli.py run` performs. No terminal, no
-commands — everything is a button, form field, or dropdown.
+in the card. A **Run Full Pipeline** button at the top runs all three tiers in
+sequence, the same tier-1 → tier-2 → tier-3 handoff `cli.py run` performs. No
+terminal, no commands — everything is a button, form field, or dropdown.
+
+Clicking **Run** doesn't just wait and show a final result — it streams the run
+live over Server-Sent Events:
+
+- A **step tracker** shows each module going ⚪ pending → 🟡 running → 🟢 done
+  (or 🔴 failed) as it actually happens.
+- For **Tier 3 agents**, an expandable **thought stream** appends the agent's
+  reasoning and tool calls live, underneath its tracker row, as they're
+  emitted — not just the final message.
+- A **toast notification** in the corner reports success or failure the
+  moment the run finishes, and the card's status pill updates to match.
 
 The web UI and the CLI are two views over the exact same engine and the same
 `orchestrator.db` state store, so a run triggered from one shows up in the
@@ -85,6 +94,9 @@ other's history.
 1. Pick the tier folder (`automations/`, `workflows/`, or `agents/`).
 2. Add `my_module.py` with a class implementing `BaseModule` (see any `example_*.py`
    for the shape — just a `name`, `tier`, `description`, and a `run(context)` method).
+   Call `context.emit("thought", "...")` or `context.emit("tool_call", "...")` from
+   inside `run()` if you want the dashboard's live tracker/thought stream to show
+   your module's own progress, not just start/finish.
 3. Add `my_module.yaml` next to it:
    ```yaml
    name: my_module

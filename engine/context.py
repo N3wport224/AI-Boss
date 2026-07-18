@@ -1,6 +1,6 @@
 from dataclasses import dataclass
 from datetime import datetime
-from typing import Any, Optional
+from typing import Any, Callable, Optional
 
 
 @dataclass
@@ -20,11 +20,18 @@ class ExecutionContext:
     This is the "shared context window" the blueprint calls for: automations,
     workflows, and agents all read from and write to the same `variables` dict,
     so a tier-1 output is directly available as a tier-3 input with no extra glue.
+
+    Modules can also call `emit()` mid-`run()` to report live progress — a
+    thought, a tool call, anything worth surfacing to a watching UI. The
+    Orchestrator wires this to `active_module` before each module runs so every
+    emitted event is automatically tagged with which tier/module produced it.
     """
 
-    def __init__(self, initial: Optional[dict] = None):
+    def __init__(self, initial: Optional[dict] = None, on_event: Optional[Callable[[dict], None]] = None):
         self.variables: dict[str, Any] = dict(initial or {})
         self.history: list[StepRecord] = []
+        self.active_module: Optional[tuple[str, str]] = None
+        self._on_event = on_event
 
     def get(self, key: str, default: Any = None) -> Any:
         return self.variables.get(key, default)
@@ -37,6 +44,16 @@ class ExecutionContext:
 
     def record(self, step: StepRecord) -> None:
         self.history.append(step)
+
+    def emit(self, kind: str, message: str, **extra: Any) -> None:
+        """Report a live event (e.g. "thought", "tool_call") from within a module's run()."""
+        if self._on_event is None:
+            return
+        event: dict[str, Any] = {"kind": kind, "message": message}
+        if self.active_module is not None:
+            event["tier"], event["name"] = self.active_module
+        event.update(extra)
+        self._on_event(event)
 
     def to_dict(self) -> dict:
         return {

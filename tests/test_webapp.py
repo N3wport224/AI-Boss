@@ -1,8 +1,23 @@
+import json
+
 from fastapi.testclient import TestClient
 
 from webapp.main import app
 
 client = TestClient(app)
+
+
+def _collect_stream(stream_id):
+    events = []
+    with client.stream("GET", f"/api/stream/{stream_id}") as response:
+        for line in response.iter_lines():
+            if not line.startswith("data: "):
+                continue
+            event = json.loads(line[len("data: "):])
+            events.append(event)
+            if event["kind"] in ("run_completed", "run_failed"):
+                break
+    return events
 
 
 def test_list_modules_groups_by_tier_and_includes_input_schema():
@@ -17,16 +32,22 @@ def test_list_modules_groups_by_tier_and_includes_input_schema():
     assert {f["name"] for f in automation["inputs"]} == {"signups", "churn", "revenue"}
 
 
-def test_run_single_module_with_overridden_inputs():
+def test_run_single_module_streams_progress_and_completion():
     res = client.post(
         "/api/modules/automation/fetch_raw_metrics/run",
         json={"inputs": {"signups": 200, "churn": 5, "revenue": 999}},
     )
     assert res.status_code == 200
+    stream_id = res.json()["stream_id"]
 
-    body = res.json()
-    assert body["success"] is True
-    assert body["output"]["raw_metrics"] == {"signups": 200.0, "churn": 5.0, "revenue": 999.0}
+    events = _collect_stream(stream_id)
+    kinds = [e["kind"] for e in events]
+    assert kinds == ["step_started", "step_completed", "run_completed"]
+
+    completed = events[1]
+    assert completed["tier"] == "automation"
+    assert completed["name"] == "fetch_raw_metrics"
+    assert completed["output"]["raw_metrics"] == {"signups": 200.0, "churn": 5.0, "revenue": 999.0}
 
 
 def test_run_unknown_module_returns_404():
@@ -34,15 +55,42 @@ def test_run_unknown_module_returns_404():
     assert res.status_code == 404
 
 
-def test_run_full_pipeline_threads_context_through_all_tiers():
+def test_run_full_pipeline_streams_agent_thoughts_and_tool_calls():
     res = client.post("/api/pipeline/run", json={"inputs": {}})
     assert res.status_code == 200
+    stream_id = res.json()["stream_id"]
 
-    body = res.json()
-    assert [s["name"] for s in body["steps"]] == [
-        "fetch_raw_metrics",
-        "analyze_metrics",
-        "churn_response_agent",
+    events = _collect_stream(stream_id)
+
+    step_kinds = [e["kind"] for e in events if e["kind"] in ("step_started", "step_completed")]
+    assert step_kinds == [
+        "step_started", "step_completed",
+        "step_started", "step_completed",
+        "step_started", "step_completed",
     ]
-    assert all(s["success"] for s in body["steps"])
-    assert "agent_decision" in body["context"]
+
+    agent_thoughts = [e for e in events if e["kind"] == "thought" and e.get("name") == "churn_response_agent"]
+    agent_tool_calls = [e for e in events if e["kind"] == "tool_call" and e.get("name") == "churn_response_agent"]
+    assert len(agent_thoughts) > 0
+    assert len(agent_tool_calls) > 0
+
+    final = events[-1]
+    assert final["kind"] == "run_completed"
+    assert "agent_decision" in final["context"]
+
+
+def test_run_module_failure_streams_step_failed_then_run_failed(monkeypatch):
+    import automations.example_automation as example_automation
+
+    def boom(self, context):
+        raise RuntimeError("simulated failure")
+
+    monkeypatch.setattr(example_automation.DataFetchAutomation, "run", boom)
+
+    res = client.post("/api/modules/automation/fetch_raw_metrics/run", json={"inputs": {}})
+    stream_id = res.json()["stream_id"]
+
+    events = _collect_stream(stream_id)
+    kinds = [e["kind"] for e in events]
+    assert kinds == ["step_started", "step_failed", "run_failed"]
+    assert "simulated failure" in events[1]["error"]

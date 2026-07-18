@@ -374,3 +374,134 @@ main {
 
 .pipeline-step.ok { color: var(--ready); }
 .pipeline-step.fail { color: var(--error); }
+
+/* Live progress tracker */
+
+.tracker {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+
+.tracker-step {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 6px 0;
+  font-size: 0.85rem;
+}
+
+.tracker-icon {
+  font-size: 0.85rem;
+  width: 1.2em;
+  text-align: center;
+  flex-shrink: 0;
+}
+
+.tracker-icon.spin {
+  animation: spin-fade 1s infinite ease-in-out;
+}
+
+@keyframes spin-fade {
+  0%, 100% { opacity: 1; }
+  50% { opacity: 0.4; }
+}
+
+.tracker-label {
+  color: var(--text);
+}
+
+.tracker-step.failed .tracker-label {
+  color: var(--error);
+}
+
+.thought-toggle {
+  margin-left: auto;
+  background: none;
+  border: 1px solid var(--border);
+  color: var(--text-dim);
+  font-size: 0.72rem;
+  padding: 3px 10px;
+  border-radius: 999px;
+  cursor: pointer;
+}
+
+.thought-toggle:hover {
+  border-color: var(--accent-agent);
+  color: var(--text);
+}
+
+.thought-box {
+  margin: 2px 0 8px 1.9em;
+  padding: 10px 12px;
+  background: rgba(0, 0, 0, 0.25);
+  border: 1px solid var(--border);
+  border-left: 2px solid var(--accent-agent);
+  border-radius: 8px;
+  font-size: 0.78rem;
+  color: var(--text-dim);
+  max-height: 160px;
+  overflow-y: auto;
+  transition: max-height 0.15s ease, padding 0.15s ease;
+}
+
+.thought-box.hidden {
+  display: none;
+}
+
+.thought-box.collapsed {
+  max-height: 0;
+  padding: 0 12px;
+  overflow: hidden;
+  border: none;
+}
+
+.thought-line {
+  padding: 3px 0;
+  border-bottom: 1px solid rgba(255, 255, 255, 0.05);
+}
+
+.thought-line:last-child {
+  border-bottom: none;
+}
+
+/* Toasts */
+
+.toast-container {
+  position: fixed;
+  top: 110px;
+  right: 24px;
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  z-index: 100;
+  max-width: 340px;
+}
+
+.toast {
+  padding: 14px 18px;
+  border-radius: 10px;
+  background: var(--card-bg);
+  border: 1px solid var(--border);
+  box-shadow: 0 14px 34px -12px rgba(0, 0, 0, 0.7);
+  font-size: 0.85rem;
+  line-height: 1.4;
+  animation: toast-in 0.2s ease;
+}
+
+.toast.success { border-left: 4px solid var(--ready); }
+.toast.error { border-left: 4px solid var(--error); }
+
+.toast.leaving {
+  animation: toast-out 0.2s ease forwards;
+}
+
+@keyframes toast-in {
+  from { transform: translateX(24px); opacity: 0; }
+  to { transform: none; opacity: 1; }
+}
+
+@keyframes toast-out {
+  from { transform: none; opacity: 1; }
+  to { transform: translateX(24px); opacity: 0; }
+}

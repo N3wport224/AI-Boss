@@ -60,7 +60,7 @@ just sitting in the same dict.
 |---|---|
 | `engine/base.py` | `Tier` enum + `BaseModule` abstract contract every module implements |
 | `engine/context.py` | `ExecutionContext` (shared state) + `StepRecord` (one step's audit trail) |
-| `engine/orchestrator.py` | Sequential runner; merges outputs, records history, optionally persists to `StateStore`, controls stop-vs-continue on error |
+| `engine/orchestrator.py` | Sequential runner; merges outputs, records history, optionally persists to `StateStore`, controls stop-vs-continue on error, emits live progress events via `on_event` |
 | `engine/registry.py` | Reads `*.yaml` manifests in a tier folder (`load_manifests`), dynamically imports and instantiates the referenced class (`instantiate`/`discover`) |
 | `engine/state_store.py` | SQLite persistence of run/step history for the `status` CLI command |
 
@@ -68,6 +68,17 @@ just sitting in the same dict.
 after recording the failed step, so a broken pipeline fails loudly; `False` lets
 independent later steps still run (useful once pipelines have parallel-ish
 branches, or a non-critical logging agent at the tail).
+
+`Orchestrator.run(initial_context, on_event)` also accepts an optional
+`on_event` callback. If given, it's called with a stream of events as the run
+happens — `step_started` / `step_completed` / `step_failed` for each module,
+plus `run_completed` / `run_failed` at the end (each carries the final
+`context`). A module can call `context.emit(kind, message)` from inside its own
+`run()` to add its own events (e.g. `"thought"`, `"tool_call"`) into that same
+stream, automatically tagged with which tier/module produced them
+(`ExecutionContext.active_module`, set by the orchestrator before each
+`module.run()` call). The CLI ignores this entirely (`on_event=None`, a no-op);
+the dashboard uses it to drive the live tracker described below.
 
 ## 4. Unified control layer
 
@@ -80,23 +91,46 @@ app (`webapp/main.py`) exposes:
   `description` and `inputs` schema, plus a `status` (`ready`/`error`) derived
   from `StateStore.latest_step_status()`.
 - `POST /api/modules/{tier}/{name}/run` — builds a single-module pipeline
-  (`Orchestrator([module])`), seeds the `ExecutionContext` with the request's
-  `inputs`, runs it, and returns the step's success/output/error.
-- `POST /api/pipeline/run` — the same full tier-1→2→3 pipeline `cli.py run`
-  executes, returned as JSON (per-step status + final context).
-- `GET /api/runs` — recent run history, for anything that wants to poll it.
+  (`Orchestrator([module])`), starts it in a **background thread**, and
+  returns immediately with `{"stream_id": N}` — it does not wait for the run
+  to finish.
+- `POST /api/pipeline/run` — same idea, for the full tier-1→2→3 pipeline.
+- `GET /api/stream/{stream_id}` — a Server-Sent Events stream of that run's
+  events, as they happen, as `data: {...}\n\n` lines.
+- `GET /api/runs` — recent, persisted run history from `StateStore`, for
+  anything that wants to poll it instead.
+
+`stream_id` is deliberately a separate, ephemeral ID space from `StateStore`'s
+persisted `run_id` (`webapp/events.py::RunEventBus`) — it only exists to give a
+live SSE channel something to key on, and is discarded once that stream ends.
+Execution genuinely happens in a background thread (`threading.Thread`, not an
+`asyncio` task), so a slow module never blocks FastAPI's event loop; a
+`queue.Queue` per stream buffers events between the worker thread and whichever
+request is currently reading `/api/stream/{id}`, so a client that connects a
+moment late still gets everything from the start.
 
 The static frontend (`webapp/static/`) is plain HTML/CSS/vanilla JS — no
-bundler, no framework — that renders one card per module (grouped and visually
-separated by tier), reads each module's `inputs` schema to draw a form (text /
-number / select / toggle), and POSTs to the run endpoint on click. A card's
-status pill goes green (ready) → blue (running, set optimistically by the
-client) → green or red (result), matching the architecture's own tiering:
-automations get a sky-blue accent, workflows violet, agents emerald, so the
-tier boundary is visible at a glance independent of the run-status color.
-Because execution is genuinely synchronous, the "running" state is only ever
-as long as the HTTP request is in flight — there's no background job or
-websocket to keep in sync.
+bundler, no framework. Clicking a card's Run button (or "Run Full Pipeline")
+POSTs to kick off the run, then opens `new EventSource('/api/stream/{id}')` and
+renders three things live as events arrive (`app.js`):
+
+- **A step tracker** — one row per module in that run (just one, for a single
+  card; all three tiers, for the full pipeline), each showing ⚪ pending → 🟡
+  running → 🟢 done / 🔴 failed as `step_started`/`step_completed`/
+  `step_failed` events land.
+- **An agent thought accordion** — for any tracker row whose tier is `agent`,
+  `thought` and `tool_call` events append live lines to an expandable panel
+  under that row (💭 for a thought, 🔧 for a tool call), so you can watch an
+  agent's reasoning as it happens rather than only see its final message.
+- **A toast notification** — on the terminal `run_completed`/`run_failed`
+  event, a corner toast reports success or failure, the card's status pill
+  updates (ready/error), and the client explicitly closes the `EventSource`
+  (so a normal completion doesn't trigger the browser's automatic SSE
+  reconnect).
+
+Automations get a sky-blue accent, workflows violet, agents emerald, so the
+tier boundary is visible at a glance independent of the tracker's own
+pending/running/done coloring.
 
 **`cli.py` — the scriptable / CI-friendly control layer:**
 
@@ -148,10 +182,28 @@ each field's declared `type` and `default` from the manifest).
 12. **Add API tests** (`tests/test_webapp.py`, via FastAPI's `TestClient`)
     covering module listing, single-module runs with overridden inputs, 404s,
     and the full-pipeline endpoint.
-13. **Extend from here:** to add a real module, drop a `<name>.py` + `<name>.yaml`
+13. **Add live progress events.** `ExecutionContext.emit()` +
+    `Orchestrator.run(..., on_event=...)` turn a run into a stream of
+    step/thought/tool-call events instead of an opaque black box (also fixed a
+    latent bug along the way: `finish_run("completed")` was unconditionally
+    overwriting `finish_run("failed")` at the end of a continue-on-error run).
+14. **Instrument the example agent** (`agents/example_agent.py`) to call
+    `context.emit("thought", ...)` / `context.emit("tool_call", ...")` with
+    small `time.sleep()`s between them — enough to make the live stream
+    visibly stream rather than resolve instantly, which is what a real
+    LLM-backed agent's latency would look like anyway.
+15. **Move execution to a background thread + SSE** (`webapp/events.py`'s
+    `RunEventBus`, plus `webapp/main.py`'s run endpoints returning a
+    `stream_id` instead of blocking): a synchronous HTTP response can't show
+    "in progress," so a live tracker requires the run to happen off the
+    request thread and the client to subscribe separately.
+16. **Build the tracker, thought accordion, and toasts** (`webapp/static/app.js`,
+    `styles.css`) on top of that stream via `EventSource`.
+17. **Extend from here:** to add a real module, drop a `<name>.py` + `<name>.yaml`
     pair into the right tier folder (see the README's "Adding a new module"
     section) — it appears in both `cli.py list` and the dashboard with no
-    engine or webapp code changes.
+    engine or webapp code changes. Call `context.emit(...)` from inside it if
+    you want its own progress to show up in the live tracker.
 
 ## 6. Roadmap
 
@@ -170,11 +222,13 @@ pipelines. Grow it only when a real need shows up:
 - **LangGraph** — once an agent's "task" is itself a multi-step reasoning loop
   (planning, tool calls, reflection) rather than a single `run()` call, model
   that agent internally as a LangGraph graph while it still presents a single
-  `BaseModule` interface to the orchestrator.
-- **Live status via websockets/SSE** — the dashboard's "running" state is
-  currently optimistic (set on click, resolved when the HTTP response lands).
-  Once a module's `run()` can genuinely take a while (a real LLM call), push
-  status over a websocket instead of relying on the request round-trip.
+  `BaseModule` interface to the orchestrator, calling `context.emit()` at each
+  internal step so the dashboard's thought accordion keeps working unchanged.
+- **Stream replay / reconnect** — `RunEventBus` has no persistence or replay:
+  if a client's `EventSource` drops mid-run and reconnects, whatever was
+  already drained from the queue by the dropped connection is gone. Fine for a
+  single-user local dashboard; move events into something replayable (e.g. a
+  per-run log in `StateStore`) before relying on this over a flaky connection.
 - **Parallel branches** — if two tier-2 workflows are independent, the
   orchestrator can grow a `run_parallel(modules)` that fans out and merges
   results back into one context before continuing, without changing `BaseModule`.

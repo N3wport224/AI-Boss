@@ -4,17 +4,26 @@ Every automation, workflow, and agent becomes a card with a one-click Run button
 and, if it declares `inputs` in its manifest, a small form. No terminal required —
 this is a thin HTTP layer over the exact same engine the CLI uses, so both share
 one run history in the same SQLite state store.
+
+Runs execute in a background thread and stream their progress back over SSE
+(`/api/stream/{stream_id}`), so the dashboard can show a live step tracker and,
+for Tier 3 agents, a running "thought" log — not just a final result once the
+whole thing is done.
 """
+import json
+import threading
 from pathlib import Path
 from typing import Any
 
 from fastapi import FastAPI, HTTPException
-from fastapi.responses import FileResponse
+from fastapi.responses import FileResponse, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 
 from engine import Orchestrator, StateStore, discover
 from engine.registry import instantiate, load_manifests
+
+from .events import RunEventBus
 
 ROOT = Path(__file__).resolve().parent.parent
 STATIC_DIR = Path(__file__).parent / "static"
@@ -26,6 +35,7 @@ TIER_DIRS = {
 
 app = FastAPI(title="AI-Boss Control Center")
 store = StateStore(str(ROOT / "orchestrator.db"))
+bus = RunEventBus()
 
 
 class RunRequest(BaseModel):
@@ -63,6 +73,16 @@ def _build_pipeline():
     return pipeline
 
 
+def _run_in_background(orchestrator: Orchestrator, inputs: dict, stream_id: int) -> None:
+    def worker() -> None:
+        try:
+            orchestrator.run(inputs, on_event=lambda event: bus.publish(stream_id, event))
+        finally:
+            bus.close(stream_id)
+
+    threading.Thread(target=worker, daemon=True).start()
+
+
 @app.get("/api/modules")
 def list_modules():
     result = {}
@@ -92,29 +112,26 @@ def run_module(tier: str, name: str, request: RunRequest):
     inputs = _coerce_inputs(manifest, request.inputs)
 
     orchestrator = Orchestrator([module], state_store=store, stop_on_error=False)
-    context = orchestrator.run(inputs)
-    step = context.history[-1]
-
-    return {
-        "success": step.success,
-        "error": step.error,
-        "output": step.output,
-        "context": context.variables,
-    }
+    stream_id = bus.create()
+    _run_in_background(orchestrator, inputs, stream_id)
+    return {"stream_id": stream_id}
 
 
 @app.post("/api/pipeline/run")
 def run_pipeline(request: RunRequest):
     orchestrator = Orchestrator(_build_pipeline(), state_store=store, stop_on_error=False)
-    context = orchestrator.run(request.inputs)
+    stream_id = bus.create()
+    _run_in_background(orchestrator, request.inputs, stream_id)
+    return {"stream_id": stream_id}
 
-    return {
-        "context": context.variables,
-        "steps": [
-            {"name": s.name, "tier": s.tier, "success": s.success, "error": s.error}
-            for s in context.history
-        ],
-    }
+
+@app.get("/api/stream/{stream_id}")
+def stream_events(stream_id: int):
+    def event_source():
+        for event in bus.stream(stream_id):
+            yield f"data: {json.dumps(event)}\n\n"
+
+    return StreamingResponse(event_source(), media_type="text/event-stream", headers={"Cache-Control": "no-cache"})
 
 
 @app.get("/api/runs")
