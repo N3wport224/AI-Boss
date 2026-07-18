@@ -41,6 +41,56 @@ def csv_bytes_to_records(data: bytes) -> list[dict]:
     return [dict(row) for row in reader]
 
 
+def cleanse_records(records: list[dict]) -> tuple[list[dict], dict]:
+    """Best-effort cleanup applied to every ingested CSV: trims whitespace from
+    keys/values, turns empty-string cells into None, drops fully-blank rows,
+    and drops exact-duplicate rows. Deliberately does not guess at column
+    types or rewrite real values beyond trimming — no schema inference."""
+    stats = {
+        "rows_before": len(records),
+        "blank_rows_removed": 0,
+        "duplicate_rows_removed": 0,
+        "cells_trimmed": 0,
+        "empty_cells_nulled": 0,
+    }
+    cleaned = []
+    seen = set()
+
+    for row in records:
+        new_row = {}
+        all_blank = True
+        for key, value in row.items():
+            clean_key = key.strip() if isinstance(key, str) else key
+            if isinstance(value, str):
+                trimmed = value.strip()
+                if trimmed != value:
+                    stats["cells_trimmed"] += 1
+                if trimmed == "":
+                    new_row[clean_key] = None
+                    stats["empty_cells_nulled"] += 1
+                else:
+                    new_row[clean_key] = trimmed
+                    all_blank = False
+            else:
+                new_row[clean_key] = value
+                if value is not None:
+                    all_blank = False
+
+        if all_blank:
+            stats["blank_rows_removed"] += 1
+            continue
+
+        dedupe_key = json.dumps(new_row, sort_keys=True, default=str)
+        if dedupe_key in seen:
+            stats["duplicate_rows_removed"] += 1
+            continue
+        seen.add(dedupe_key)
+        cleaned.append(new_row)
+
+    stats["rows_after"] = len(cleaned)
+    return cleaned, stats
+
+
 def pdf_bytes_to_text(data: bytes) -> str:
     reader = PdfReader(io.BytesIO(data))
     return "\n\n".join((page.extract_text() or "") for page in reader.pages)
@@ -55,6 +105,7 @@ def ingest_csv_bytes(filename: str, data: bytes, store) -> dict:
         return {"duplicate": True, "original_filename": existing["filename"], "ingested_at": existing["ingested_at"]}
 
     records = csv_bytes_to_records(data)
+    records, cleaning_stats = cleanse_records(records)
     saved_path = save_artifact(filename, data)
     saved_path.with_suffix(".json").write_text(json.dumps(records, indent=2))
     store.record_ingested_file(file_hash, filename, "csv")
@@ -66,6 +117,7 @@ def ingest_csv_bytes(filename: str, data: bytes, store) -> dict:
         "columns": list(records[0].keys()) if records else [],
         "preview": records[:50],
         "truncated": len(records) > 50,
+        "cleaning": cleaning_stats,
     }
 
 
@@ -97,6 +149,40 @@ def list_artifacts() -> list[dict]:
             stat = path.stat()
             files.append({"name": path.name, "size_bytes": stat.st_size, "modified_at": stat.st_mtime})
     return files
+
+
+def search_artifacts(query: str, max_results: int = 20) -> list[dict]:
+    """Case-insensitive keyword search across every ingested artifact's
+    extracted content (.json records for CSVs, .txt text for PDFs) — not the
+    raw uploaded bytes. Returns one entry per matching file with a short
+    snippet showing where the match was found."""
+    ensure_artifacts_dir()
+    query_lower = query.lower().strip()
+    if not query_lower:
+        return []
+
+    results = []
+    for path in sorted(ARTIFACTS_DIR.iterdir(), key=lambda p: p.stat().st_mtime, reverse=True):
+        if path.suffix not in (".json", ".txt"):
+            continue
+        try:
+            text = path.read_text()
+        except (UnicodeDecodeError, OSError):
+            continue
+
+        idx = text.lower().find(query_lower)
+        if idx == -1:
+            continue
+
+        start = max(0, idx - 60)
+        end = min(len(text), idx + len(query_lower) + 60)
+        snippet = " ".join(text[start:end].split())
+        results.append({"artifact": path.name, "kind": path.suffix.lstrip("."), "snippet": snippet})
+
+        if len(results) >= max_results:
+            break
+
+    return results
 
 
 def purge_old_artifacts(older_than_hours: float) -> list[str]:

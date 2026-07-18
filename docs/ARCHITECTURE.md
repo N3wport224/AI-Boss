@@ -441,6 +441,73 @@ only a JSON parse error or timeout falls back to an empty issue list.
     builder's module picker with no engine or webapp code changes. Declare
     `outputs` too if you want other steps to be able to map from it, or
     `type: template` on an input to make it interpolate against context.
+36. **Add per-step execution timeout** (`engine/orchestrator.py`): `StepSpec.
+    timeout_seconds` runs `module.run()` in a shared `ThreadPoolExecutor` and
+    calls `future.result(timeout=...)`; a timeout is surfaced as a normal
+    failed step (a `TimeoutError`), with the error message explicit that
+    Python can't forcibly kill the thread — it only stops the orchestrator
+    from waiting on it.
+37. **Add result caching** (`webapp/cache.py`, `StateStore.set_cached_result`/
+    `get_cached_result`, a new `result_cache` table): a single-module run's
+    output is cached by a SHA-256 hash of `{tier, name, inputs}`; a repeat run
+    with identical inputs replays instantly via a synthesized SSE event
+    sequence (`_replay_cached_result` in `webapp/main.py`) instead of a second
+    background thread, so the frontend's existing tracker code needs no
+    special case beyond a `cached: true` flag. A **Force refresh** checkbox
+    per card bypasses it. Deliberately scoped to single-module runs — a
+    pipeline step's inputs can depend on live upstream context, so "same
+    inputs" isn't well-defined there the way it is for one module in isolation.
+38. **Add graceful shutdown** (`webapp/main.py`'s `lifespan` context manager):
+    every background run thread is tracked in an `_active_run_threads` set;
+    on shutdown, each gets joined with a timeout before the watcher, scheduler,
+    and state store connection are torn down.
+39. **Add a cron-style scheduler** (`webapp/scheduler.py`, a new `schedules`
+    table in `StateStore`): a background thread polls for schedules whose
+    `next_run_at` has passed and calls back into `_trigger_schedule`, which
+    launches the same module/pipeline execution path as a manual run — just
+    without an SSE stream, since nobody's watching a scheduled run live (a
+    stream nobody drains would leak). This is a plain recurring-interval
+    timer, not a real cron-expression parser — no `croniter` dependency, and
+    it's honest about not supporting minute/hour/day-of-week syntax nothing
+    here would use.
+40. **Add CSV auto-cleansing** (`ingestion.cleanse_records`): every ingested
+    CSV is trimmed, blank rows and exact-duplicate rows are dropped, and
+    empty cells become `null`, applied automatically before the JSON
+    conversion is saved — with the before/after counts surfaced in the
+    ingestion result and a small UI banner when anything changed.
+41. **Add keyword search over artifacts** (`ingestion.search_artifacts`,
+    `GET /api/artifacts/search`): a case-insensitive substring search across
+    every ingested file's *extracted* content (the `.json`/`.txt` conversion,
+    not the raw upload bytes), returning a snippet per match.
+42. **Add a process performance ticker** (`webapp/perf.py`, via `psutil`):
+    this process's own CPU%, RSS memory, thread count, and uptime, polled
+    into the header every few seconds — deliberately scoped to "this one
+    process," not a system-wide monitor.
+43. **Add run comparison** (`_parsed_steps_for_run`/`_diff_dicts` in
+    `webapp/main.py`, `GET /api/runs/{id}` and `GET /api/runs/compare`): a
+    step-by-step, key-level diff between any two recorded runs' outputs,
+    surfaced via two dropdowns and a Compare button under Recent Runs.
+44. **Add a DAG visualizer for saved pipelines** (`webapp/graph.py`,
+    `GET /api/pipelines/{slug}/graph`): since a pipeline step's mapping can
+    reference *any* strictly-earlier step (enforced by `validate_pipeline`),
+    the step list is already a valid topological order and the mapping edges
+    form a genuine DAG, not just a chain — rendered client-side as hand-built
+    SVG (sequential backbone + labeled arcs for mapping edges that skip
+    steps), no charting library.
+45. **Add keyboard shortcuts, a regex tester, and a slowest-step highlight**:
+    `/` focuses search, `Esc` closes open dropdown panels, `?` shows a
+    shortcut reminder; a pure-client-side regex tester widget lives under a
+    new **Tools** section; and after any multi-step run, whichever step had
+    the highest `duration_ms` gets a highlighted row and a badge, read
+    straight off the same SSE events the tracker already receives.
+46. **Add tests for all of Batch 3** (`test_orchestrator.py`'s timeout test,
+    `test_scheduler.py`, `test_webapp.py`'s cache/compare/schedule tests,
+    `test_ingestion.py`'s cleansing/search tests, `test_pipelines.py`'s graph
+    test, `test_diagnostics.py`'s performance test): 55 tests total, all
+    exercising real behavior (a monkeypatched call counter proving a cache
+    hit skips re-execution, an actual slow module proving a timeout fires,
+    a real scheduler thread proving it fires on interval and honors
+    pause/resume) rather than asserting shapes alone.
 
 ## 9. Roadmap
 

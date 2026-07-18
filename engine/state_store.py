@@ -32,6 +32,28 @@ CREATE TABLE IF NOT EXISTS ingested_files (
     kind TEXT NOT NULL,
     ingested_at TEXT NOT NULL
 );
+
+CREATE TABLE IF NOT EXISTS result_cache (
+    cache_key TEXT PRIMARY KEY,
+    tier TEXT NOT NULL,
+    name TEXT NOT NULL,
+    output TEXT NOT NULL,
+    cached_at TEXT NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS schedules (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    kind TEXT NOT NULL,
+    tier TEXT,
+    name TEXT NOT NULL,
+    inputs TEXT NOT NULL,
+    interval_seconds REAL NOT NULL,
+    enabled INTEGER NOT NULL DEFAULT 1,
+    next_run_at TEXT NOT NULL,
+    last_run_at TEXT,
+    last_status TEXT,
+    created_at TEXT NOT NULL
+);
 """
 
 
@@ -171,6 +193,108 @@ class StateStore:
             return None
         cols = ("hash", "filename", "kind", "ingested_at")
         return dict(zip(cols, row))
+
+    def set_cached_result(self, cache_key: str, tier: str, name: str, output: dict) -> None:
+        with self._lock:
+            self._conn.execute(
+                "INSERT OR REPLACE INTO result_cache (cache_key, tier, name, output, cached_at) VALUES (?, ?, ?, ?, ?)",
+                (cache_key, tier, name, json.dumps(output), datetime.now(timezone.utc).isoformat()),
+            )
+            self._conn.commit()
+
+    def get_cached_result(self, cache_key: str, max_age_seconds: float = 3600) -> Optional[dict]:
+        """Return a cached module output if one exists and isn't older than
+        `max_age_seconds` (default 1 hour) — no eviction job needed, a stale
+        entry is just treated as a miss and gets overwritten on the next run."""
+        with self._lock:
+            cur = self._conn.execute(
+                "SELECT output, cached_at FROM result_cache WHERE cache_key = ?",
+                (cache_key,),
+            )
+            row = cur.fetchone()
+        if row is None:
+            return None
+        output, cached_at = row
+        age = (datetime.now(timezone.utc) - datetime.fromisoformat(cached_at)).total_seconds()
+        if age > max_age_seconds:
+            return None
+        return json.loads(output)
+
+    def clear_cache(self) -> None:
+        with self._lock:
+            self._conn.execute("DELETE FROM result_cache")
+            self._conn.commit()
+
+    _SCHEDULE_COLUMNS = (
+        "id", "kind", "tier", "name", "inputs", "interval_seconds",
+        "enabled", "next_run_at", "last_run_at", "last_status", "created_at",
+    )
+
+    def _schedule_row_to_dict(self, row) -> dict:
+        record = dict(zip(self._SCHEDULE_COLUMNS, row))
+        record["enabled"] = bool(record["enabled"])
+        record["inputs"] = json.loads(record["inputs"])
+        return record
+
+    def create_schedule(
+        self, kind: str, name: str, interval_seconds: float, next_run_at: str,
+        tier: Optional[str] = None, inputs: Optional[dict] = None,
+    ) -> dict:
+        with self._lock:
+            cur = self._conn.execute(
+                "INSERT INTO schedules (kind, tier, name, inputs, interval_seconds, enabled, "
+                "next_run_at, created_at) VALUES (?, ?, ?, ?, ?, 1, ?, ?)",
+                (
+                    kind, tier, name, json.dumps(inputs or {}), interval_seconds,
+                    next_run_at, datetime.now(timezone.utc).isoformat(),
+                ),
+            )
+            self._conn.commit()
+            schedule_id = cur.lastrowid
+            row = self._conn.execute(
+                f"SELECT {', '.join(self._SCHEDULE_COLUMNS)} FROM schedules WHERE id = ?", (schedule_id,)
+            ).fetchone()
+        return self._schedule_row_to_dict(row)
+
+    def list_schedules(self) -> list[dict]:
+        with self._lock:
+            rows = self._conn.execute(
+                f"SELECT {', '.join(self._SCHEDULE_COLUMNS)} FROM schedules ORDER BY id"
+            ).fetchall()
+        return [self._schedule_row_to_dict(row) for row in rows]
+
+    def due_schedules(self, now_iso: str) -> list[dict]:
+        with self._lock:
+            rows = self._conn.execute(
+                f"SELECT {', '.join(self._SCHEDULE_COLUMNS)} FROM schedules "
+                "WHERE enabled = 1 AND next_run_at <= ?",
+                (now_iso,),
+            ).fetchall()
+        return [self._schedule_row_to_dict(row) for row in rows]
+
+    def set_schedule_enabled(self, schedule_id: int, enabled: bool) -> Optional[dict]:
+        with self._lock:
+            self._conn.execute(
+                "UPDATE schedules SET enabled = ? WHERE id = ?", (int(enabled), schedule_id)
+            )
+            self._conn.commit()
+            row = self._conn.execute(
+                f"SELECT {', '.join(self._SCHEDULE_COLUMNS)} FROM schedules WHERE id = ?", (schedule_id,)
+            ).fetchone()
+        return self._schedule_row_to_dict(row) if row else None
+
+    def record_schedule_run(self, schedule_id: int, next_run_at: str, status: str) -> None:
+        with self._lock:
+            self._conn.execute(
+                "UPDATE schedules SET next_run_at = ?, last_run_at = ?, last_status = ? WHERE id = ?",
+                (next_run_at, datetime.now(timezone.utc).isoformat(), status, schedule_id),
+            )
+            self._conn.commit()
+
+    def delete_schedule(self, schedule_id: int) -> None:
+        with self._lock:
+            self._conn.execute("DELETE FROM schedules WHERE id = ?", (schedule_id,))
+            self._conn.commit()
 
     def close(self) -> None:
         with self._lock:

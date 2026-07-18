@@ -83,6 +83,140 @@ def test_run_full_pipeline_streams_agent_thoughts_and_tool_calls():
     assert "{signups}" not in final["context"]["custom_note"]
 
 
+def test_run_module_result_is_cached_and_force_refresh_bypasses_it(monkeypatch):
+    import automations.example_automation as example_automation
+
+    call_count = {"n": 0}
+    original_run = example_automation.DataFetchAutomation.run
+
+    def counting_run(self, context):
+        call_count["n"] += 1
+        return original_run(self, context)
+
+    monkeypatch.setattr(example_automation.DataFetchAutomation, "run", counting_run)
+
+    payload = {"inputs": {"signups": 321, "churn": 9, "revenue": 555}}
+
+    res1 = client.post("/api/modules/automation/fetch_raw_metrics/run", json=payload)
+    events1 = _collect_stream(res1.json()["stream_id"])
+    assert events1[-1]["kind"] == "run_completed"
+    assert call_count["n"] == 1
+
+    res2 = client.post("/api/modules/automation/fetch_raw_metrics/run", json=payload)
+    body2 = res2.json()
+    assert body2.get("cached") is True
+    events2 = _collect_stream(body2["stream_id"])
+    assert call_count["n"] == 1  # cache hit — the module never ran again
+    completed2 = next(e for e in events2 if e["kind"] == "step_completed")
+    assert completed2.get("cached") is True
+    assert completed2["output"] == events1[1]["output"]
+
+    res3 = client.post(
+        "/api/modules/automation/fetch_raw_metrics/run",
+        json={**payload, "force_refresh": True},
+    )
+    body3 = res3.json()
+    assert "cached" not in body3
+    _collect_stream(body3["stream_id"])
+    assert call_count["n"] == 2  # force_refresh skipped the cache
+
+
+def test_schedule_crud_and_validation():
+    res = client.post(
+        "/api/schedules",
+        json={
+            "kind": "module",
+            "tier": "automation",
+            "name": "fetch_raw_metrics",
+            "inputs": {"signups": 1, "churn": 1, "revenue": 1},
+            "interval_seconds": 30,
+        },
+    )
+    assert res.status_code == 200
+    schedule = res.json()
+    assert schedule["enabled"] is True
+    schedule_id = schedule["id"]
+
+    listed = client.get("/api/schedules").json()
+    assert any(s["id"] == schedule_id for s in listed)
+
+    patched = client.patch(f"/api/schedules/{schedule_id}", json={"enabled": False})
+    assert patched.json()["enabled"] is False
+
+    deleted = client.delete(f"/api/schedules/{schedule_id}")
+    assert deleted.json() == {"deleted": schedule_id}
+    assert not any(s["id"] == schedule_id for s in client.get("/api/schedules").json())
+
+
+def test_schedule_rejects_too_short_interval():
+    res = client.post(
+        "/api/schedules",
+        json={"kind": "module", "tier": "automation", "name": "fetch_raw_metrics", "inputs": {}, "interval_seconds": 1},
+    )
+    assert res.status_code == 400
+
+
+def test_schedule_rejects_unknown_module():
+    res = client.post(
+        "/api/schedules",
+        json={"kind": "module", "tier": "automation", "name": "does_not_exist", "inputs": {}, "interval_seconds": 30},
+    )
+    assert res.status_code == 404
+
+
+def test_schedule_rejects_unknown_pipeline():
+    res = client.post(
+        "/api/schedules",
+        json={"kind": "pipeline", "name": "does-not-exist", "inputs": {}, "interval_seconds": 30},
+    )
+    assert res.status_code == 404
+
+
+def test_run_detail_and_compare_endpoints():
+    res1 = client.post(
+        "/api/modules/automation/fetch_raw_metrics/run",
+        json={"inputs": {"signups": 10, "churn": 1, "revenue": 100}, "force_refresh": True},
+    )
+    _collect_stream(res1.json()["stream_id"])
+
+    res2 = client.post(
+        "/api/modules/automation/fetch_raw_metrics/run",
+        json={"inputs": {"signups": 20, "churn": 2, "revenue": 200}, "force_refresh": True},
+    )
+    _collect_stream(res2.json()["stream_id"])
+
+    runs = client.get("/api/runs?limit=2").json()
+    run_b_id, run_a_id = runs[0]["id"], runs[1]["id"]  # newest first
+
+    detail = client.get(f"/api/runs/{run_a_id}")
+    assert detail.status_code == 200
+    assert detail.json()["steps"][0]["output"]["raw_metrics"]["signups"] == 10.0
+
+    compare = client.get("/api/runs/compare", params={"a": run_a_id, "b": run_b_id})
+    assert compare.status_code == 200
+    body = compare.json()
+    assert len(body["steps"]) == 1
+    diff = body["steps"][0]["output_diff"]
+    assert "raw_metrics" in diff
+    assert diff["raw_metrics"]["a"]["signups"] == 10.0
+    assert diff["raw_metrics"]["b"]["signups"] == 20.0
+
+
+def test_run_detail_404s_for_unknown_run():
+    assert client.get("/api/runs/999999").status_code == 404
+
+
+def test_compare_404s_when_a_run_has_no_steps():
+    res = client.post(
+        "/api/modules/automation/fetch_raw_metrics/run",
+        json={"inputs": {"signups": 1, "churn": 1, "revenue": 1}, "force_refresh": True},
+    )
+    _collect_stream(res.json()["stream_id"])
+    run_id = client.get("/api/runs?limit=1").json()[0]["id"]
+
+    assert client.get("/api/runs/compare", params={"a": run_id, "b": 999999}).status_code == 404
+
+
 def test_run_module_failure_streams_step_failed_then_run_failed(monkeypatch):
     import automations.example_automation as example_automation
 

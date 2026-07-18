@@ -582,6 +582,69 @@ main {
   background: var(--accent-agent);
 }
 
+.run-row {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  flex-wrap: wrap;
+}
+
+.force-refresh-toggle {
+  display: flex;
+  align-items: center;
+  gap: 5px;
+  font-size: 0.78rem;
+  color: var(--text-dim);
+  cursor: pointer;
+  user-select: none;
+}
+
+.cached-badge {
+  color: var(--accent-workflow, #38bdf8);
+  font-size: 0.76rem;
+  margin-bottom: 6px;
+}
+
+.schedule-form {
+  background: var(--bg-elevated);
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  padding: 14px 16px;
+  margin-bottom: 14px;
+}
+
+.schedule-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 10px 14px;
+  border-bottom: 1px solid var(--border);
+  flex-wrap: wrap;
+}
+
+.schedule-row:last-child {
+  border-bottom: none;
+}
+
+.schedule-row-main {
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+  min-width: 0;
+}
+
+.schedule-row-meta {
+  font-size: 0.78rem;
+  color: var(--text-dim);
+}
+
+.schedule-row-actions {
+  display: flex;
+  gap: 8px;
+  flex-shrink: 0;
+}
+
 .result-panel {
   background: var(--bg-elevated);
   border: 1px solid var(--border);
@@ -676,6 +739,17 @@ main {
 
 .tracker-step.failed .tracker-label {
   color: var(--error);
+}
+
+.tracker-step.slowest-step {
+  background: rgba(250, 204, 21, 0.08);
+  border-radius: 6px;
+}
+
+.slowest-badge {
+  margin-left: 8px;
+  color: #facc15;
+  font-size: 0.76rem;
 }
 
 .thought-toggle {
@@ -977,6 +1051,38 @@ main {
   padding: 6px 2px;
 }
 
+.run-compare-bar {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-top: 12px;
+  font-size: 0.82rem;
+  color: var(--text-dim);
+}
+
+.run-compare-bar select {
+  background: var(--bg-elevated);
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  padding: 5px 8px;
+  color: var(--text);
+  max-width: 260px;
+}
+
+.run-compare-step {
+  background: var(--bg-elevated);
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  margin-top: 10px;
+  overflow: hidden;
+}
+
+.run-compare-step h4 {
+  padding: 10px 14px;
+  border-bottom: 1px solid var(--border);
+  font-size: 0.85rem;
+}
+
 /* Skeleton loaders */
 
 .skeleton-card {
@@ -1020,6 +1126,20 @@ main {
 
 .pipeline-card-actions .btn-run {
   flex: 1;
+}
+
+.dag-panel {
+  margin-top: 10px;
+  background: var(--bg-elevated);
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  padding: 10px;
+  min-width: 0; /* .card is a flex column; without this, a wide SVG child
+                   would grow the whole card instead of scrolling within it */
+}
+
+.dag-scroll {
+  overflow-x: auto;
 }
 
 /* Interactive log filtering tabs (System Info / Agent Thoughts / Raw Output) */
@@ -1096,6 +1216,34 @@ main {
   gap: 16px;
 }
 
+.tools-panel {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+
+.tools-panel textarea {
+  width: 100%;
+  background: var(--bg-elevated);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  padding: 8px 10px;
+  color: var(--text);
+  font-family: monospace;
+  font-size: 0.85rem;
+  resize: vertical;
+}
+
+.regex-error {
+  color: var(--error);
+}
+
+#regex-result mark {
+  background: rgba(250, 204, 21, 0.35);
+  color: inherit;
+  border-radius: 3px;
+}
+
 .dropzone {
   border: 2px dashed var(--border);
   border-radius: 12px;
@@ -1145,6 +1293,17 @@ main {
   border-radius: 6px;
   padding: 5px 8px;
   color: var(--text);
+}
+
+.artifact-search-input {
+  flex: 1;
+  min-width: 160px;
+  background: var(--bg-elevated);
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  padding: 6px 10px;
+  color: var(--text);
+  font-size: 0.82rem;
 }
 
 /* Template fields + variable-insertion chips */

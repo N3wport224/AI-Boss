@@ -36,6 +36,11 @@ const metricTotalEl = document.getElementById("metric-total");
 const metricSuccessEl = document.getElementById("metric-success");
 const metricDurationEl = document.getElementById("metric-duration");
 
+const perfCpuEl = document.getElementById("perf-cpu");
+const perfMemEl = document.getElementById("perf-mem");
+const perfThreadsEl = document.getElementById("perf-threads");
+const perfUptimeEl = document.getElementById("perf-uptime");
+
 const favoritesSection = document.getElementById("favorites-section");
 const favoritesGrid = document.getElementById("favorites-grid");
 const recentRunsTableEl = document.getElementById("recent-runs-table");
@@ -53,6 +58,15 @@ const builderResultEl = document.getElementById("builder-result");
 
 const savedPipelinesSection = document.getElementById("saved-pipelines-section");
 const savedPipelinesGrid = document.getElementById("saved-pipelines-grid");
+
+const scheduleAddToggleBtn = document.getElementById("schedule-add-toggle");
+const scheduleFormEl = document.getElementById("schedule-form");
+const scheduleKindEl = document.getElementById("schedule-kind");
+const scheduleTargetEl = document.getElementById("schedule-target");
+const scheduleIntervalEl = document.getElementById("schedule-interval");
+const scheduleErrorEl = document.getElementById("schedule-error");
+const scheduleCreateBtn = document.getElementById("schedule-create-btn");
+const schedulesListEl = document.getElementById("schedules-list");
 
 let currentModulesByTier = {};
 let currentPipelines = [];
@@ -291,6 +305,7 @@ async function loadRecentRuns() {
 
   if (!runs.length) {
     recentRunsTableEl.innerHTML = `<div class="runs-empty">No runs yet — click any Run button below.</div>`;
+    populateCompareSelects([]);
     return;
   }
 
@@ -315,10 +330,94 @@ async function loadRecentRuns() {
       <thead><tr><th>Run</th><th>Status</th><th>Started</th><th>Duration</th></tr></thead>
       <tbody>${rows}</tbody>
     </table>`;
+
+  populateCompareSelects(runs);
+}
+
+// ---- Run comparison ----
+
+const compareRunAEl = document.getElementById("compare-run-a");
+const compareRunBEl = document.getElementById("compare-run-b");
+const compareRunsBtn = document.getElementById("compare-runs-btn");
+const runCompareResultEl = document.getElementById("run-compare-result");
+
+function populateCompareSelects(runs) {
+  const options = runs
+    .map((r) => `<option value="${r.id}">#${r.id} — ${r.status} — ${new Date(r.started_at).toLocaleString()}</option>`)
+    .join("");
+  const previousA = compareRunAEl.value;
+  const previousB = compareRunBEl.value;
+  compareRunAEl.innerHTML = options;
+  compareRunBEl.innerHTML = options;
+  if (runs.some((r) => String(r.id) === previousA)) compareRunAEl.value = previousA;
+  if (runs.some((r) => String(r.id) === previousB)) compareRunBEl.value = previousB;
+  else if (runs.length > 1) compareRunBEl.value = String(runs[1].id);
+}
+
+compareRunsBtn.addEventListener("click", async () => {
+  const a = compareRunAEl.value;
+  const b = compareRunBEl.value;
+  if (!a || !b) return;
+
+  runCompareResultEl.classList.remove("hidden");
+  if (a === b) {
+    runCompareResultEl.innerHTML = `<div class="runs-empty">Pick two different runs to compare.</div>`;
+    return;
+  }
+
+  const res = await fetch(`/api/runs/compare?a=${a}&b=${b}`);
+  if (!res.ok) {
+    const body = await res.json().catch(() => ({}));
+    runCompareResultEl.innerHTML = `<div class="runs-empty">${escapeHtml(body.detail || "Could not compare these runs.")}</div>`;
+    return;
+  }
+
+  const body = await res.json();
+  runCompareResultEl.innerHTML = body.steps
+    .map((step) => {
+      const nameA = step.a ? `${step.a.name} (${step.a.success ? "ok" : "failed"})` : "—";
+      const nameB = step.b ? `${step.b.name} (${step.b.success ? "ok" : "failed"})` : "—";
+      const diffKeys = Object.keys(step.output_diff);
+      const diffRows = diffKeys.length
+        ? diffKeys
+            .map(
+              (key) => `
+              <div class="schedule-row">
+                <div class="schedule-row-main">
+                  <strong>${escapeHtml(key)}</strong>
+                  <span class="schedule-row-meta">A: ${escapeHtml(JSON.stringify(step.output_diff[key].a))} · B: ${escapeHtml(JSON.stringify(step.output_diff[key].b))}</span>
+                </div>
+              </div>`
+            )
+            .join("")
+        : `<div class="schedule-row"><div class="schedule-row-main"><span class="schedule-row-meta">No output differences.</span></div></div>`;
+
+      return `
+        <div class="run-compare-step">
+          <h4>Step ${step.index + 1}: ${escapeHtml(nameA)} vs ${escapeHtml(nameB)}</h4>
+          ${diffRows}
+        </div>`;
+    })
+    .join("");
+});
+
+function formatUptime(seconds) {
+  if (seconds < 60) return `${Math.round(seconds)}s`;
+  if (seconds < 3600) return `${Math.round(seconds / 60)}m`;
+  return `${(seconds / 3600).toFixed(1)}h`;
+}
+
+async function loadPerformance() {
+  const res = await fetch("/api/performance");
+  const p = await res.json();
+  perfCpuEl.textContent = `${p.cpu_percent.toFixed(1)}%`;
+  perfMemEl.textContent = `${p.memory_rss_mb} MB`;
+  perfThreadsEl.textContent = p.active_run_threads > 0 ? `${p.thread_count} (${p.active_run_threads} running)` : p.thread_count;
+  perfUptimeEl.textContent = formatUptime(p.uptime_seconds);
 }
 
 async function refreshTelemetry() {
-  await Promise.all([loadMetrics(), loadRecentRuns()]);
+  await Promise.all([loadMetrics(), loadRecentRuns(), loadPerformance()]);
 }
 
 // ---- Search omnibar ----
@@ -637,10 +736,35 @@ function handleTrackerEvent(container, event) {
     setStepStatus(container, event.index, "running");
   } else if (event.kind === "step_completed") {
     setStepStatus(container, event.index, "done");
+    recordStepDuration(container, event.index, event.duration_ms);
   } else if (event.kind === "step_failed") {
     setStepStatus(container, event.index, "failed", event.error);
+    recordStepDuration(container, event.index, event.duration_ms);
   } else if (event.kind === "thought" || event.kind === "tool_call") {
     appendThought(container, event.index, event.kind, event.message);
+  }
+}
+
+function recordStepDuration(container, index, durationMs) {
+  const row = container.querySelector(`.tracker-step[data-index="${index}"]`);
+  if (row && durationMs != null) row.dataset.durationMs = durationMs;
+}
+
+// Marks whichever step took the longest wall-clock time in a multi-step run —
+// a quick visual cue for "which step is the bottleneck" without having to
+// read every duration by eye.
+function highlightSlowestStep(container) {
+  const rows = Array.from(container.querySelectorAll(".tracker-step[data-duration-ms]"));
+  if (rows.length < 2) return;
+
+  const slowest = rows.reduce((a, b) => (Number(b.dataset.durationMs) > Number(a.dataset.durationMs) ? b : a));
+  slowest.classList.add("slowest-step");
+  const label = slowest.querySelector(".tracker-label");
+  if (label) {
+    const badge = document.createElement("span");
+    badge.className = "slowest-badge";
+    badge.textContent = `🐢 slowest (${Math.round(Number(slowest.dataset.durationMs))}ms)`;
+    label.appendChild(badge);
   }
 }
 
@@ -693,7 +817,13 @@ function renderCard(module) {
       <p class="card-desc">${module.description}</p>
       <div class="code-panel hidden"></div>
       ${fieldsHtml}
-      <button class="btn btn-run" data-tier="${module.tier}" data-name="${module.name}">Run</button>
+      <div class="run-row">
+        <button class="btn btn-run" data-tier="${module.tier}" data-name="${module.name}">Run</button>
+        <label class="force-refresh-toggle" title="Skip the cached result (if any) and run fresh">
+          <input type="checkbox" class="force-refresh-check" id="refresh__${cardId}" />
+          Force refresh
+        </label>
+      </div>
       <div class="tracker hidden"></div>
       <div class="result-panel hidden"></div>
     </div>`;
@@ -804,6 +934,8 @@ async function runModule(tier, name) {
   const button = card.querySelector(".btn-run");
   const resultPanel = card.querySelector(".result-panel");
   const tracker = card.querySelector(".tracker");
+  const forceRefreshEl = card.querySelector(".force-refresh-check");
+  const forceRefresh = forceRefreshEl ? forceRefreshEl.checked : false;
 
   const inputEls = card.querySelectorAll("[id^='field__']");
   const inputs = {};
@@ -820,19 +952,23 @@ async function runModule(tier, name) {
 
   let lastOutput = null;
   let lastError = null;
+  let wasCached = false;
 
   try {
     const res = await fetch(`/api/modules/${tier}/${name}/run`, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ inputs }),
+      body: JSON.stringify({ inputs, force_refresh: forceRefresh }),
     });
     const { stream_id } = await res.json();
 
     subscribeToStream(stream_id, {
       onEvent: (event) => {
         handleTrackerEvent(tracker, event);
-        if (event.kind === "step_completed") lastOutput = event.output;
+        if (event.kind === "step_completed") {
+          lastOutput = event.output;
+          if (event.cached) wasCached = true;
+        }
         if (event.kind === "step_failed") lastError = event.error;
       },
       onDone: async (event) => {
@@ -842,14 +978,17 @@ async function runModule(tier, name) {
 
         resultPanel.classList.remove("hidden", "error");
         if (success) {
-          resultPanel.textContent = JSON.stringify(lastOutput, null, 2);
+          const cachedBadge = wasCached ? '<div class="cached-badge">⚡ cached result — check "Force refresh" to re-run</div>' : "";
+          resultPanel.innerHTML = `${cachedBadge}<div>${escapeHtml(JSON.stringify(lastOutput, null, 2))}</div>`;
         } else {
           resultPanel.classList.add("error");
           resultPanel.textContent = `Error: ${lastError ?? event.error}`;
         }
 
         showToast(
-          success ? `${name} completed successfully.` : `${name} failed: ${lastError ?? event.error}`,
+          success
+            ? `${name} completed successfully.${wasCached ? " (cached)" : ""}`
+            : `${name} failed: ${lastError ?? event.error}`,
           success ? "success" : "error"
         );
         await refreshTelemetry();
@@ -903,6 +1042,7 @@ async function runFullPipeline() {
 
         const success = event.kind === "run_completed";
         renderRunLogTabs(logContainer, log, event.context ?? {});
+        highlightSlowestStep(tracker);
 
         showToast(
           success ? "Full pipeline completed successfully." : `Full pipeline failed: ${event.error}`,
@@ -1154,6 +1294,7 @@ builderLaunchBtn.addEventListener("click", async () => {
 
         const success = event.kind === "run_completed";
         renderRunLogTabs(builderResultEl, log, event.context ?? {});
+        highlightSlowestStep(builderTrackerEl);
 
         showToast(
           success ? `Pipeline "${name}" completed successfully.` : `Pipeline "${name}" failed: ${event.error}`,
@@ -1196,9 +1337,11 @@ function renderSavedPipelines(pipelinesList) {
             <div class="pipeline-card-actions">
               <button class="btn btn-run" data-slug="${p.slug}" data-name="${p.name}">Run</button>
               <button class="btn btn-secondary btn-small" data-clone-slug="${p.slug}" type="button">Clone</button>
+              <button class="btn btn-secondary btn-small" data-graph-slug="${p.slug}" type="button">Graph</button>
             </div>
             <div class="tracker hidden"></div>
             <div class="log-tabs-wrap hidden"></div>
+            <div class="dag-panel hidden"></div>
           </div>`;
       })
       .join("");
@@ -1209,11 +1352,107 @@ function renderSavedPipelines(pipelinesList) {
     savedPipelinesGrid.querySelectorAll("[data-clone-slug]").forEach((btn) => {
       btn.addEventListener("click", () => clonePipeline(btn.dataset.cloneSlug));
     });
+    savedPipelinesGrid.querySelectorAll("[data-graph-slug]").forEach((btn) => {
+      btn.addEventListener("click", () => togglePipelineGraph(btn.dataset.graphSlug));
+    });
     wireFavoriteToggles(savedPipelinesGrid);
   }
 
   applySearchFilter();
   renderFavoritesSection();
+}
+
+const TIER_NODE_COLOR = { automation: "#38bdf8", workflow: "#a78bfa", agent: "#34d399" };
+
+function renderDagSvg(graph) {
+  const nodeWidth = 150;
+  const nodeHeight = 42;
+  const gapX = 70;
+  const rowY = 90;
+  const maxSkip = Math.max(1, ...graph.edges.filter((e) => e.kind === "mapping").map((e) => e.to - e.from));
+  const topMargin = 24 + maxSkip * 26;
+  const width = graph.nodes.length * (nodeWidth + gapX) + gapX;
+  const height = topMargin + rowY + nodeHeight + 20;
+
+  const centerX = (i) => gapX + i * (nodeWidth + gapX) + nodeWidth / 2;
+  const nodeY = topMargin + rowY;
+
+  const nodeBoxes = graph.nodes
+    .map((n) => {
+      const x = gapX + n.index * (nodeWidth + gapX);
+      const color = TIER_NODE_COLOR[n.tier] || "#94a3b8";
+      return `
+        <g>
+          <rect x="${x}" y="${nodeY}" width="${nodeWidth}" height="${nodeHeight}" rx="8"
+                fill="rgba(255,255,255,0.03)" stroke="${color}" stroke-width="1.5"></rect>
+          <text x="${x + nodeWidth / 2}" y="${nodeY + 17}" text-anchor="middle" font-size="10"
+                fill="${color}" font-family="monospace">${escapeHtml(n.tier)}</text>
+          <text x="${x + nodeWidth / 2}" y="${nodeY + 31}" text-anchor="middle" font-size="12"
+                fill="var(--text, #e2e8f0)" font-family="monospace">${escapeHtml(n.name)}</text>
+        </g>`;
+    })
+    .join("");
+
+  const sequenceEdges = graph.edges
+    .filter((e) => e.kind === "sequence")
+    .map((e) => {
+      const x1 = centerX(e.from) + nodeWidth / 2;
+      const x2 = centerX(e.to) - nodeWidth / 2;
+      const y = nodeY + nodeHeight / 2;
+      return `<line x1="${x1}" y1="${y}" x2="${x2}" y2="${y}" stroke="var(--text-dim, #64748b)" stroke-width="1.5" marker-end="url(#arrow-seq)"></line>`;
+    })
+    .join("");
+
+  const mappingEdges = graph.edges
+    .filter((e) => e.kind === "mapping")
+    .map((e) => {
+      const skip = e.to - e.from;
+      const x1 = centerX(e.from);
+      const x2 = centerX(e.to);
+      const peakY = nodeY - 16 - skip * 26;
+      const path = `M ${x1} ${nodeY} Q ${(x1 + x2) / 2} ${peakY} ${x2} ${nodeY}`;
+      const labelY = peakY + 4;
+      return `
+        <path d="${path}" fill="none" stroke="#facc15" stroke-width="1.5" marker-end="url(#arrow-map)"></path>
+        <text x="${(x1 + x2) / 2}" y="${labelY}" text-anchor="middle" font-size="10" fill="#facc15" font-family="monospace">${escapeHtml(e.field)} ← ${escapeHtml(e.output)}</text>`;
+    })
+    .join("");
+
+  return `
+    <svg width="${width}" height="${height}" viewBox="0 0 ${width} ${height}" xmlns="http://www.w3.org/2000/svg">
+      <defs>
+        <marker id="arrow-seq" markerWidth="8" markerHeight="8" refX="6" refY="4" orient="auto">
+          <path d="M0,0 L8,4 L0,8 Z" fill="var(--text-dim, #64748b)"></path>
+        </marker>
+        <marker id="arrow-map" markerWidth="8" markerHeight="8" refX="6" refY="4" orient="auto">
+          <path d="M0,0 L8,4 L0,8 Z" fill="#facc15"></path>
+        </marker>
+      </defs>
+      ${sequenceEdges}
+      ${mappingEdges}
+      ${nodeBoxes}
+    </svg>`;
+}
+
+async function togglePipelineGraph(slug) {
+  const card = document.getElementById(`pipeline-card__${slug}`);
+  const panel = card.querySelector(".dag-panel");
+
+  if (!panel.classList.contains("hidden")) {
+    panel.classList.add("hidden");
+    return;
+  }
+
+  panel.classList.remove("hidden");
+  panel.innerHTML = `<p class="card-desc">Loading graph…</p>`;
+
+  try {
+    const res = await fetch(`/api/pipelines/${slug}/graph`);
+    const graph = await res.json();
+    panel.innerHTML = `<div class="dag-scroll">${renderDagSvg(graph)}</div>`;
+  } catch (err) {
+    panel.innerHTML = `<p class="card-desc">Could not load graph: ${err}</p>`;
+  }
 }
 
 async function loadSavedPipelines() {
@@ -1271,6 +1510,7 @@ async function runSavedPipeline(slug, name, pipelinesList) {
         button.disabled = false;
         const success = event.kind === "run_completed";
         renderRunLogTabs(logContainer, log, event.context ?? {});
+        highlightSlowestStep(tracker);
         showToast(
           success ? `${name} completed successfully.` : `${name} failed: ${event.error}`,
           success ? "success" : "error"
@@ -1292,6 +1532,8 @@ const ingestionResultEl = document.getElementById("ingestion-result");
 const artifactsListEl = document.getElementById("artifacts-list");
 const purgeHoursInput = document.getElementById("purge-hours");
 const purgeBtn = document.getElementById("purge-btn");
+const artifactSearchInput = document.getElementById("artifact-search");
+const artifactSearchResultsEl = document.getElementById("artifact-search-results");
 
 function formatBytes(bytes) {
   if (bytes < 1024) return `${bytes} B`;
@@ -1325,6 +1567,45 @@ async function loadArtifacts() {
     </table>`;
 }
 
+let artifactSearchDebounce = null;
+
+async function runArtifactSearch(query) {
+  if (!query.trim()) {
+    artifactSearchResultsEl.classList.add("hidden");
+    artifactsListEl.classList.remove("hidden");
+    return;
+  }
+
+  const res = await fetch(`/api/artifacts/search?q=${encodeURIComponent(query)}`);
+  const body = await res.json();
+
+  artifactsListEl.classList.add("hidden");
+  artifactSearchResultsEl.classList.remove("hidden");
+
+  if (!body.results.length) {
+    artifactSearchResultsEl.innerHTML = `<div class="runs-empty">No ingested content matches "${escapeHtml(query)}".</div>`;
+    return;
+  }
+
+  artifactSearchResultsEl.innerHTML = body.results
+    .map(
+      (r) => `
+      <div class="schedule-row">
+        <div class="schedule-row-main">
+          <strong>${escapeHtml(r.artifact)}</strong>
+          <span class="schedule-row-meta">…${escapeHtml(r.snippet)}…</span>
+        </div>
+      </div>`
+    )
+    .join("");
+}
+
+artifactSearchInput.addEventListener("input", () => {
+  clearTimeout(artifactSearchDebounce);
+  const query = artifactSearchInput.value;
+  artifactSearchDebounce = setTimeout(() => runArtifactSearch(query), 250);
+});
+
 async function uploadFile(file) {
   const lowerName = file.name.toLowerCase();
   const isPdf = lowerName.endsWith(".pdf");
@@ -1356,8 +1637,21 @@ async function uploadFile(file) {
     } else if (isCsv) {
       const preview = JSON.stringify(body.preview, null, 2);
       const note = body.truncated ? `\n… (truncated — ${body.row_count} rows total)` : "";
-      ingestionResultEl.innerHTML = `<pre class="log-tab-content">${preview}${note}</pre>`;
-      showToast(`Ingested ${body.filename}: ${body.row_count} row(s).`, "success");
+      const cleaning = body.cleaning || {};
+      const cleaningNotes = [];
+      if (cleaning.blank_rows_removed) cleaningNotes.push(`${cleaning.blank_rows_removed} blank row(s) removed`);
+      if (cleaning.duplicate_rows_removed) cleaningNotes.push(`${cleaning.duplicate_rows_removed} duplicate row(s) removed`);
+      if (cleaning.cells_trimmed) cleaningNotes.push(`${cleaning.cells_trimmed} cell(s) trimmed`);
+      const cleaningBanner = cleaningNotes.length
+        ? `<div class="cached-badge">🧹 auto-cleansed: ${cleaningNotes.join(", ")}</div>`
+        : "";
+      ingestionResultEl.innerHTML = `${cleaningBanner}<pre class="log-tab-content">${preview}${note}</pre>`;
+      showToast(
+        cleaningNotes.length
+          ? `Ingested ${body.filename}: ${body.row_count} row(s) (${cleaningNotes.join(", ")}).`
+          : `Ingested ${body.filename}: ${body.row_count} row(s).`,
+        "success"
+      );
     } else {
       const note = body.truncated ? "\n… (truncated)" : "";
       ingestionResultEl.innerHTML = `<pre class="log-tab-content">${body.preview}${note}</pre>`;
@@ -1456,6 +1750,213 @@ async function pollWatcherStatus() {
 
 setInterval(pollWatcherStatus, 4000);
 
+// ---- Scheduler ----
+
+function populateScheduleTargets() {
+  const kind = scheduleKindEl.value;
+  scheduleTargetEl.innerHTML = "";
+
+  if (kind === "module") {
+    TIER_ORDER.forEach((tier) => {
+      (currentModulesByTier[tier] || []).forEach((m) => {
+        const opt = document.createElement("option");
+        opt.value = `${tier}::${m.name}`;
+        opt.textContent = `[${tier}] ${m.name}`;
+        scheduleTargetEl.appendChild(opt);
+      });
+    });
+  } else {
+    currentPipelines.forEach((p) => {
+      const opt = document.createElement("option");
+      opt.value = p.slug;
+      opt.textContent = p.name;
+      scheduleTargetEl.appendChild(opt);
+    });
+  }
+}
+
+function formatInterval(seconds) {
+  if (seconds < 60) return `${seconds}s`;
+  if (seconds < 3600) return `${Math.round(seconds / 60)}m`;
+  return `${Math.round(seconds / 3600)}h`;
+}
+
+function timeUntil(isoString) {
+  const diffMs = new Date(isoString).getTime() - Date.now();
+  if (diffMs <= 0) return "due now";
+  return `in ${formatInterval(Math.round(diffMs / 1000))}`;
+}
+
+async function loadSchedules() {
+  const res = await fetch("/api/schedules");
+  const schedules = await res.json();
+
+  if (!schedules.length) {
+    schedulesListEl.className = "runs-empty";
+    schedulesListEl.textContent = "No schedules yet — recurring runs will appear here.";
+    return;
+  }
+
+  schedulesListEl.className = "runs-table";
+  schedulesListEl.innerHTML = schedules
+    .map((s) => {
+      const label = s.kind === "module" ? `[${s.tier}] ${s.name}` : `pipeline: ${s.name}`;
+      const status = s.last_status
+        ? `last: ${escapeHtml(s.last_status)}${s.last_run_at ? ` @ ${new Date(s.last_run_at).toLocaleTimeString()}` : ""}`
+        : "never run yet";
+      return `
+        <div class="schedule-row">
+          <div class="schedule-row-main">
+            <strong>${escapeHtml(label)}</strong>
+            <span class="schedule-row-meta">every ${formatInterval(s.interval_seconds)} · next ${s.enabled ? timeUntil(s.next_run_at) : "paused"} · ${status}</span>
+          </div>
+          <div class="schedule-row-actions">
+            <button class="btn btn-secondary btn-small" data-schedule-toggle="${s.id}" data-enabled="${s.enabled}">
+              ${s.enabled ? "Pause" : "Resume"}
+            </button>
+            <button class="btn btn-secondary btn-small" data-schedule-delete="${s.id}">Delete</button>
+          </div>
+        </div>`;
+    })
+    .join("");
+
+  schedulesListEl.querySelectorAll("[data-schedule-toggle]").forEach((btn) => {
+    btn.addEventListener("click", async () => {
+      const id = btn.dataset.scheduleToggle;
+      const enabled = btn.dataset.enabled === "true";
+      await fetch(`/api/schedules/${id}`, {
+        method: "PATCH",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ enabled: !enabled }),
+      });
+      await loadSchedules();
+    });
+  });
+
+  schedulesListEl.querySelectorAll("[data-schedule-delete]").forEach((btn) => {
+    btn.addEventListener("click", async () => {
+      await fetch(`/api/schedules/${btn.dataset.scheduleDelete}`, { method: "DELETE" });
+      await loadSchedules();
+      showToast("Schedule deleted.", "success");
+    });
+  });
+}
+
+scheduleAddToggleBtn.addEventListener("click", () => {
+  scheduleFormEl.classList.toggle("hidden");
+  if (!scheduleFormEl.classList.contains("hidden")) populateScheduleTargets();
+});
+
+scheduleKindEl.addEventListener("change", populateScheduleTargets);
+
+scheduleCreateBtn.addEventListener("click", async () => {
+  scheduleErrorEl.classList.add("hidden");
+  const kind = scheduleKindEl.value;
+  const target = scheduleTargetEl.value;
+  const intervalSeconds = Number(scheduleIntervalEl.value);
+
+  if (!target) {
+    scheduleErrorEl.textContent = "No target available to schedule yet.";
+    scheduleErrorEl.classList.remove("hidden");
+    return;
+  }
+
+  const payload = { kind, interval_seconds: intervalSeconds, inputs: {} };
+  if (kind === "module") {
+    const [tier, name] = target.split("::");
+    payload.tier = tier;
+    payload.name = name;
+  } else {
+    payload.name = target;
+  }
+
+  const res = await fetch("/api/schedules", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(payload),
+  });
+
+  if (!res.ok) {
+    const body = await res.json().catch(() => ({}));
+    scheduleErrorEl.textContent = body.detail || "Could not create schedule.";
+    scheduleErrorEl.classList.remove("hidden");
+    return;
+  }
+
+  scheduleFormEl.classList.add("hidden");
+  await loadSchedules();
+  showToast("Schedule created.", "success");
+});
+
+setInterval(loadSchedules, 5000);
+setInterval(loadPerformance, 3000);
+
+// ---- Regex tester ----
+
+const regexPatternEl = document.getElementById("regex-pattern");
+const regexFlagsEl = document.getElementById("regex-flags");
+const regexTestStringEl = document.getElementById("regex-test-string");
+const regexResultEl = document.getElementById("regex-result");
+
+function runRegexTest() {
+  const pattern = regexPatternEl.value;
+  const flags = regexFlagsEl.value;
+  const text = regexTestStringEl.value;
+
+  if (!pattern) {
+    regexResultEl.innerHTML = `<p class="card-desc">Enter a pattern to test.</p>`;
+    return;
+  }
+
+  let re;
+  try {
+    re = new RegExp(pattern, flags.includes("g") ? flags : `${flags}g`);
+  } catch (err) {
+    regexResultEl.innerHTML = `<p class="card-desc regex-error">Invalid pattern: ${escapeHtml(err.message)}</p>`;
+    return;
+  }
+
+  const matches = [...text.matchAll(re)];
+  let highlighted = "";
+  let lastIndex = 0;
+  for (const m of matches) {
+    highlighted += escapeHtml(text.slice(lastIndex, m.index));
+    highlighted += `<mark>${escapeHtml(m[0])}</mark>`;
+    lastIndex = m.index + m[0].length;
+  }
+  highlighted += escapeHtml(text.slice(lastIndex));
+
+  const groupsInfo = matches
+    .map((m, i) => (m.length > 1 ? `Match ${i + 1} groups: ${JSON.stringify(m.slice(1))}` : null))
+    .filter(Boolean)
+    .join("\n");
+
+  regexResultEl.innerHTML = `
+    <p class="card-desc">${matches.length} match(es)</p>
+    <pre class="log-tab-content">${highlighted || "<em>(empty test string)</em>"}</pre>
+    ${groupsInfo ? `<pre class="log-tab-content">${escapeHtml(groupsInfo)}</pre>` : ""}`;
+}
+
+[regexPatternEl, regexFlagsEl, regexTestStringEl].forEach((el) => el.addEventListener("input", runRegexTest));
+runRegexTest();
+
+// ---- Keyboard shortcuts ----
+
+document.addEventListener("keydown", (event) => {
+  const isTyping = ["INPUT", "TEXTAREA", "SELECT"].includes(document.activeElement.tagName);
+
+  if (event.key === "/" && !isTyping) {
+    event.preventDefault();
+    searchOmnibar.focus();
+  } else if (event.key === "Escape") {
+    document.activeElement.blur();
+    notificationsPanel.classList.add("hidden");
+    healthPanel.classList.add("hidden");
+  } else if (event.key === "?" && !isTyping) {
+    showToast("Shortcuts: “/” search · Esc close panels · “?” this help", "success");
+  }
+});
+
 // ---- Boot ----
 
 renderSkeletonSections();
@@ -1466,3 +1967,4 @@ refreshTelemetry();
 loadArtifacts();
 pollWatcherStatus();
 renderNotificationsPanel();
+loadSchedules();

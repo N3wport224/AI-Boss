@@ -29,6 +29,18 @@ def test_health_check_reports_ready_for_the_bundled_modules():
     assert all(check["ok"] for check in body["checks"])
 
 
+def test_performance_reports_a_live_process_snapshot():
+    res = client.get("/api/performance")
+    assert res.status_code == 200
+
+    body = res.json()
+    assert body["pid"] > 0
+    assert body["memory_rss_mb"] > 0
+    assert body["thread_count"] >= 1
+    assert body["active_run_threads"] >= 0
+    assert body["uptime_seconds"] >= 0
+
+
 def test_metrics_reflect_a_completed_run():
     before = client.get("/api/metrics").json()
 

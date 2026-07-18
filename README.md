@@ -34,10 +34,14 @@ AI-Boss/
 │   ├── pipelines.py           #   Storage/validation for user-built pipelines
 │   ├── events.py               #   SSE event bus for live run streaming
 │   ├── health.py                #   Startup diagnostics (manifests, entrypoints, state store)
-│   ├── ingestion.py              #   CSV/PDF upload, hash-dedupe, artifact storage/purge
+│   ├── ingestion.py              #   CSV/PDF upload, hash-dedupe, auto-cleansing, artifact search/purge
 │   ├── watcher.py                 #   Polling-based folder watcher (no watchdog dependency)
 │   ├── linting.py                  #   Read-only per-module source + ruff lint view
-│   └── static/                      #   index.html / styles.css / app.js — the dashboard itself
+│   ├── cache.py                     #   Cache-key hashing for single-module result caching
+│   ├── scheduler.py                  #   In-process recurring-run scheduler ("cron-style")
+│   ├── perf.py                        #   Live process resource snapshot (CPU/mem/threads)
+│   ├── graph.py                        #   Builds a saved pipeline's DAG (nodes/edges) for the visualizer
+│   └── static/                          #   index.html / styles.css / app.js — the dashboard itself
 ├── automations/              # Tier 1 — drop in a <name>.py + <name>.yaml pair
 │   ├── example_automation.py
 │   └── example_automation.yaml
@@ -59,7 +63,8 @@ AI-Boss/
 │   ├── test_ingestion.py
 │   ├── test_templating.py
 │   ├── test_watcher.py
-│   └── test_linting.py
+│   ├── test_linting.py
+│   └── test_scheduler.py
 ├── docs/
 │   └── ARCHITECTURE.md
 ├── cli.py                    # Scriptable control layer: list / run / status
@@ -225,6 +230,59 @@ A few things live in the header/subheader on every page load:
   list of line/column/rule findings), read-only, scoped to exactly that
   module's own file — never an arbitrary path.
 
+## Reliability, scheduling, and inspection tools
+
+- **Result caching with force-refresh** — a single-module card run is cached
+  by a hash of `{tier, name, inputs}` (`webapp/cache.py`); re-running with the
+  exact same inputs returns instantly with a "⚡ cached result" badge instead
+  of re-executing. Check **Force refresh** on a card to bypass the cache for
+  that run. Scoped deliberately to single-module runs, not pipelines — a
+  pipeline step's inputs can depend on live upstream context, so "same
+  inputs" isn't well-defined the same way there.
+- **Per-step execution timeout** — every `StepSpec` the dashboard builds now
+  carries a `timeout_seconds` (`engine/orchestrator.py`); a step that runs
+  longer is recorded as a failed step with a clear message. Python can't
+  forcibly kill a running thread, so this only stops the orchestrator from
+  *waiting* on it — documented explicitly in the error text.
+- **Graceful shutdown** — the FastAPI app tracks every in-flight background
+  run thread and gives them a few seconds to finish (or at least stop being
+  waited on) before the process exits, instead of runs disappearing mid-flight.
+- **Cron-style scheduler** — schedule any module or saved pipeline to run on
+  a recurring interval from the **Schedules** section (create, pause/resume,
+  delete). This is a plain "every N seconds" timer (`webapp/scheduler.py`),
+  not a real cron-expression engine — no new dependency, and it covers the
+  actual local-tool use case without pretending to parse minute/hour/day-of-
+  week syntax nothing here would use.
+- **CSV auto-cleansing on ingest** — every CSV upload is automatically
+  trimmed of whitespace, has blank rows dropped, exact-duplicate rows
+  removed, and empty cells turned into `null` (`ingestion.cleanse_records`).
+  The ingestion result shows a "🧹 auto-cleansed" summary when anything
+  changed. No schema inference or type coercion — just cleanup.
+- **Keyword search over artifacts** — the Data Ingestion panel's search box
+  does a case-insensitive full-text search across every ingested file's
+  *extracted* content (the JSON/text conversion, not the raw upload) and
+  shows a snippet per match.
+- **Process performance ticker** — the header shows this process's own live
+  CPU%, RSS memory, thread count, and uptime (`webapp/perf.py`, via
+  `psutil`) — not a system-wide monitor, just "how is this one process doing."
+- **Run comparison / diff tool** — pick any two runs in **Recent Runs** and
+  click **Compare** to see a step-by-step, key-level diff of their outputs
+  side by side.
+- **DAG visualizer** — click **Graph** on a saved pipeline card to render its
+  steps and data-mapping dependencies as an SVG graph. Since a mapped field
+  can pull from *any* earlier step (not just the one immediately before it),
+  this is a genuine DAG, not just a straight line — skip-edges are drawn as
+  labeled arcs above the sequential backbone.
+- **Keyboard shortcuts** — `/` focuses the search bar, `Esc` closes open
+  dropdown panels, `?` shows a quick shortcut reminder toast.
+- **Regex tester** — a small client-side widget under **Tools**: type a
+  pattern and flags, paste test text, see matches highlighted live and
+  captured groups listed. Pure JS, no backend round-trip.
+- **Slowest-step highlight** — after any multi-step run finishes, whichever
+  step took the longest wall-clock time gets a highlighted row and a
+  "🐢 slowest (Nms)" badge in its tracker, so the bottleneck is visible at a
+  glance instead of having to read every duration.
+
 ## Tech stack
 
 - **Language:** Python 3.11+ — first-class async/sync support and native SDKs
@@ -246,6 +304,8 @@ A few things live in the header/subheader on every page load:
   the only two new runtime dependencies added since the initial scaffold.
 - **Linting:** `ruff` invoked as a subprocess, scoped to exactly the file a
   module's own manifest `entrypoint` resolves to.
+- **Performance ticker:** `psutil`, reading only this process's own resource
+  usage — not a system-wide monitor.
 - **CI:** GitHub Actions running `pytest` (engine + API tests) and a CLI smoke
   test on every push.
 

@@ -1,3 +1,5 @@
+import time
+
 from engine import BaseModule, Orchestrator, StepSpec, Tier
 from engine.context import ExecutionContext
 
@@ -34,6 +36,15 @@ class Fails(BaseModule):
 
     def run(self, context: ExecutionContext) -> dict:
         raise RuntimeError("boom")
+
+
+class Slow(BaseModule):
+    name = "slow"
+    tier = Tier.AUTOMATION
+
+    def run(self, context: ExecutionContext) -> dict:
+        time.sleep(0.3)
+        return {"done": True}
 
 
 def test_pipeline_threads_context_sequentially():
@@ -85,3 +96,16 @@ def test_step_spec_list_can_mix_bare_modules_and_specs():
     context = orchestrator.run({"value": 5})
 
     assert context.get("value") == 11
+
+
+def test_step_spec_timeout_fails_a_slow_step():
+    # Python can't forcibly kill a thread, so a timeout only stops the
+    # orchestrator from waiting on it — the step is recorded as a failure.
+    steps = [StepSpec(module=Slow(), timeout_seconds=0.05)]
+    orchestrator = Orchestrator(steps, stop_on_error=False)
+    context = orchestrator.run({})
+
+    step = context.history[0]
+    assert step.success is False
+    assert "did not finish within 0.05s" in step.error
+    assert context.get("done") is None

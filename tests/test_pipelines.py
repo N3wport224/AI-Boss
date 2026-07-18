@@ -100,6 +100,39 @@ def test_mapping_wires_an_earlier_steps_output_into_a_later_field():
     assert "Slack notification queued" in agent_step["output"]["agent_decision"]["message"]
 
 
+def test_pipeline_graph_reports_nodes_sequence_and_mapping_edges():
+    payload = {
+        "name": "Graph Test",
+        "steps": [
+            {"tier": "automation", "name": "fetch_raw_metrics", "inputs": {"signups": 10, "churn": 9, "revenue": 1}},
+            {"tier": "workflow", "name": "analyze_metrics", "inputs": {"risk_threshold": 0.1}},
+            {
+                "tier": "agent",
+                "name": "churn_response_agent",
+                "inputs": {},
+                "mappings": {"notify_slack": {"step": 1, "output": "insight"}},
+            },
+        ],
+    }
+    client.post("/api/pipelines", json=payload)
+
+    res = client.get("/api/pipelines/graph_test/graph")
+    assert res.status_code == 200
+    body = res.json()
+
+    assert [n["name"] for n in body["nodes"]] == ["fetch_raw_metrics", "analyze_metrics", "churn_response_agent"]
+
+    sequence_edges = [e for e in body["edges"] if e["kind"] == "sequence"]
+    assert sequence_edges == [{"from": 0, "to": 1, "kind": "sequence"}, {"from": 1, "to": 2, "kind": "sequence"}]
+
+    mapping_edges = [e for e in body["edges"] if e["kind"] == "mapping"]
+    assert mapping_edges == [{"from": 1, "to": 2, "kind": "mapping", "field": "notify_slack", "output": "insight"}]
+
+
+def test_pipeline_graph_404s_for_unknown_slug():
+    assert client.get("/api/pipelines/does-not-exist/graph").status_code == 404
+
+
 def test_template_field_interpolates_against_an_earlier_steps_flat_context_keys():
     # custom_note is a "template" field — {signups}/{churn} should resolve using
     # whatever the automation step put in context, not stay literal placeholders.
