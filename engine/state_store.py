@@ -25,6 +25,13 @@ CREATE TABLE IF NOT EXISTS steps (
     started_at TEXT NOT NULL,
     finished_at TEXT NOT NULL
 );
+
+CREATE TABLE IF NOT EXISTS ingested_files (
+    hash TEXT PRIMARY KEY,
+    filename TEXT NOT NULL,
+    kind TEXT NOT NULL,
+    ingested_at TEXT NOT NULL
+);
 """
 
 
@@ -141,6 +148,29 @@ class StateStore:
             "success_rate": round(completed / total, 4) if total else None,
             "avg_duration_seconds": round(sum(durations) / len(durations), 3) if durations else None,
         }
+
+    def record_ingested_file(self, file_hash: str, filename: str, kind: str) -> None:
+        """Record a successfully-ingested file's hash for future dedupe checks.
+        INSERT OR IGNORE: if this exact hash was already recorded, keep the
+        original filename/timestamp rather than overwriting them."""
+        with self._lock:
+            self._conn.execute(
+                "INSERT OR IGNORE INTO ingested_files (hash, filename, kind, ingested_at) VALUES (?, ?, ?, ?)",
+                (file_hash, filename, kind, datetime.now(timezone.utc).isoformat()),
+            )
+            self._conn.commit()
+
+    def find_ingested_file(self, file_hash: str) -> Optional[dict]:
+        with self._lock:
+            cur = self._conn.execute(
+                "SELECT hash, filename, kind, ingested_at FROM ingested_files WHERE hash = ?",
+                (file_hash,),
+            )
+            row = cur.fetchone()
+        if row is None:
+            return None
+        cols = ("hash", "filename", "kind", "ingested_at")
+        return dict(zip(cols, row))
 
     def close(self) -> None:
         with self._lock:

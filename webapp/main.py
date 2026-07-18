@@ -14,20 +14,21 @@ import csv
 import io
 import json
 import threading
-from datetime import datetime
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
-from fastapi import FastAPI, HTTPException
+from fastapi import FastAPI, File, HTTPException, UploadFile
 from fastapi.responses import FileResponse, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 
-from engine import Orchestrator, StateStore, StepSpec, discover
+from engine import Orchestrator, StateStore, StepSpec, interpolate_template_fields
 from engine.registry import instantiate, load_manifests
 
-from . import health, pipelines as pipeline_store
+from . import health, ingestion, linting, pipelines as pipeline_store
 from .events import RunEventBus
+from .watcher import FilesystemWatcher, WATCH_DIR, ensure_watch_dir
 
 ROOT = Path(__file__).resolve().parent.parent
 STATIC_DIR = Path(__file__).parent / "static"
@@ -40,6 +41,37 @@ TIER_DIRS = {
 app = FastAPI(title="AI-Boss Control Center")
 store = StateStore(str(ROOT / "orchestrator.db"))
 bus = RunEventBus()
+
+ingestion.ensure_artifacts_dir()
+ingestion.purge_old_artifacts(older_than_hours=24 * 7)  # sweep anything left over a week ago
+
+_watcher_log: list[dict] = []
+
+
+def _on_watched_file(path: Path) -> None:
+    """Auto-ingest a file the moment it appears in watched_input/ — same CSV/PDF
+    handling as a manual upload, just triggered by the filesystem instead of a click."""
+    suffix = path.suffix.lower()
+    entry = {"filename": path.name, "at": datetime.now(timezone.utc).isoformat()}
+    try:
+        data = path.read_bytes()
+        if suffix == ".csv":
+            result = ingestion.ingest_csv_bytes(path.name, data, store)
+        elif suffix == ".pdf":
+            result = ingestion.ingest_pdf_bytes(path.name, data, store)
+        else:
+            entry["error"] = f"Unsupported file type '{suffix}' — only .csv and .pdf are auto-ingested."
+            _watcher_log.append(entry)
+            return
+        entry["duplicate"] = result.get("duplicate", False)
+    except Exception as exc:
+        entry["error"] = str(exc)
+    _watcher_log.append(entry)
+
+
+ensure_watch_dir()
+_watcher = FilesystemWatcher(on_new_file=_on_watched_file, interval=2.0)
+_watcher.start()
 
 
 class RunRequest(BaseModel):
@@ -88,11 +120,25 @@ def _coerce_inputs(manifest: dict, raw_inputs: dict) -> dict:
     return coerced
 
 
-def _build_pipeline():
-    pipeline = []
+def _build_pipeline() -> list[StepSpec]:
+    """The fixed tier-1 -> tier-2 -> tier-3 pipeline, run with each module's own
+    manifest defaults. Wrapped in StepSpecs (not bare modules) so any `template`
+    field's default text — e.g. "{signups} signups, {churn} churn events" — still
+    gets interpolated against whatever's in context by the time that step runs,
+    the same as a hand-built pipeline's own template fields."""
+    steps = []
     for tier in ("automation", "workflow", "agent"):
-        pipeline.extend(discover(TIER_DIRS[tier]))
-    return pipeline
+        for manifest in load_manifests(TIER_DIRS[tier]):
+            if not manifest.get("enabled", True):
+                continue
+            module = instantiate(manifest["entrypoint"])
+            defaults = _coerce_inputs(manifest, {})
+
+            def seed(ctx, manifest=manifest, defaults=defaults):
+                return interpolate_template_fields(manifest, defaults, ctx.get)
+
+            steps.append(StepSpec(module=module, seed=seed))
+    return steps
 
 
 def _run_in_background(orchestrator: Orchestrator, inputs: dict, stream_id: int) -> None:
@@ -117,11 +163,11 @@ def _build_steps_from_definition(definition: dict) -> list[StepSpec]:
         static_inputs = _coerce_inputs(manifest, step.get("inputs") or {})
         mappings = step.get("mappings") or {}
 
-        def seed(ctx, static=static_inputs, maps=mappings):
+        def seed(ctx, static=static_inputs, maps=mappings, manifest=manifest):
             resolved = dict(static)
             for field, mapping in maps.items():
                 resolved[field] = ctx.get(mapping["output"])
-            return resolved
+            return interpolate_template_fields(manifest, resolved, ctx.get)
 
         steps.append(StepSpec(module=module, seed=seed))
     return steps
@@ -157,11 +203,23 @@ def list_modules():
     return result
 
 
+@app.get("/api/modules/{tier}/{name}/source")
+def module_source(tier: str, name: str):
+    manifest = _manifest_by_name(tier, name)
+    try:
+        return linting.read_module_source(manifest["entrypoint"])
+    except linting.SourceNotFoundError as exc:
+        raise HTTPException(status_code=404, detail=str(exc))
+
+
 @app.post("/api/modules/{tier}/{name}/run")
 def run_module(tier: str, name: str, request: RunRequest):
     manifest = _manifest_by_name(tier, name)
     module = instantiate(manifest["entrypoint"])
     inputs = _coerce_inputs(manifest, request.inputs)
+    # A template field can reference {a_sibling_field} on this same card; there's
+    # no earlier pipeline step here, so the lookup is just the inputs dict itself.
+    inputs = interpolate_template_fields(manifest, inputs, inputs.get)
 
     orchestrator = Orchestrator([module], state_store=store, stop_on_error=False)
     stream_id = bus.create()
@@ -262,6 +320,45 @@ def metrics():
 @app.get("/api/health")
 def health_check():
     return health.run_health_checks(TIER_DIRS, store)
+
+
+@app.post("/api/ingest/csv")
+async def ingest_csv(file: UploadFile = File(...)):
+    """Upload a CSV, get back structured JSON records. Identical files (by
+    content hash, not filename) are reported as duplicates instead of being
+    reprocessed. Shared with the filesystem watcher (webapp/watcher.py)."""
+    data = await file.read()
+    try:
+        return ingestion.ingest_csv_bytes(file.filename, data, store)
+    except Exception as exc:
+        raise HTTPException(status_code=400, detail=f"Could not parse CSV: {exc}")
+
+
+@app.post("/api/ingest/pdf")
+async def ingest_pdf(file: UploadFile = File(...)):
+    """Upload a PDF, get back its extracted text. Same content-hash dedupe as CSV,
+    same shared implementation as the filesystem watcher."""
+    data = await file.read()
+    try:
+        return ingestion.ingest_pdf_bytes(file.filename, data, store)
+    except Exception as exc:
+        raise HTTPException(status_code=400, detail=f"Could not read PDF: {exc}")
+
+
+@app.get("/api/artifacts")
+def list_artifacts():
+    return ingestion.list_artifacts()
+
+
+@app.post("/api/artifacts/purge")
+def purge_artifacts(older_than_hours: float = 24):
+    removed = ingestion.purge_old_artifacts(older_than_hours)
+    return {"removed_count": len(removed), "removed": removed}
+
+
+@app.get("/api/watcher/status")
+def watcher_status():
+    return {"watch_dir": str(WATCH_DIR), "processed": _watcher_log[-20:]}
 
 
 app.mount("/static", StaticFiles(directory=STATIC_DIR), name="static")

@@ -13,6 +13,10 @@ inputs:
     label: Notify Slack channel
     type: toggle
     default: false
+  - name: custom_note
+    label: Custom note (use {signups}, {churn}, {revenue} to interpolate)
+    type: template
+    default: "Based on {signups} signups and {churn} churn events this period."
 outputs:
   - name: agent_decision
     label: Agent Decision

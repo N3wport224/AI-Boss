@@ -80,6 +80,43 @@
       </div>
     </section>
 
+    <section class="tier-section tier-ingestion" id="ingestion-section">
+      <div class="tier-heading">
+        <span class="bar"></span>
+        <h2>Data Ingestion</h2>
+        <div class="tier-heading-actions">
+          <button class="collapse-toggle" type="button" data-collapse-key="ingestion">▾</button>
+        </div>
+      </div>
+      <div class="ingestion-panel">
+        <div id="dropzone" class="dropzone">
+          <p>Drag &amp; drop a CSV or PDF here, or</p>
+          <label class="btn btn-secondary btn-small" for="file-input">Choose file</label>
+          <input type="file" id="file-input" accept=".csv,.pdf" hidden />
+        </div>
+        <div id="ingestion-result" class="log-tabs-wrap hidden"></div>
+
+        <div class="artifacts-row">
+          <h4>Artifacts</h4>
+          <div class="artifacts-controls">
+            <label for="purge-hours">Purge older than</label>
+            <input type="number" id="purge-hours" value="24" min="0" step="1" />
+            <span>hours</span>
+            <button id="purge-btn" class="btn btn-secondary btn-small" type="button">Purge</button>
+          </div>
+        </div>
+        <div id="artifacts-list" class="runs-table"></div>
+
+        <div class="artifacts-row">
+          <h4>Folder Watcher</h4>
+          <p class="card-desc watcher-hint">
+            Drop a .csv or .pdf into <code id="watch-dir-path">watched_input/</code> — it's ingested automatically, no click needed.
+          </p>
+        </div>
+        <div id="watcher-feed" class="runs-empty">No files auto-processed yet.</div>
+      </div>
+    </section>
+
     <section class="tier-section tier-favorites hidden" id="favorites-section">
       <div class="tier-heading">
         <span class="bar"></span>

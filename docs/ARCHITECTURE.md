@@ -269,7 +269,54 @@ state is:
   re-applied after every re-render since `innerHTML` replacement wipes any
   classes added by a previous pass.
 
-## 7. Step-by-step: how this was built (and how to extend it)
+## 7. Data ingestion, templating, the folder watcher, and source viewing
+
+**Ingestion is one shared implementation, two triggers.**
+`webapp/ingestion.py::ingest_csv_bytes()`/`ingest_pdf_bytes()` do the actual
+work — hash the bytes, check `StateStore` for that hash, parse/extract, save
+the raw upload plus its converted form into `artifacts/`, record the hash.
+Both `POST /api/ingest/csv`/`pdf` (a browser upload) and
+`webapp/watcher.py`'s background thread (a file appearing in
+`watched_input/`) call the exact same functions — there is no separate
+"auto-ingest" code path to drift out of sync with the manual one. Dedupe is
+by SHA-256 of the file's bytes, not filename, so renaming a file doesn't
+bypass it.
+
+**The watcher is a plain polling loop**, not `watchdog`: a background
+`threading.Thread` lists `watched_input/` every 2 seconds and calls a
+callback for any filename it hasn't seen since it started. Files already
+present at boot are marked seen immediately (not replayed as "new" on every
+restart). This was a deliberate dependency trade-off — a 15-line loop against
+one more third-party package for a feature that only needs to notice "a file
+that wasn't here before now is."
+
+**Template fields are generic string interpolation**, not LLM-specific
+scaffolding. `engine/templating.py::render_template()` replaces `{name}` with
+whatever a `lookup` callable resolves it to, leaving unknown names literal.
+`interpolate_template_fields()` applies this to a manifest's `type: template`
+inputs only. It's called from three places depending on what "context" means
+for that run: the single-module endpoint (lookup = the request's own inputs
+dict — a template field can reference a sibling field on the same card), a
+custom pipeline's per-step `seed()` (lookup = live `ExecutionContext`, so a
+later step can reference an earlier one's output), and the built-in
+tier-1→2→3 pipeline (`_build_pipeline()` now wraps bare modules in
+`StepSpec`s seeded from their own manifest defaults, specifically so a
+template field's *default* value — see `churn_response_agent`'s
+`custom_note` — interpolates real data even with zero user configuration).
+A `BaseModule` never needs to know templating exists; by the time its `run()`
+reads `context.get("custom_note")`, substitution already happened.
+
+**Source viewing never accepts a client-supplied path.**
+`webapp/linting.py::resolve_source_path()` takes a manifest's own
+`entrypoint` string and resolves it via `importlib.util.find_spec()` — the
+same mechanism Python itself uses to import the module — so the file lint
+runs against is always exactly the file that manifest points to, never
+anything a request could redirect. `ruff check --output-format=json` runs
+against that one resolved path with a 10-second timeout; a non-zero exit
+code (ruff's own convention for "found issues") is not treated as a failure —
+only a JSON parse error or timeout falls back to an empty issue list.
+
+## 8. Step-by-step: how this was built (and how to extend it)
 
 1. **Define the contract.** `BaseModule` with `name`, `tier`, `description`, and a
    single `run(context) -> dict` method. Every tier implements the same shape on
@@ -366,13 +413,36 @@ state is:
 29. **Add diagnostics tests** (`tests/test_diagnostics.py`): health check
     shape, metrics reflecting a completed run, CSV export format, and
     duplication (including the 404 case).
-30. **Extend from here:** to add a real module, drop a `<name>.py` + `<name>.yaml`
+30. **Add shared ingestion + hash-dedupe** (`webapp/ingestion.py`,
+    `ingested_files` table): CSV/PDF upload endpoints, both backed by the same
+    `ingest_csv_bytes`/`ingest_pdf_bytes` functions the watcher also calls.
+31. **Add the folder watcher** (`webapp/watcher.py`): a plain polling loop,
+    deliberately not the `watchdog` package, wired to call the same ingestion
+    functions as a manual upload.
+32. **Add generic template interpolation** (`engine/templating.py`): `{name}`
+    substitution against manifest `type: template` fields, applied at three
+    call sites depending on what "context" means for that run (single-module
+    inputs, a custom pipeline step's live context, or the built-in pipeline's
+    own manifest defaults) — demonstrated via `churn_response_agent`'s
+    `custom_note` field, not a fake LLM persona picker.
+33. **Add read-only source + lint viewing** (`webapp/linting.py`): resolve a
+    module's file via `importlib.util.find_spec()` on its own manifest
+    entrypoint (never a client-supplied path), run `ruff check` against
+    exactly that file.
+34. **Add tests for all of the above** (`tests/test_ingestion.py`,
+    `test_templating.py`, `test_watcher.py`, `test_linting.py`): dedupe by
+    content hash, purge never touching `orchestrator.db`/`pipelines/`, a
+    template actually changing a module's output (not just being accepted),
+    the watcher ignoring pre-existing files but catching new ones, and lint
+    results for both a clean file and a deliberately broken one.
+35. **Extend from here:** to add a real module, drop a `<name>.py` + `<name>.yaml`
     pair into the right tier folder (see the README's "Adding a new module"
     section) — it appears in `cli.py list`, the dashboard, and the pipeline
     builder's module picker with no engine or webapp code changes. Declare
-    `outputs` too if you want other steps to be able to map from it.
+    `outputs` too if you want other steps to be able to map from it, or
+    `type: template` on an input to make it interpolate against context.
 
-## 8. Roadmap
+## 9. Roadmap
 
 The current engine is intentionally a single-process, synchronous, SQLite-backed
 core — enough to prove the three-tier handoff and be genuinely useful for small
@@ -413,6 +483,21 @@ pipelines. Grow it only when a real need shows up:
   commit`/`push` itself. Auto-committing from a live web handler is a bigger
   trust boundary than a local save — add it explicitly, behind its own opt-in,
   if that's actually wanted later.
+- **Watcher poll interval / event-driven alternative** — 2 seconds is fine for
+  "drop a file, wait a moment"; if that's ever too slow, swap the polling loop
+  for the `watchdog` package's OS-level file events without changing
+  `FilesystemWatcher`'s public interface (`start()`/`stop()`/`on_new_file`).
+- **No size limits on uploads or the watch folder** — a very large CSV/PDF
+  is read entirely into memory (`await file.read()` / `path.read_bytes()`).
+  Fine for the kind of files this is meant for; add a size cap before trusting
+  it with arbitrary uploads.
+- **Template mapping has the same nested-field limitation as pipeline
+  mapping** — `{signups}` resolves because it's a flat context key; there's no
+  `{insight.risk_level}` syntax for reaching into a nested output dict.
+- **Linting runs synchronously in the request handler** — `ruff check` on one
+  file is fast enough that this hasn't mattered, but a slow linter or a huge
+  file would block that request; move it to the same background-thread/SSE
+  pattern as runs if that ever becomes true.
 
 Each step above is additive — none require rewriting `BaseModule`, the manifest
 format, or the example modules.

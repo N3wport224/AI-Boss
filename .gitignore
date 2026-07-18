@@ -8,5 +8,7 @@ venv/
 .env
 orchestrator.db
 *.db
+artifacts/
+watched_input/
 
 .DS_Store

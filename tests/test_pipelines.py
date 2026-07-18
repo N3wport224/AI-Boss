@@ -100,6 +100,31 @@ def test_mapping_wires_an_earlier_steps_output_into_a_later_field():
     assert "Slack notification queued" in agent_step["output"]["agent_decision"]["message"]
 
 
+def test_template_field_interpolates_against_an_earlier_steps_flat_context_keys():
+    # custom_note is a "template" field — {signups}/{churn} should resolve using
+    # whatever the automation step put in context, not stay literal placeholders.
+    payload = {
+        "name": "Templated Note",
+        "steps": [
+            {"tier": "automation", "name": "fetch_raw_metrics", "inputs": {"signups": 77, "churn": 3, "revenue": 500}},
+            {"tier": "workflow", "name": "analyze_metrics", "inputs": {"risk_threshold": 0.1}},
+            {
+                "tier": "agent",
+                "name": "churn_response_agent",
+                "inputs": {"custom_note": "Custom: {signups} signups vs {churn} churn."},
+            },
+        ],
+    }
+
+    res = client.post("/api/pipelines", json=payload)
+    assert res.status_code == 200
+    events = _collect_stream(res.json()["stream_id"])
+
+    agent_step = next(e for e in events if e["kind"] == "step_completed" and e["name"] == "churn_response_agent")
+    message = agent_step["output"]["agent_decision"]["message"]
+    assert "Custom: 77.0 signups vs 3.0 churn." in message
+
+
 def test_save_pipeline_rejects_reference_to_a_nonexistent_module():
     res = client.post(
         "/api/pipelines",

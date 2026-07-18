@@ -1,0 +1,56 @@
+"""Lightweight, dependency-free filesystem watcher.
+
+Polls `watched_input/` (gitignored, same as artifacts/) every few seconds
+instead of pulling in the `watchdog` package — good enough for "drop a file
+in, it gets processed automatically" without adding a new dependency for
+something a simple loop already does.
+"""
+import threading
+from pathlib import Path
+from typing import Callable
+
+WATCH_DIR = Path(__file__).resolve().parent.parent / "watched_input"
+
+
+def ensure_watch_dir() -> Path:
+    WATCH_DIR.mkdir(exist_ok=True)
+    return WATCH_DIR
+
+
+class FilesystemWatcher:
+    """Calls `on_new_file(path)` once for each file that appears in WATCH_DIR
+    after the watcher starts. Files already present at startup are treated as
+    already-seen, not replayed as "new" on every restart."""
+
+    def __init__(self, on_new_file: Callable[[Path], None], interval: float = 2.0):
+        self.on_new_file = on_new_file
+        self.interval = interval
+        self._seen: set[str] = set()
+        self._thread: threading.Thread | None = None
+        self._stop = threading.Event()
+
+    def _scan_once(self) -> None:
+        ensure_watch_dir()
+        for path in sorted(WATCH_DIR.iterdir()):
+            if path.is_file() and path.name not in self._seen:
+                self._seen.add(path.name)
+                try:
+                    self.on_new_file(path)
+                except Exception:
+                    pass  # a broken handler shouldn't kill the watch loop
+
+    def _loop(self) -> None:
+        while not self._stop.is_set():
+            self._scan_once()
+            self._stop.wait(self.interval)
+
+    def start(self) -> None:
+        if self._thread is not None:
+            return
+        ensure_watch_dir()
+        self._seen = {p.name for p in WATCH_DIR.iterdir() if p.is_file()}
+        self._thread = threading.Thread(target=self._loop, daemon=True)
+        self._thread.start()
+
+    def stop(self) -> None:
+        self._stop.set()

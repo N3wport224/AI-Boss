@@ -34,7 +34,10 @@ AI-Boss/
 │   ├── pipelines.py           #   Storage/validation for user-built pipelines
 │   ├── events.py               #   SSE event bus for live run streaming
 │   ├── health.py                #   Startup diagnostics (manifests, entrypoints, state store)
-│   └── static/                    #   index.html / styles.css / app.js — the dashboard itself
+│   ├── ingestion.py              #   CSV/PDF upload, hash-dedupe, artifact storage/purge
+│   ├── watcher.py                 #   Polling-based folder watcher (no watchdog dependency)
+│   ├── linting.py                  #   Read-only per-module source + ruff lint view
+│   └── static/                      #   index.html / styles.css / app.js — the dashboard itself
 ├── automations/              # Tier 1 — drop in a <name>.py + <name>.yaml pair
 │   ├── example_automation.py
 │   └── example_automation.yaml
@@ -46,11 +49,17 @@ AI-Boss/
 │   └── example_agent.yaml
 ├── pipelines/                    # User-built pipelines saved from the visual builder
 │   └── <slug>.yaml                #   created at runtime — empty until you save one
+├── artifacts/                       # Uploaded/converted files — created at runtime, gitignored
+├── watched_input/                     # Drop a .csv/.pdf here for auto-ingestion — gitignored
 ├── tests/
 │   ├── test_orchestrator.py
 │   ├── test_webapp.py
 │   ├── test_pipelines.py
-│   └── test_diagnostics.py
+│   ├── test_diagnostics.py
+│   ├── test_ingestion.py
+│   ├── test_templating.py
+│   ├── test_watcher.py
+│   └── test_linting.py
 ├── docs/
 │   └── ARCHITECTURE.md
 ├── cli.py                    # Scriptable control layer: list / run / status
@@ -188,7 +197,33 @@ A few things live in the header/subheader on every page load:
 - **System Info / Agent Thoughts / Raw Output tabs** — the full-pipeline and
   builder run panels split their live log into three views instead of one
   undifferentiated dump: a timestamped step log, the aggregated agent
-  thought/tool-call stream, and the final JSON context.
+  thought/tool-call stream, and the final JSON context. Whichever tab is open
+  gets a **Copy** button, and the Raw Output tab has a **Pretty/Compact** toggle.
+
+## Data ingestion, templates, and code inspection
+
+- **Upload a CSV or PDF** in the dashboard's **Data Ingestion** section (drag
+  a file onto the drop zone, or use "Choose file"). A CSV becomes structured
+  JSON records; a PDF gets its text extracted. Files are hashed — dropping the
+  exact same file twice is reported as a duplicate and skipped, not
+  reprocessed. Converted artifacts land in `artifacts/` with a small table and
+  a **Purge older than N hours** control (never touches `orchestrator.db` or
+  `pipelines/`, no matter what age you set).
+- **Folder watcher** — drop a `.csv`/`.pdf` straight into `watched_input/`
+  (no browser needed at all) and it's ingested within a couple seconds by a
+  lightweight polling loop (`webapp/watcher.py`, no `watchdog` dependency).
+  The dashboard's Folder Watcher feed shows what it picked up, live.
+- **Template fields** — a manifest input can declare `type: template` to get a
+  textarea that supports `{variable}` interpolation against whatever's
+  currently in the shared context (a sibling input on the same card, or an
+  earlier pipeline step's output) — resolved right before that step runs, so
+  the module itself never has to know templating exists. Click one of the
+  suggested `{name}` chips under the textarea to insert it at the cursor. See
+  `churn_response_agent`'s `custom_note` field for a working example.
+- **View source + lint** — click **&lt;/&gt;** on any module card to see its
+  actual `.py` source and a live `ruff check` result (green "no issues" or a
+  list of line/column/rule findings), read-only, scoped to exactly that
+  module's own file — never an arbitrary path.
 
 ## Tech stack
 
@@ -207,6 +242,10 @@ A few things live in the header/subheader on every page load:
 - **Pipeline builder:** no new tech — user-built pipelines are just another YAML
   manifest folder (`pipelines/`), validated and executed through the same
   `Orchestrator`/`StepSpec` machinery as everything else.
+- **Ingestion:** stdlib `csv` for CSV parsing, `pypdf` for PDF text extraction —
+  the only two new runtime dependencies added since the initial scaffold.
+- **Linting:** `ruff` invoked as a subprocess, scoped to exactly the file a
+  module's own manifest `entrypoint` resolves to.
 - **CI:** GitHub Actions running `pytest` (engine + API tests) and a CLI smoke
   test on every push.
 

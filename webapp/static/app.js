@@ -82,12 +82,46 @@ function renderControl(id, field, value) {
     return `<select id="${id}">${options}</select>`;
   }
 
+  if (field.type === "template") {
+    const escaped = String(value ?? "").replace(/</g, "&lt;").replace(/>/g, "&gt;");
+    return `<textarea id="${id}" class="template-input" rows="2">${escaped}</textarea>`;
+  }
+
   const inputType = field.type === "number" ? "number" : "text";
   const step = field.type === "number" ? ' step="any"' : "";
   return `<input type="${inputType}"${step} id="${id}" value="${value ?? ""}" />`;
 }
 
-function renderField(tier, name, field) {
+// Small "insert {name}" chips shown under a template textarea — the closest
+// thing to autocomplete without building a full contenteditable engine:
+// click a chip, it's spliced into the textarea at the cursor position.
+function renderVariableChips(controlId, variableNames) {
+  if (!variableNames.length) return "";
+  return `
+    <div class="variable-chips" data-for="${controlId}">
+      ${variableNames.map((name) => `<button type="button" class="variable-chip" data-insert="{${name}}">{${name}}</button>`).join("")}
+    </div>`;
+}
+
+function wireVariableChips(container) {
+  container.querySelectorAll(".variable-chips").forEach((chipRow) => {
+    const textarea = container.querySelector(`#${CSS.escape(chipRow.dataset.for)}`);
+    if (!textarea) return;
+    chipRow.querySelectorAll(".variable-chip").forEach((chip) => {
+      chip.addEventListener("click", () => {
+        const start = textarea.selectionStart ?? textarea.value.length;
+        const end = textarea.selectionEnd ?? textarea.value.length;
+        const insert = chip.dataset.insert;
+        textarea.value = textarea.value.slice(0, start) + insert + textarea.value.slice(end);
+        textarea.focus();
+        textarea.selectionStart = textarea.selectionEnd = start + insert.length;
+        textarea.dispatchEvent(new Event("input", { bubbles: true }));
+      });
+    });
+  });
+}
+
+function renderField(tier, name, field, siblingFields) {
   const id = fieldId(tier, name, field.name);
   const label = field.label || field.name;
   const control = renderControl(id, field, field.default);
@@ -97,6 +131,16 @@ function renderField(tier, name, field) {
       <div class="field toggle-row">
         <label for="${id}">${label}</label>
         ${control}
+      </div>`;
+  }
+
+  if (field.type === "template") {
+    const variableNames = (siblingFields || []).map((f) => f.name).filter((n) => n !== field.name);
+    return `
+      <div class="field">
+        <label for="${id}">${label}</label>
+        ${control}
+        ${renderVariableChips(id, variableNames)}
       </div>`;
   }
 
@@ -475,29 +519,60 @@ function logSystemEvent(log, event) {
 
 function renderRunLogTabs(container, log, rawContext) {
   const active = container.dataset.activeTab || "system";
+  const rawMode = container.dataset.rawMode || "pretty";
   const tabs = [
     { key: "system", label: "System Info" },
     { key: "thoughts", label: "Agent Thoughts" },
     { key: "raw", label: "Raw Output" },
   ];
+  const rawText = rawContext
+    ? rawMode === "pretty"
+      ? JSON.stringify(rawContext, null, 2)
+      : JSON.stringify(rawContext)
+    : "Run still in progress…";
   const content = {
     system: log.system.length ? log.system.join("\n") : "No system events yet.",
     thoughts: log.thoughts.length ? log.thoughts.join("\n") : "No agent thoughts in this run.",
-    raw: rawContext ? JSON.stringify(rawContext, null, 2) : "Run still in progress…",
+    raw: rawText,
   };
 
   container.dataset.activeTab = active;
+  container.dataset.rawMode = rawMode;
+
+  const rawToggle =
+    active === "raw" && rawContext
+      ? `<button class="log-tab" data-raw-toggle type="button">${rawMode === "pretty" ? "Compact" : "Pretty"}</button>`
+      : "";
+
   container.innerHTML = `
-    <div class="log-tabs">
-      ${tabs.map((t) => `<button class="log-tab ${t.key === active ? "active" : ""}" data-tab="${t.key}" type="button">${t.label}</button>`).join("")}
+    <div class="log-tab-header">
+      <div class="log-tabs">
+        ${tabs.map((t) => `<button class="log-tab ${t.key === active ? "active" : ""}" data-tab="${t.key}" type="button">${t.label}</button>`).join("")}
+        ${rawToggle}
+      </div>
+      <button class="copy-btn" type="button">📋 Copy</button>
     </div>
     <pre class="log-tab-content">${content[active]}</pre>`;
 
-  container.querySelectorAll(".log-tab").forEach((btn) => {
+  container.querySelectorAll(".log-tab[data-tab]").forEach((btn) => {
     btn.addEventListener("click", () => {
       container.dataset.activeTab = btn.dataset.tab;
       renderRunLogTabs(container, log, rawContext);
     });
+  });
+
+  container.querySelector("[data-raw-toggle]")?.addEventListener("click", () => {
+    container.dataset.rawMode = rawMode === "pretty" ? "compact" : "pretty";
+    renderRunLogTabs(container, log, rawContext);
+  });
+
+  container.querySelector(".copy-btn").addEventListener("click", async () => {
+    try {
+      await navigator.clipboard.writeText(content[active]);
+      showToast("Copied to clipboard.", "success");
+    } catch (err) {
+      showToast(`Copy failed: ${err}`, "error");
+    }
   });
 }
 
@@ -602,7 +677,7 @@ function renderCard(module) {
   const favKey = `module::${module.tier}::${module.name}`;
   const searchText = `${module.name} ${module.description}`.toLowerCase();
   const fieldsHtml = module.inputs.length
-    ? `<div class="form-fields">${module.inputs.map((f) => renderField(module.tier, module.name, f)).join("")}</div>`
+    ? `<div class="form-fields">${module.inputs.map((f) => renderField(module.tier, module.name, f, module.inputs)).join("")}</div>`
     : "";
 
   return `
@@ -611,15 +686,67 @@ function renderCard(module) {
         <h3 class="card-title">${module.name}</h3>
         <div class="card-head-actions">
           ${favoriteButtonHtml(favKey)}
+          <button class="code-toggle" data-tier="${module.tier}" data-name="${module.name}" type="button" title="View source">&lt;/&gt;</button>
           <div class="status-slot">${statusPill(module.status)}</div>
         </div>
       </div>
       <p class="card-desc">${module.description}</p>
+      <div class="code-panel hidden"></div>
       ${fieldsHtml}
       <button class="btn btn-run" data-tier="${module.tier}" data-name="${module.name}">Run</button>
       <div class="tracker hidden"></div>
       <div class="result-panel hidden"></div>
     </div>`;
+}
+
+function escapeHtml(text) {
+  return String(text).replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
+}
+
+async function toggleModuleSource(tier, name) {
+  const card = document.getElementById(`card__${tier}__${name}`);
+  const panel = card.querySelector(".code-panel");
+
+  if (!panel.classList.contains("hidden")) {
+    panel.classList.add("hidden");
+    return;
+  }
+
+  panel.classList.remove("hidden");
+  panel.innerHTML = `<div class="runs-empty">Loading source…</div>`;
+
+  try {
+    const res = await fetch(`/api/modules/${tier}/${name}/source`);
+    const body = await res.json();
+    if (!res.ok) {
+      panel.innerHTML = `<div class="runs-empty">Error: ${body.detail || "Could not load source."}</div>`;
+      return;
+    }
+
+    const issueCount = body.issues.length;
+    const badgeStatus = issueCount ? "error" : "ready";
+    const badgeText = issueCount ? `${issueCount} issue${issueCount === 1 ? "" : "s"}` : "no issues";
+    const badge = `<span class="status-pill ${badgeStatus}"><i class="dot dot-${badgeStatus}"></i>${badgeText}</span>`;
+
+    const issuesHtml = issueCount
+      ? `<div class="lint-issues">${body.issues
+          .map(
+            (i) =>
+              `<div class="lint-issue">Line ${i.line}:${i.column} <span class="lint-code">${i.code}</span> — ${escapeHtml(i.message)}</div>`
+          )
+          .join("")}</div>`
+      : "";
+
+    panel.innerHTML = `
+      <div class="code-panel-header">
+        <span class="code-path">${body.path}</span>
+        ${badge}
+      </div>
+      ${issuesHtml}
+      <pre class="code-view">${escapeHtml(body.source)}</pre>`;
+  } catch (err) {
+    panel.innerHTML = `<div class="runs-empty">Request failed: ${err}</div>`;
+  }
 }
 
 function renderSections(modulesByTier) {
@@ -644,7 +771,11 @@ function renderSections(modulesByTier) {
   sectionsEl.querySelectorAll(".btn-run").forEach((btn) => {
     btn.addEventListener("click", () => runModule(btn.dataset.tier, btn.dataset.name));
   });
+  sectionsEl.querySelectorAll(".code-toggle").forEach((btn) => {
+    btn.addEventListener("click", () => toggleModuleSource(btn.dataset.tier, btn.dataset.name));
+  });
   wireFavoriteToggles(sectionsEl);
+  wireVariableChips(sectionsEl);
   applyCollapsedState(sectionsEl);
   wireCollapseToggles(sectionsEl);
   applySearchFilter();
@@ -819,6 +950,9 @@ function renderBuilderField(stepIndex, field, source, priorOutputs) {
     ? `<div class="mapping-tag">↳ Step ${source.step + 1}: ${source.output}</div>`
     : renderControl(controlId, field, source.value);
 
+  const chips =
+    !isMapped && field.type === "template" ? renderVariableChips(controlId, priorOutputs.map((o) => o.name)) : "";
+
   return `
     <div class="field builder-field">
       <label>${field.label || field.name}</label>
@@ -826,6 +960,7 @@ function renderBuilderField(stepIndex, field, source, priorOutputs) {
         <select class="source-select" id="${srcId}" data-step="${stepIndex}" data-field="${field.name}">${sourceOptions}</select>
         <div class="mapping-control">${control}</div>
       </div>
+      ${chips}
     </div>`;
 }
 
@@ -865,6 +1000,7 @@ function renderBuilderStep(index, step) {
 function renderBuilder() {
   builderStepsEl.innerHTML = builderSteps.map((step, index) => renderBuilderStep(index, step)).join("");
   attachBuilderStepListeners();
+  wireVariableChips(builderStepsEl);
 }
 
 function attachBuilderStepListeners() {
@@ -915,7 +1051,7 @@ function attachBuilderStepListeners() {
     });
   });
 
-  builderStepsEl.querySelectorAll(".mapping-control input, .mapping-control select").forEach((control) => {
+  builderStepsEl.querySelectorAll(".mapping-control input, .mapping-control select, .mapping-control textarea").forEach((control) => {
     const handler = (e) => {
       const wrapper = e.target.closest(".field.builder-field");
       const srcSelect = wrapper.querySelector(".source-select");
@@ -1148,6 +1284,178 @@ async function runSavedPipeline(slug, name, pipelinesList) {
   }
 }
 
+// ---- Data ingestion (CSV/PDF upload, dedupe, artifacts, purge) ----
+
+const dropzone = document.getElementById("dropzone");
+const fileInput = document.getElementById("file-input");
+const ingestionResultEl = document.getElementById("ingestion-result");
+const artifactsListEl = document.getElementById("artifacts-list");
+const purgeHoursInput = document.getElementById("purge-hours");
+const purgeBtn = document.getElementById("purge-btn");
+
+function formatBytes(bytes) {
+  if (bytes < 1024) return `${bytes} B`;
+  if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(1)} KB`;
+  return `${(bytes / 1024 / 1024).toFixed(1)} MB`;
+}
+
+async function loadArtifacts() {
+  const res = await fetch("/api/artifacts");
+  const files = await res.json();
+
+  if (!files.length) {
+    artifactsListEl.innerHTML = `<div class="runs-empty">No artifacts yet — upload a CSV or PDF above.</div>`;
+    return;
+  }
+
+  const rows = files
+    .map(
+      (f) => `
+      <tr>
+        <td>${f.name}</td>
+        <td>${formatBytes(f.size_bytes)}</td>
+        <td>${new Date(f.modified_at * 1000).toLocaleString()}</td>
+      </tr>`
+    )
+    .join("");
+  artifactsListEl.innerHTML = `
+    <table>
+      <thead><tr><th>File</th><th>Size</th><th>Modified</th></tr></thead>
+      <tbody>${rows}</tbody>
+    </table>`;
+}
+
+async function uploadFile(file) {
+  const lowerName = file.name.toLowerCase();
+  const isPdf = lowerName.endsWith(".pdf");
+  const isCsv = lowerName.endsWith(".csv");
+  if (!isPdf && !isCsv) {
+    showToast("Only .csv and .pdf files are supported.", "error");
+    return;
+  }
+
+  const formData = new FormData();
+  formData.append("file", file);
+
+  ingestionResultEl.classList.remove("hidden");
+  ingestionResultEl.innerHTML = `<pre class="log-tab-content">Uploading ${file.name}…</pre>`;
+
+  try {
+    const res = await fetch(isPdf ? "/api/ingest/pdf" : "/api/ingest/csv", { method: "POST", body: formData });
+    const body = await res.json();
+
+    if (!res.ok) {
+      ingestionResultEl.innerHTML = `<pre class="log-tab-content">Error: ${body.detail || "Upload failed."}</pre>`;
+      showToast(`Upload failed: ${body.detail || "unknown error"}`, "error");
+      return;
+    }
+
+    if (body.duplicate) {
+      ingestionResultEl.innerHTML = `<pre class="log-tab-content">This exact file was already ingested as "${body.original_filename}" at ${new Date(body.ingested_at).toLocaleString()}. Skipped.</pre>`;
+      showToast(`Duplicate of "${body.original_filename}" — skipped.`, "error");
+    } else if (isCsv) {
+      const preview = JSON.stringify(body.preview, null, 2);
+      const note = body.truncated ? `\n… (truncated — ${body.row_count} rows total)` : "";
+      ingestionResultEl.innerHTML = `<pre class="log-tab-content">${preview}${note}</pre>`;
+      showToast(`Ingested ${body.filename}: ${body.row_count} row(s).`, "success");
+    } else {
+      const note = body.truncated ? "\n… (truncated)" : "";
+      ingestionResultEl.innerHTML = `<pre class="log-tab-content">${body.preview}${note}</pre>`;
+      showToast(`Ingested ${body.filename}: ${body.char_count} character(s) extracted.`, "success");
+    }
+
+    await loadArtifacts();
+  } catch (err) {
+    ingestionResultEl.innerHTML = `<pre class="log-tab-content">Request failed: ${err}</pre>`;
+    showToast(`Upload failed: ${err}`, "error");
+  }
+}
+
+fileInput.addEventListener("change", (e) => {
+  if (e.target.files[0]) uploadFile(e.target.files[0]);
+  fileInput.value = "";
+});
+
+["dragenter", "dragover"].forEach((evt) =>
+  dropzone.addEventListener(evt, (e) => {
+    e.preventDefault();
+    dropzone.classList.add("dragover");
+  })
+);
+["dragleave", "drop"].forEach((evt) =>
+  dropzone.addEventListener(evt, (e) => {
+    e.preventDefault();
+    dropzone.classList.remove("dragover");
+  })
+);
+dropzone.addEventListener("drop", (e) => {
+  const file = e.dataTransfer.files[0];
+  if (file) uploadFile(file);
+});
+
+purgeBtn.addEventListener("click", async () => {
+  const hours = Number(purgeHoursInput.value) || 0;
+  const res = await fetch(`/api/artifacts/purge?older_than_hours=${hours}`, { method: "POST" });
+  const body = await res.json();
+  showToast(`Purged ${body.removed_count} artifact file(s).`, "success");
+  await loadArtifacts();
+});
+
+// ---- Folder watcher (polls for auto-ingested files) ----
+
+const watcherFeedEl = document.getElementById("watcher-feed");
+const watchDirPathEl = document.getElementById("watch-dir-path");
+let lastWatcherCount = 0;
+
+function renderWatcherFeed(processed) {
+  if (!processed.length) {
+    watcherFeedEl.innerHTML = `<div class="runs-empty">No files auto-processed yet.</div>`;
+    return;
+  }
+  watcherFeedEl.innerHTML = processed
+    .slice()
+    .reverse()
+    .map(
+      (p) => `
+        <div class="notification-row">
+          <i class="dot ${p.error ? "dot-error" : "dot-ready"}"></i>
+          <div>
+            <span class="notification-message">${p.filename}${p.duplicate ? " (duplicate, skipped)" : ""}${p.error ? ` — ${p.error}` : ""}</span>
+            <span class="notification-time">${new Date(p.at).toLocaleTimeString()}</span>
+          </div>
+        </div>`
+    )
+    .join("");
+}
+
+async function pollWatcherStatus() {
+  const res = await fetch("/api/watcher/status");
+  const body = await res.json();
+  watchDirPathEl.textContent = body.watch_dir;
+
+  if (body.processed.length !== lastWatcherCount) {
+    const isFirstLoad = lastWatcherCount === 0 && !watcherFeedEl.dataset.loaded;
+    lastWatcherCount = body.processed.length;
+    renderWatcherFeed(body.processed);
+    watcherFeedEl.dataset.loaded = "true";
+
+    if (!isFirstLoad && body.processed.length) {
+      const latest = body.processed[body.processed.length - 1];
+      showToast(
+        latest.error
+          ? `Auto-ingest failed for "${latest.filename}": ${latest.error}`
+          : latest.duplicate
+            ? `"${latest.filename}" from watched_input/ was a duplicate — skipped.`
+            : `Auto-ingested "${latest.filename}" from watched_input/.`,
+        latest.error ? "error" : "success"
+      );
+      await loadArtifacts();
+    }
+  }
+}
+
+setInterval(pollWatcherStatus, 4000);
+
 // ---- Boot ----
 
 renderSkeletonSections();
@@ -1155,4 +1463,6 @@ loadModules();
 loadSavedPipelines();
 loadHealth();
 refreshTelemetry();
+loadArtifacts();
+pollWatcherStatus();
 renderNotificationsPanel();

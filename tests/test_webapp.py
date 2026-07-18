@@ -77,6 +77,10 @@ def test_run_full_pipeline_streams_agent_thoughts_and_tool_calls():
     final = events[-1]
     assert final["kind"] == "run_completed"
     assert "agent_decision" in final["context"]
+    # The agent's custom_note template default interpolates real upstream values.
+    assert "128" in final["context"]["custom_note"]
+    assert "14" in final["context"]["custom_note"]
+    assert "{signups}" not in final["context"]["custom_note"]
 
 
 def test_run_module_failure_streams_step_failed_then_run_failed(monkeypatch):
