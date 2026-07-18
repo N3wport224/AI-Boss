@@ -12,6 +12,8 @@ class MetricsAnalysisWorkflow(BaseModule):
         metrics = context.get("raw_metrics", {})
         signups = metrics.get("signups", 0)
         churn = metrics.get("churn", 0)
+        threshold = context.get("risk_threshold", 0.1)
+
         churn_rate = churn / signups if signups else 0.0
-        risk_level = "high" if churn_rate > 0.1 else "low"
+        risk_level = "high" if churn_rate > threshold else "low"
         return {"insight": {"churn_rate": round(churn_rate, 4), "risk_level": risk_level}}

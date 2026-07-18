@@ -27,8 +27,11 @@ AI-Boss/
 │   ├── base.py              #   BaseModule contract + Tier enum
 │   ├── context.py           #   ExecutionContext: the shared context window
 │   ├── orchestrator.py      #   Sequential runner that threads context between modules
-│   ├── registry.py          #   Discovers modules from *.yaml manifests
+│   ├── registry.py          #   Discovers modules + reads manifests (incl. input schemas)
 │   └── state_store.py       #   SQLite-backed run/step history
+├── webapp/                  # Visual control center (FastAPI + vanilla JS, no build step)
+│   ├── main.py               #   REST API: list modules, run one, run the pipeline, history
+│   └── static/                #   index.html / styles.css / app.js — the dashboard itself
 ├── automations/              # Tier 1 — drop in a <name>.py + <name>.yaml pair
 │   ├── example_automation.py
 │   └── example_automation.yaml
@@ -39,10 +42,11 @@ AI-Boss/
 │   ├── example_agent.py
 │   └── example_agent.yaml
 ├── tests/
-│   └── test_orchestrator.py
+│   ├── test_orchestrator.py
+│   └── test_webapp.py
 ├── docs/
 │   └── ARCHITECTURE.md
-├── cli.py                    # Unified control layer: list / run / status
+├── cli.py                    # Scriptable control layer: list / run / status
 ├── requirements.txt
 ├── .env.example
 └── .github/workflows/ci.yml
@@ -53,15 +57,28 @@ AI-Boss/
 ```bash
 pip install -r requirements.txt
 
+# Visual control center — the primary way to use this day to day
+uvicorn webapp.main:app --reload
+# then open http://localhost:8000
+
+# Scriptable / CI-friendly alternative
 python cli.py list      # show every discovered automation/workflow/agent
 python cli.py run       # execute the full pipeline once, synchronously
 python cli.py status    # inspect recent run history from the SQLite state store
 ```
 
-`python cli.py run` executes the bundled example end-to-end: a tier-1 automation
-fetches raw metrics, a tier-2 workflow turns them into a churn-risk insight, and a
-tier-3 agent decides and narrates a follow-up action — all through one shared
-`ExecutionContext`.
+The dashboard renders every automation, workflow, and agent as a card, grouped
+into three visually separated sections. Cards with declared `inputs` (see any
+`example_*.yaml`) show a small form — text, number, dropdown, or toggle — right
+in the card. Click **Run** and the card's status pill goes Blue (running) →
+Green (ready/succeeded) or Red (error), with the module's output shown inline.
+A **Run Full Pipeline** button at the top runs all three tiers in sequence, the
+same tier-1 → tier-2 → tier-3 handoff `cli.py run` performs. No terminal, no
+commands — everything is a button, form field, or dropdown.
+
+The web UI and the CLI are two views over the exact same engine and the same
+`orchestrator.db` state store, so a run triggered from one shows up in the
+other's history.
 
 ## Adding a new module
 
@@ -75,11 +92,17 @@ tier-3 agent decides and narrates a follow-up action — all through one shared
    entrypoint: automations.my_module:MyModuleClass
    description: What this module does.
    enabled: true
+   inputs:                     # optional — renders as a form on the module's card
+     - name: threshold
+       label: Threshold
+       type: number             # text | number | select | toggle
+       default: 0.1
    ```
-4. Run `python cli.py list` to confirm it's discovered, then `python cli.py run`.
+4. Run `python cli.py list` (or refresh the dashboard) to confirm it's discovered.
 
 No core engine code changes are required — the registry scans each tier folder for
-manifests at pipeline-build time.
+manifests at pipeline-build time, and the dashboard reads the same `inputs` schema
+to render the card's form.
 
 ## Tech stack
 
@@ -90,10 +113,15 @@ manifests at pipeline-build time.
   surface to swap for Postgres or add a Redis-backed context cache later without
   touching the orchestrator.
 - **Config:** YAML manifests per module — human-readable, diffable, and how the
-  registry achieves "drop a file in, don't touch the core" extensibility.
-- **CI:** GitHub Actions running `pytest` and a CLI smoke test on every push.
+  registry achieves "drop a file in, don't touch the core" extensibility. The
+  same manifest now doubles as the dashboard's form schema (`inputs:`).
+- **Dashboard:** FastAPI + a single static HTML/CSS/JS page (Tailwind-free, no
+  build step) — a thin REST layer over the same `Orchestrator`/`StateStore` the
+  CLI uses, so there's exactly one engine and one history behind both.
+- **CI:** GitHub Actions running `pytest` (engine + API tests) and a CLI smoke
+  test on every push.
 
-Deliberately **not** included yet: FastAPI, Celery, Redis, LangGraph. The
-blueprint calls for a synchronous, dependable core first — see
+Deliberately **not** included yet: Celery, Redis, LangGraph. The blueprint calls
+for a synchronous, dependable core first — see
 [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md#roadmap) for when and why each of
 those gets added.

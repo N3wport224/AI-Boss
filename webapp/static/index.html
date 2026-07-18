@@ -1,0 +1,35 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0" />
+<title>AI-Boss Control Center</title>
+<link rel="stylesheet" href="/static/styles.css" />
+</head>
+<body>
+  <header class="topbar">
+    <div class="topbar-left">
+      <div class="logo-dot"></div>
+      <div>
+        <h1>AI-Boss Control Center</h1>
+        <p class="subtitle">One-click execution for every automation, workflow, and agent</p>
+      </div>
+    </div>
+    <div class="topbar-right">
+      <div class="legend">
+        <span class="legend-item"><i class="dot dot-ready"></i>Ready</span>
+        <span class="legend-item"><i class="dot dot-running"></i>Running</span>
+        <span class="legend-item"><i class="dot dot-error"></i>Error</span>
+      </div>
+      <button id="run-pipeline-btn" class="btn btn-primary">Run Full Pipeline</button>
+    </div>
+  </header>
+
+  <main id="app">
+    <div id="pipeline-result" class="pipeline-result hidden"></div>
+    <div id="sections"></div>
+  </main>
+
+  <script src="/static/app.js"></script>
+</body>
+</html>

@@ -3,3 +3,13 @@ tier: agent
 entrypoint: agents.example_agent:ChurnResponseAgent
 description: Decides and narrates a follow-up action based on the churn-risk insight.
 enabled: true
+inputs:
+  - name: tone
+    label: Tone
+    type: select
+    options: [professional, urgent, casual]
+    default: professional
+  - name: notify_slack
+    label: Notify Slack channel
+    type: toggle
+    default: false

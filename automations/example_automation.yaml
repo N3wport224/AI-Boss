@@ -3,3 +3,16 @@ tier: automation
 entrypoint: automations.example_automation:DataFetchAutomation
 description: Simulates pulling raw metrics from an external system on a fixed schedule.
 enabled: true
+inputs:
+  - name: signups
+    label: Signups
+    type: number
+    default: 128
+  - name: churn
+    label: Churn
+    type: number
+    default: 14
+  - name: revenue
+    label: Revenue ($)
+    type: number
+    default: 4210.50

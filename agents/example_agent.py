@@ -6,6 +6,12 @@ the context object is already carrying everything upstream tiers produced.
 from engine.base import BaseModule, Tier
 from engine.context import ExecutionContext
 
+_TONE_PREFIX = {
+    "professional": "Summary:",
+    "urgent": "ACTION REQUIRED:",
+    "casual": "Heads up —",
+}
+
 
 class ChurnResponseAgent(BaseModule):
     name = "churn_response_agent"
@@ -16,11 +22,17 @@ class ChurnResponseAgent(BaseModule):
         insight = context.get("insight", {})
         risk_level = insight.get("risk_level", "unknown")
         churn_rate = insight.get("churn_rate", 0)
+        tone = context.get("tone", "professional")
+        notify_slack = context.get("notify_slack", False)
 
         if risk_level == "high":
             action = "Escalate to the retention team and draft a personalized outreach email."
         else:
             action = "No action needed — churn is within the acceptable range."
 
-        message = f"Churn rate is {churn_rate:.2%} ({risk_level} risk). {action}"
+        prefix = _TONE_PREFIX.get(tone, _TONE_PREFIX["professional"])
+        message = f"{prefix} churn rate is {churn_rate:.2%} ({risk_level} risk). {action}"
+        if notify_slack:
+            message += " (Slack notification queued.)"
+
         return {"agent_decision": {"action": action, "message": message}}

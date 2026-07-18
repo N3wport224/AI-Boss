@@ -9,5 +9,9 @@ class DataFetchAutomation(BaseModule):
     description = "Simulates pulling raw metrics from an external system on a fixed schedule."
 
     def run(self, context: ExecutionContext) -> dict:
-        raw_metrics = {"signups": 128, "churn": 14, "revenue": 4210.50}
+        raw_metrics = {
+            "signups": context.get("signups", 128),
+            "churn": context.get("churn", 14),
+            "revenue": context.get("revenue", 4210.50),
+        }
         return {"raw_metrics": raw_metrics}

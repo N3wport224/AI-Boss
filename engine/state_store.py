@@ -1,6 +1,8 @@
 import json
 import sqlite3
+import threading
 from datetime import datetime, timezone
+from typing import Optional
 
 from .context import StepRecord
 
@@ -27,62 +29,88 @@ CREATE TABLE IF NOT EXISTS steps (
 
 
 class StateStore:
-    """SQLite-backed execution log for orchestrator runs and their steps."""
+    """SQLite-backed execution log for orchestrator runs and their steps.
+
+    A single connection is shared across requests. FastAPI runs sync route
+    handlers in a threadpool, so `check_same_thread=False` plus a lock around
+    every statement keeps this safe under concurrent requests from the dashboard,
+    not just the single-threaded CLI.
+    """
 
     def __init__(self, db_path: str = "orchestrator.db"):
         self.db_path = db_path
-        self._conn = sqlite3.connect(self.db_path)
-        self._conn.executescript(SCHEMA)
-        self._conn.commit()
+        self._conn = sqlite3.connect(self.db_path, check_same_thread=False)
+        self._lock = threading.Lock()
+        with self._lock:
+            self._conn.executescript(SCHEMA)
+            self._conn.commit()
 
     def start_run(self) -> int:
-        cur = self._conn.execute(
-            "INSERT INTO runs (started_at, status) VALUES (?, ?)",
-            (datetime.now(timezone.utc).isoformat(), "running"),
-        )
-        self._conn.commit()
-        return cur.lastrowid
+        with self._lock:
+            cur = self._conn.execute(
+                "INSERT INTO runs (started_at, status) VALUES (?, ?)",
+                (datetime.now(timezone.utc).isoformat(), "running"),
+            )
+            self._conn.commit()
+            return cur.lastrowid
 
     def finish_run(self, run_id: int, status: str) -> None:
-        self._conn.execute(
-            "UPDATE runs SET finished_at = ?, status = ? WHERE id = ?",
-            (datetime.now(timezone.utc).isoformat(), status, run_id),
-        )
-        self._conn.commit()
+        with self._lock:
+            self._conn.execute(
+                "UPDATE runs SET finished_at = ?, status = ? WHERE id = ?",
+                (datetime.now(timezone.utc).isoformat(), status, run_id),
+            )
+            self._conn.commit()
 
     def log_step(self, run_id: int, step: StepRecord) -> None:
-        self._conn.execute(
-            "INSERT INTO steps (run_id, name, tier, success, output, error, started_at, finished_at) "
-            "VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
-            (
-                run_id,
-                step.name,
-                step.tier,
-                int(step.success),
-                json.dumps(step.output),
-                step.error,
-                step.started_at.isoformat(),
-                step.finished_at.isoformat(),
-            ),
-        )
-        self._conn.commit()
+        with self._lock:
+            self._conn.execute(
+                "INSERT INTO steps (run_id, name, tier, success, output, error, started_at, finished_at) "
+                "VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+                (
+                    run_id,
+                    step.name,
+                    step.tier,
+                    int(step.success),
+                    json.dumps(step.output),
+                    step.error,
+                    step.started_at.isoformat(),
+                    step.finished_at.isoformat(),
+                ),
+            )
+            self._conn.commit()
 
     def recent_runs(self, limit: int = 10) -> list[dict]:
-        cur = self._conn.execute(
-            "SELECT id, started_at, finished_at, status FROM runs ORDER BY id DESC LIMIT ?",
-            (limit,),
-        )
+        with self._lock:
+            cur = self._conn.execute(
+                "SELECT id, started_at, finished_at, status FROM runs ORDER BY id DESC LIMIT ?",
+                (limit,),
+            )
+            rows = cur.fetchall()
         cols = ("id", "started_at", "finished_at", "status")
-        return [dict(zip(cols, row)) for row in cur.fetchall()]
+        return [dict(zip(cols, row)) for row in rows]
+
+    def latest_step_status(self, name: str) -> Optional[bool]:
+        """Success flag of the most recent run of a module by name, or None if never run."""
+        with self._lock:
+            cur = self._conn.execute(
+                "SELECT success FROM steps WHERE name = ? ORDER BY id DESC LIMIT 1",
+                (name,),
+            )
+            row = cur.fetchone()
+        return bool(row[0]) if row is not None else None
 
     def steps_for_run(self, run_id: int) -> list[dict]:
-        cur = self._conn.execute(
-            "SELECT name, tier, success, output, error, started_at, finished_at "
-            "FROM steps WHERE run_id = ? ORDER BY id",
-            (run_id,),
-        )
+        with self._lock:
+            cur = self._conn.execute(
+                "SELECT name, tier, success, output, error, started_at, finished_at "
+                "FROM steps WHERE run_id = ? ORDER BY id",
+                (run_id,),
+            )
+            rows = cur.fetchall()
         cols = ("name", "tier", "success", "output", "error", "started_at", "finished_at")
-        return [dict(zip(cols, row)) for row in cur.fetchall()]
+        return [dict(zip(cols, row)) for row in rows]
 
     def close(self) -> None:
-        self._conn.close()
+        with self._lock:
+            self._conn.close()

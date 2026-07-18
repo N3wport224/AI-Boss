@@ -61,7 +61,7 @@ just sitting in the same dict.
 | `engine/base.py` | `Tier` enum + `BaseModule` abstract contract every module implements |
 | `engine/context.py` | `ExecutionContext` (shared state) + `StepRecord` (one step's audit trail) |
 | `engine/orchestrator.py` | Sequential runner; merges outputs, records history, optionally persists to `StateStore`, controls stop-vs-continue on error |
-| `engine/registry.py` | Reads `*.yaml` manifests in a tier folder, dynamically imports and instantiates the referenced class |
+| `engine/registry.py` | Reads `*.yaml` manifests in a tier folder (`load_manifests`), dynamically imports and instantiates the referenced class (`instantiate`/`discover`) |
 | `engine/state_store.py` | SQLite persistence of run/step history for the `status` CLI command |
 
 `Orchestrator.stop_on_error` controls failure behavior: `True` (default) re-raises
@@ -71,7 +71,34 @@ branches, or a non-critical logging agent at the tail).
 
 ## 4. Unified control layer
 
-`cli.py` is the "dashboard" for now:
+There are two front doors onto the same engine and the same `orchestrator.db`:
+
+**`webapp/` — the visual control center (primary, day-to-day use).** A FastAPI
+app (`webapp/main.py`) exposes:
+
+- `GET /api/modules` — every enabled module per tier, with its manifest
+  `description` and `inputs` schema, plus a `status` (`ready`/`error`) derived
+  from `StateStore.latest_step_status()`.
+- `POST /api/modules/{tier}/{name}/run` — builds a single-module pipeline
+  (`Orchestrator([module])`), seeds the `ExecutionContext` with the request's
+  `inputs`, runs it, and returns the step's success/output/error.
+- `POST /api/pipeline/run` — the same full tier-1→2→3 pipeline `cli.py run`
+  executes, returned as JSON (per-step status + final context).
+- `GET /api/runs` — recent run history, for anything that wants to poll it.
+
+The static frontend (`webapp/static/`) is plain HTML/CSS/vanilla JS — no
+bundler, no framework — that renders one card per module (grouped and visually
+separated by tier), reads each module's `inputs` schema to draw a form (text /
+number / select / toggle), and POSTs to the run endpoint on click. A card's
+status pill goes green (ready) → blue (running, set optimistically by the
+client) → green or red (result), matching the architecture's own tiering:
+automations get a sky-blue accent, workflows violet, agents emerald, so the
+tier boundary is visible at a glance independent of the run-status color.
+Because execution is genuinely synchronous, the "running" state is only ever
+as long as the HTTP request is in flight — there's no background job or
+websocket to keep in sync.
+
+**`cli.py` — the scriptable / CI-friendly control layer:**
 
 - `python cli.py list` — enumerate every discovered module per tier (health check
   that manifests + entrypoints resolve).
@@ -80,9 +107,10 @@ branches, or a non-critical logging agent at the tail).
 - `python cli.py status` — read `orchestrator.db` and print recent runs and their
   steps.
 
-A web UI (FastAPI + a simple table view over the same `StateStore` tables) is a
-drop-in addition later — `state_store.py`'s `recent_runs()` / `steps_for_run()`
-are already shaped for an API to serve directly.
+Both front doors call the exact same `Orchestrator`/`StateStore`/`registry`
+code — the web layer adds zero orchestration logic of its own, only HTTP
+plumbing and input coercion (`webapp/main.py::_coerce_inputs`, which applies
+each field's declared `type` and `default` from the manifest).
 
 ## 5. Step-by-step: how this was built (and how to extend it)
 
@@ -104,15 +132,26 @@ are already shaped for an API to serve directly.
 6. **Write example modules per tier** (`automations/example_automation.py`,
    `workflows/example_workflow.py`, `agents/example_agent.py`) that demonstrably
    pass data forward, proving the flow in code rather than just in a diagram.
-7. **Build the CLI dashboard** (`cli.py`) wiring `discover()` + `Orchestrator` +
+7. **Build the CLI control layer** (`cli.py`) wiring `discover()` + `Orchestrator` +
    `StateStore` into `list` / `run` / `status` subcommands.
 8. **Add tests** (`tests/test_orchestrator.py`) covering context-threading and
    both error modes.
 9. **Add CI** (`.github/workflows/ci.yml`) running `pytest` and a CLI smoke test
    on every push, so a broken module or a bad manifest fails fast.
-10. **Extend from here:** to add a real module, drop a `<name>.py` + `<name>.yaml`
+10. **Add an `inputs` schema to manifests** (list of `{name, label, type, default,
+    options}`) so modules can declare form fields without any engine change —
+    `registry.load_manifests()` returns them as plain dicts.
+11. **Build the visual control center** (`webapp/`): a FastAPI layer
+    (`list_modules` / `run_module` / `run_pipeline`) over the same engine, plus a
+    static, build-step-free HTML/CSS/JS dashboard that renders manifest `inputs`
+    as forms and turns each module into a one-click card.
+12. **Add API tests** (`tests/test_webapp.py`, via FastAPI's `TestClient`)
+    covering module listing, single-module runs with overridden inputs, 404s,
+    and the full-pipeline endpoint.
+13. **Extend from here:** to add a real module, drop a `<name>.py` + `<name>.yaml`
     pair into the right tier folder (see the README's "Adding a new module"
-    section). No engine change needed.
+    section) — it appears in both `cli.py list` and the dashboard with no
+    engine or webapp code changes.
 
 ## 6. Roadmap
 
@@ -132,12 +171,16 @@ pipelines. Grow it only when a real need shows up:
   (planning, tool calls, reflection) rather than a single `run()` call, model
   that agent internally as a LangGraph graph while it still presents a single
   `BaseModule` interface to the orchestrator.
-- **FastAPI dashboard** — once CLI-only monitoring becomes limiting, add a thin
-  API over `StateStore` (`recent_runs`, `steps_for_run`) and a small frontend;
-  the data model doesn't need to change.
+- **Live status via websockets/SSE** — the dashboard's "running" state is
+  currently optimistic (set on click, resolved when the HTTP response lands).
+  Once a module's `run()` can genuinely take a while (a real LLM call), push
+  status over a websocket instead of relying on the request round-trip.
 - **Parallel branches** — if two tier-2 workflows are independent, the
   orchestrator can grow a `run_parallel(modules)` that fans out and merges
   results back into one context before continuing, without changing `BaseModule`.
+- **Auth on the dashboard** — the current `webapp/` has no auth layer, fine for
+  local/single-user use; add it before exposing the control center beyond
+  localhost.
 
 Each step above is additive — none require rewriting `BaseModule`, the manifest
 format, or the example modules.
