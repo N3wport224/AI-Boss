@@ -220,6 +220,19 @@ h1 {
   color: var(--text-dim);
 }
 
+.health-panel-footer {
+  display: flex;
+  gap: 8px;
+  padding-top: 10px;
+  margin-top: 4px;
+  border-top: 1px solid var(--border);
+}
+
+.health-panel-footer .btn {
+  flex: 1;
+  text-align: center;
+}
+
 .notification-time {
   color: var(--text-dim);
   font-size: 0.72rem;
@@ -934,6 +947,28 @@ main {
   border-color: var(--error);
 }
 
+.move-step-btn {
+  background: none;
+  border: 1px solid var(--border);
+  color: var(--text-dim);
+  border-radius: 6px;
+  width: 26px;
+  height: 30px;
+  cursor: pointer;
+  font-size: 0.75rem;
+  flex-shrink: 0;
+}
+
+.move-step-btn:hover:not(:disabled) {
+  border-color: var(--accent-pipeline);
+  color: var(--text);
+}
+
+.move-step-btn:disabled {
+  opacity: 0.3;
+  cursor: default;
+}
+
 .builder-step-fields {
   display: flex;
   flex-direction: column;
@@ -973,6 +1008,10 @@ main {
   font-size: 0.9rem;
 }
 
+.nested-path-input {
+  margin-top: 6px;
+}
+
 .mapping-tag {
   font-size: 0.8rem;
   color: var(--accent-pipeline);
@@ -985,6 +1024,11 @@ main {
 .builder-error {
   color: var(--error);
   font-size: 0.85rem;
+  margin: 0;
+}
+
+.builder-reorder-hint {
+  font-size: 0.76rem;
   margin: 0;
 }
 

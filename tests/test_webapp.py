@@ -217,6 +217,19 @@ def test_compare_404s_when_a_run_has_no_steps():
     assert client.get("/api/runs/compare", params={"a": run_id, "b": 999999}).status_code == 404
 
 
+def test_run_endpoints_are_rate_limited_per_client():
+    from webapp.main import _run_rate_limiter
+
+    payload = {"inputs": {"signups": 1, "churn": 1, "revenue": 1}, "force_refresh": True}
+    for _ in range(_run_rate_limiter.max_requests):
+        res = client.post("/api/modules/automation/fetch_raw_metrics/run", json=payload)
+        assert res.status_code == 200
+
+    over_limit = client.post("/api/modules/automation/fetch_raw_metrics/run", json=payload)
+    assert over_limit.status_code == 429
+    assert "Too many run requests" in over_limit.json()["detail"]
+
+
 def test_run_module_failure_streams_step_failed_then_run_failed(monkeypatch):
     import automations.example_automation as example_automation
 

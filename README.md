@@ -28,19 +28,22 @@ AI-Boss/
 │   ├── context.py           #   ExecutionContext: the shared context window
 │   ├── orchestrator.py      #   Sequential runner that threads context between modules
 │   ├── registry.py          #   Discovers modules + reads manifests (incl. input schemas)
-│   └── state_store.py       #   SQLite-backed run/step history
+│   ├── templating.py        #   {variable} and {nested.path} interpolation
+│   ├── redaction.py         #   Masks secret-shaped keys before they're persisted/streamed
+│   └── state_store.py       #   SQLite-backed run/step history + schedules + snapshot export
 ├── webapp/                  # Visual control center (FastAPI + vanilla JS, no build step)
 │   ├── main.py               #   REST API: list modules, run one, run the pipeline, history
 │   ├── pipelines.py           #   Storage/validation for user-built pipelines
 │   ├── events.py               #   SSE event bus for live run streaming
 │   ├── health.py                #   Startup diagnostics (manifests, entrypoints, state store)
-│   ├── ingestion.py              #   CSV/PDF upload, hash-dedupe, auto-cleansing, artifact search/purge
+│   ├── ingestion.py              #   CSV/PDF/JSON upload, hash-dedupe, auto-cleansing, artifact search/purge
 │   ├── watcher.py                 #   Polling-based folder watcher (no watchdog dependency)
-│   ├── linting.py                  #   Read-only per-module source + ruff lint view
+│   ├── linting.py                  #   Read-only per-module source + ruff lint view (off the event loop)
 │   ├── cache.py                     #   Cache-key hashing for single-module result caching
 │   ├── scheduler.py                  #   In-process recurring-run scheduler ("cron-style")
 │   ├── perf.py                        #   Live process resource snapshot (CPU/mem/threads)
 │   ├── graph.py                        #   Builds a saved pipeline's DAG (nodes/edges) for the visualizer
+│   ├── ratelimit.py                    #   In-memory rate limiter for run-triggering endpoints
 │   └── static/                          #   index.html / styles.css / app.js — the dashboard itself
 ├── automations/              # Tier 1 — drop in a <name>.py + <name>.yaml pair
 │   ├── example_automation.py
@@ -54,8 +57,9 @@ AI-Boss/
 ├── pipelines/                    # User-built pipelines saved from the visual builder
 │   └── <slug>.yaml                #   created at runtime — empty until you save one
 ├── artifacts/                       # Uploaded/converted files — created at runtime, gitignored
-├── watched_input/                     # Drop a .csv/.pdf here for auto-ingestion — gitignored
+├── watched_input/                     # Drop a .csv/.pdf/.json here for auto-ingestion — gitignored
 ├── tests/
+│   ├── conftest.py
 │   ├── test_orchestrator.py
 │   ├── test_webapp.py
 │   ├── test_pipelines.py
@@ -64,7 +68,8 @@ AI-Boss/
 │   ├── test_templating.py
 │   ├── test_watcher.py
 │   ├── test_linting.py
-│   └── test_scheduler.py
+│   ├── test_scheduler.py
+│   └── test_redaction.py
 ├── docs/
 │   └── ARCHITECTURE.md
 ├── cli.py                    # Scriptable control layer: list / run / status
@@ -123,21 +128,35 @@ hand:
    small "Static value" dropdown next to it — switch it to **"From Step N:
    &lt;output&gt;"** to wire that field straight from an earlier step's declared
    output instead of typing a literal, e.g. feeding Step 2's insight into
-   Step 3's `notify_slack` field.
-3. **Save & Launch** does exactly what it says in one click: it writes the
+   Step 3's `notify_slack` field. Need just a piece of a nested output (e.g.
+   `insight.risk_level` instead of the whole `insight` dict)? Fill in the
+   small "nested key" box that appears once a mapping is selected.
+3. Use the **▲/▼** buttons on a step to reorder it. This checks and rewires
+   this pipeline's own explicit mappings so they still point at the right
+   step afterward — but it can't know about a step that implicitly reads a
+   shared context key another step happens to produce *without* a declared
+   mapping (any module output lands in the shared context regardless of
+   mapping), so reordering steps with that kind of hidden coupling can still
+   change behavior. A move that would make an explicit mapping point at a
+   later step instead of an earlier one is blocked outright.
+4. **Save & Launch** does exactly what it says in one click: it writes the
    pipeline to `pipelines/<slug>.yaml` (the same manifest convention as every
    other module folder — check it into git like anything else here) and
    immediately runs it through the same live tracker/thought-stream/toast UI
    as any other run.
-4. Saved pipelines get their own card in a **Saved Pipelines** section with a
-   Run button, so you don't have to rebuild them each time.
+5. Saved pipelines get their own card in a **Saved Pipelines** section with a
+   Run button, so you don't have to rebuild them each time. Click **Graph**
+   to see that pipeline's steps and data-mapping dependencies rendered as an
+   SVG DAG.
 
 A mapped field is resolved at the moment that step runs, by reading whatever
 context key the source step's declared output landed under — so it works even
 when the two modules' field names don't already match (`engine/orchestrator.py`'s
-`StepSpec.seed`). A saved pipeline is validated on save: every step's module
-must exist, and every mapping must point at an *earlier* step's *declared*
-output, or you get a clear error back instead of a silent bad reference.
+`StepSpec.seed`, `engine/templating.py`'s `resolve_path`). A saved pipeline is
+validated on save: every step's module must exist, and every mapping must
+point at an *earlier* step's *declared* output (a nested path's base name is
+what's checked — the manifest doesn't describe a nested output's shape), or
+you get a clear error back instead of a silent bad reference.
 
 ## Adding a new module
 
@@ -207,24 +226,31 @@ A few things live in the header/subheader on every page load:
 
 ## Data ingestion, templates, and code inspection
 
-- **Upload a CSV or PDF** in the dashboard's **Data Ingestion** section (drag
-  a file onto the drop zone, or use "Choose file"). A CSV becomes structured
-  JSON records; a PDF gets its text extracted. Files are hashed — dropping the
-  exact same file twice is reported as a duplicate and skipped, not
-  reprocessed. Converted artifacts land in `artifacts/` with a small table and
-  a **Purge older than N hours** control (never touches `orchestrator.db` or
+- **Upload a CSV, PDF, or JSON file** in the dashboard's **Data Ingestion**
+  section (drag a file onto the drop zone, or use "Choose file"). A CSV
+  becomes structured JSON records (auto-cleansed — trimmed, deduped, blank
+  rows dropped); a PDF gets its text extracted; a JSON file (an array of
+  records, or a single object) is used as-is, no separate derived copy
+  needed. Files are hashed — dropping the exact same file twice is reported
+  as a duplicate and skipped, not reprocessed. Uploads over 20 MB are
+  rejected before ever being fully read into memory. Converted/raw artifacts
+  land in `artifacts/` with a small table, a **keyword search** box that
+  full-text searches every ingested file's extracted content, and a
+  **Purge older than N hours** control (never touches `orchestrator.db` or
   `pipelines/`, no matter what age you set).
-- **Folder watcher** — drop a `.csv`/`.pdf` straight into `watched_input/`
-  (no browser needed at all) and it's ingested within a couple seconds by a
-  lightweight polling loop (`webapp/watcher.py`, no `watchdog` dependency).
-  The dashboard's Folder Watcher feed shows what it picked up, live.
+- **Folder watcher** — drop a `.csv`/`.pdf`/`.json` file straight into
+  `watched_input/` (no browser needed at all) and it's ingested within a
+  couple seconds by a lightweight polling loop (`webapp/watcher.py`, no
+  `watchdog` dependency). The dashboard's Folder Watcher feed shows what it
+  picked up, live.
 - **Template fields** — a manifest input can declare `type: template` to get a
-  textarea that supports `{variable}` interpolation against whatever's
-  currently in the shared context (a sibling input on the same card, or an
-  earlier pipeline step's output) — resolved right before that step runs, so
-  the module itself never has to know templating exists. Click one of the
-  suggested `{name}` chips under the textarea to insert it at the cursor. See
-  `churn_response_agent`'s `custom_note` field for a working example.
+  textarea that supports `{variable}` and `{variable.nested.path}`
+  interpolation against whatever's currently in the shared context (a sibling
+  input on the same card, or an earlier pipeline step's output) — resolved
+  right before that step runs, so the module itself never has to know
+  templating exists. Click one of the suggested `{name}` chips under the
+  textarea to insert it at the cursor. See `churn_response_agent`'s
+  `custom_note` field for a working example.
 - **View source + lint** — click **&lt;/&gt;** on any module card to see its
   actual `.py` source and a live `ruff check` result (green "no issues" or a
   list of line/column/rule findings), read-only, scoped to exactly that
@@ -282,6 +308,54 @@ A few things live in the header/subheader on every page load:
   step took the longest wall-clock time gets a highlighted row and a
   "🐢 slowest (Nms)" badge in its tracker, so the bottleneck is visible at a
   glance instead of having to read every duration.
+
+## Pipeline reordering, nested mappings, and hardening
+
+- **Reorder pipeline steps** — the visual builder's ▲/▼ buttons swap a step's
+  position, rewiring every explicit "map from Step N" reference so it still
+  points at the right step afterward. A move that would make an explicit
+  mapping reference a later step instead of an earlier one is blocked
+  outright. This can't account for a step that implicitly reads a shared
+  context key another step happens to produce *without* a declared mapping —
+  every module's output lands in the shared context regardless of mapping,
+  so that kind of hidden coupling is a real, disclosed limitation, not an
+  oversight.
+- **Nested-path mapping and templates** — both the pipeline builder's field
+  mapping and `{variable}` template interpolation now support a dotted path
+  (`insight.risk_level`) reaching into a nested key of a declared output,
+  not just the whole output value (`engine/templating.py`'s `resolve_path`).
+- **Upload/ingestion size limit** — every upload (`/api/ingest/*`) and every
+  file the folder watcher picks up is capped at 20 MB. Uploads are read in
+  chunks and rejected the moment they exceed the cap, never fully buffered
+  into memory first; the watcher checks a file's size on disk before ever
+  reading it.
+- **JSON file ingestion** — upload (or drop into `watched_input/`) a `.json`
+  file — an array of records, or a single object — and get back the same
+  row-count/columns/preview shape as a CSV. Unlike CSV/PDF, no separate
+  converted artifact is written; the raw upload already is the reusable,
+  searchable artifact.
+- **Background-threaded linting** — the module source/lint viewer
+  (`GET /api/modules/{tier}/{name}/source`) now runs the file read + `ruff`
+  subprocess in a dedicated thread pool instead of on the request's own
+  thread, so a slow lint or a large file can't sit in front of unrelated
+  requests.
+- **Secrets redaction** — any dict value whose key looks like a secret
+  (`password`, `token`, `api_key`, `secret`, `credential`, ...) is replaced
+  with a fixed placeholder before it's ever persisted to the state store or
+  streamed over SSE (`engine/redaction.py`). The live `ExecutionContext` a
+  later step actually reads is untouched, so a module that legitimately
+  needs a real secret value still gets one — only the audit trail (run
+  history, log tabs, the JSON backup) is masked. This is a best-effort,
+  key-name-based check, not a scan of arbitrary string content.
+- **State backup/export** — the health panel's dropdown has two downloads: a
+  portable JSON snapshot of every run, step, schedule, ingested-file record,
+  and saved pipeline (`GET /api/backup/export`), and the raw SQLite file
+  itself (`GET /api/backup/db`).
+- **Rate limiting on run triggers** — module runs, pipeline runs, and
+  save-and-launch are capped at 30 requests per 10 seconds per client
+  (`webapp/ratelimit.py`), an in-memory sliding window with no external
+  dependency — a guard against an accidental request storm (a stuck retry
+  loop, a misconfigured schedule), not multi-tenant abuse prevention.
 
 ## Tech stack
 

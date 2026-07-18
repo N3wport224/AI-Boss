@@ -73,6 +73,12 @@
         </div>
 
         <div id="builder-steps" class="builder-steps"></div>
+        <p class="card-desc builder-reorder-hint">
+          Use ▲/▼ to reorder steps — this checks and rewires this pipeline's own
+          explicit "map from Step N" wiring, but a step that implicitly reads a
+          shared context key another step happens to produce (without a declared
+          mapping) can still behave differently if moved earlier than that step.
+        </p>
         <button id="builder-add-step" class="btn btn-run" type="button">+ Add Step</button>
 
         <p id="builder-error" class="builder-error hidden"></p>
@@ -96,9 +102,9 @@
       </div>
       <div class="ingestion-panel">
         <div id="dropzone" class="dropzone">
-          <p>Drag &amp; drop a CSV or PDF here, or</p>
+          <p>Drag &amp; drop a CSV, PDF, or JSON file here, or</p>
           <label class="btn btn-secondary btn-small" for="file-input">Choose file</label>
-          <input type="file" id="file-input" accept=".csv,.pdf" hidden />
+          <input type="file" id="file-input" accept=".csv,.pdf,.json" hidden />
         </div>
         <div id="ingestion-result" class="log-tabs-wrap hidden"></div>
 
@@ -118,7 +124,7 @@
         <div class="artifacts-row">
           <h4>Folder Watcher</h4>
           <p class="card-desc watcher-hint">
-            Drop a .csv or .pdf into <code id="watch-dir-path">watched_input/</code> — it's ingested automatically, no click needed.
+            Drop a .csv, .pdf, or .json file into <code id="watch-dir-path">watched_input/</code> — it's ingested automatically, no click needed.
           </p>
         </div>
         <div id="watcher-feed" class="runs-empty">No files auto-processed yet.</div>

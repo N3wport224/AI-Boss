@@ -4,10 +4,17 @@ The file path is always resolved server-side from a manifest's own
 `entrypoint` (via `importlib.util.find_spec`, the same mechanism Python itself
 uses to import it) — a client can never hand this module an arbitrary path.
 """
+import asyncio
 import importlib.util
 import json
 import subprocess
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
+
+# A slow `ruff` invocation (or a large file) shouldn't tie up the asyncio
+# event loop or sit in front of unrelated requests — this dedicated pool
+# keeps that work off the loop, bounded to a handful of concurrent lints.
+_LINT_EXECUTOR = ThreadPoolExecutor(max_workers=4, thread_name_prefix="lint")
 
 
 class SourceNotFoundError(Exception):
@@ -61,3 +68,10 @@ def read_module_source(entrypoint: str) -> dict:
         "source": path.read_text(),
         "issues": lint_source(path),
     }
+
+
+async def read_module_source_async(entrypoint: str) -> dict:
+    """Same as `read_module_source`, but run in `_LINT_EXECUTOR` so the
+    calling coroutine doesn't block on the file read + `ruff` subprocess."""
+    loop = asyncio.get_running_loop()
+    return await loop.run_in_executor(_LINT_EXECUTOR, read_module_source, entrypoint)

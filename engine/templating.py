@@ -8,18 +8,35 @@ one that happens to call a real language model.
 import re
 from typing import Callable, Optional
 
-_PATTERN = re.compile(r"\{(\w+)\}")
+_PATTERN = re.compile(r"\{(\w+(?:\.\w+)*)\}")
+
+
+def resolve_path(path: str, lookup: Callable[[str], Optional[object]]) -> Optional[object]:
+    """Resolve a possibly dotted `path` (e.g. `insight.risk_level`) against
+    `lookup` for the base name, then walk each remaining segment as a dict
+    key. Returns None the moment a segment is missing or the value isn't a
+    dict — a bad or too-deep path just resolves to "not found," same as an
+    unknown flat name."""
+    parts = path.split(".")
+    value = lookup(parts[0])
+    for part in parts[1:]:
+        if isinstance(value, dict) and part in value:
+            value = value[part]
+        else:
+            return None
+    return value
 
 
 def render_template(template: str, lookup: Callable[[str], Optional[object]]) -> str:
-    """Replace every `{name}` in `template` with `str(lookup(name))`.
+    """Replace every `{name}` or `{name.nested.path}` in `template` with
+    `str(resolve_path(...))`.
 
-    A name `lookup` can't resolve is left untouched (`{typo}` stays literal)
+    A path `lookup` can't resolve is left untouched (`{typo}` stays literal)
     rather than silently vanishing, so a bad reference is obvious in the output.
     """
 
     def _replace(match: "re.Match[str]") -> str:
-        value = lookup(match.group(1))
+        value = resolve_path(match.group(1), lookup)
         return str(value) if value is not None else match.group(0)
 
     return _PATTERN.sub(_replace, template)

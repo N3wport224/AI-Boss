@@ -41,6 +41,75 @@ def test_performance_reports_a_live_process_snapshot():
     assert body["uptime_seconds"] >= 0
 
 
+def test_state_store_export_snapshot_reflects_runs_and_steps(tmp_path):
+    from datetime import datetime, timezone
+
+    from engine.context import StepRecord
+    from engine.state_store import StateStore
+
+    isolated_store = StateStore(str(tmp_path / "isolated.db"))
+    run_id = isolated_store.start_run()
+    now = datetime.now(timezone.utc)
+    isolated_store.log_step(run_id, StepRecord("fetch_raw_metrics", "automation", now, now, True, {"raw_metrics": {"signups": 5}}))
+    isolated_store.finish_run(run_id, "completed")
+
+    snapshot = isolated_store.export_snapshot()
+    isolated_store.close()
+
+    assert len(snapshot["runs"]) == 1
+    assert snapshot["runs"][0]["status"] == "completed"
+    assert len(snapshot["steps"]) == 1
+    assert snapshot["steps"][0]["output"] == {"raw_metrics": {"signups": 5}}
+    assert snapshot["steps"][0]["success"] is True
+    assert snapshot["schedules"] == []
+    assert snapshot["ingested_files"] == []
+
+
+def test_backup_export_includes_a_completed_run_and_saved_pipelines():
+    res = client.post("/api/pipeline/run", json={"inputs": {}})
+    with client.stream("GET", f"/api/stream/{res.json()['stream_id']}") as response:
+        for line in response.iter_lines():
+            if line.startswith("data: ") and '"run_completed"' in line:
+                break
+
+    client.post(
+        "/api/pipelines",
+        json={"name": "Backup Test", "steps": [{"tier": "automation", "name": "fetch_raw_metrics"}]},
+    )
+
+    res = client.get("/api/backup/export")
+    assert res.status_code == 200
+    body = res.json()
+
+    assert "exported_at" in body
+    assert len(body["runs"]) >= 1
+    assert len(body["steps"]) >= 1
+    # A step's output is parsed back into a real dict, not left as a JSON string.
+    assert isinstance(body["steps"][0]["output"], dict)
+    assert any(p["slug"] == "backup_test" for p in body["pipelines"])
+
+    from webapp import pipelines as pipeline_store
+    import shutil
+
+    shutil.rmtree(pipeline_store.PIPELINES_DIR, ignore_errors=True)
+
+
+def test_backup_db_download_is_a_valid_sqlite_file(tmp_path):
+    res = client.get("/api/backup/db")
+    assert res.status_code == 200
+    assert res.headers["content-disposition"].endswith('filename="orchestrator.db"')
+
+    downloaded = tmp_path / "downloaded.db"
+    downloaded.write_bytes(res.content)
+
+    import sqlite3
+
+    conn = sqlite3.connect(str(downloaded))
+    tables = {row[0] for row in conn.execute("SELECT name FROM sqlite_master WHERE type='table'")}
+    conn.close()
+    assert {"runs", "steps", "schedules"}.issubset(tables)
+
+
 def test_metrics_reflect_a_completed_run():
     before = client.get("/api/metrics").json()
 

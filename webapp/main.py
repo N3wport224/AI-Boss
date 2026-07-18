@@ -19,16 +19,17 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Callable, Optional
 
-from fastapi import FastAPI, File, HTTPException, UploadFile
+from fastapi import FastAPI, File, HTTPException, Request, UploadFile
 from fastapi.responses import FileResponse, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 
-from engine import Orchestrator, StateStore, StepSpec, interpolate_template_fields
+from engine import Orchestrator, StateStore, StepSpec, interpolate_template_fields, resolve_path
 from engine.registry import instantiate, load_manifests
 
 from . import cache, graph, health, ingestion, linting, perf, pipelines as pipeline_store
 from .events import RunEventBus
+from .ratelimit import RateLimiter
 from .scheduler import Scheduler
 from .watcher import FilesystemWatcher, WATCH_DIR, ensure_watch_dir
 
@@ -47,6 +48,20 @@ DEFAULT_STEP_TIMEOUT_SECONDS = 60.0
 
 store = StateStore(str(ROOT / "orchestrator.db"))
 bus = RunEventBus()
+
+# Guards every run-triggering endpoint against an accidental request storm —
+# generous enough for normal interactive use, tight enough to catch a stuck
+# retry loop or a misconfigured schedule hammering the thread pool.
+_run_rate_limiter = RateLimiter(max_requests=30, window_seconds=10.0)
+
+
+def _enforce_run_rate_limit(request: Request) -> None:
+    key = request.client.host if request.client else "unknown"
+    if not _run_rate_limiter.allow(key):
+        raise HTTPException(
+            status_code=429,
+            detail="Too many run requests in a short window — slow down and try again shortly.",
+        )
 
 # Background run threads currently in flight, so shutdown can give them a
 # chance to finish (or at least stop waiting deliberately) instead of the
@@ -76,18 +91,30 @@ _watcher_log: list[dict] = []
 
 
 def _on_watched_file(path: Path) -> None:
-    """Auto-ingest a file the moment it appears in watched_input/ — same CSV/PDF
-    handling as a manual upload, just triggered by the filesystem instead of a click."""
+    """Auto-ingest a file the moment it appears in watched_input/ — same
+    CSV/PDF/JSON handling as a manual upload, just triggered by the
+    filesystem instead of a click."""
     suffix = path.suffix.lower()
     entry = {"filename": path.name, "at": datetime.now(timezone.utc).isoformat()}
     try:
+        size = path.stat().st_size
+        if size > ingestion.MAX_UPLOAD_BYTES:
+            entry["error"] = (
+                f"File is {size} bytes, exceeding the "
+                f"{ingestion.MAX_UPLOAD_BYTES // (1024 * 1024)} MB auto-ingest limit — skipped."
+            )
+            _watcher_log.append(entry)
+            return
+
         data = path.read_bytes()
         if suffix == ".csv":
             result = ingestion.ingest_csv_bytes(path.name, data, store)
         elif suffix == ".pdf":
             result = ingestion.ingest_pdf_bytes(path.name, data, store)
+        elif suffix == ".json":
+            result = ingestion.ingest_json_bytes(path.name, data, store)
         else:
-            entry["error"] = f"Unsupported file type '{suffix}' — only .csv and .pdf are auto-ingested."
+            entry["error"] = f"Unsupported file type '{suffix}' — only .csv, .pdf, and .json are auto-ingested."
             _watcher_log.append(entry)
             return
         entry["duplicate"] = result.get("duplicate", False)
@@ -248,7 +275,9 @@ def _build_steps_from_definition(definition: dict) -> list[StepSpec]:
         def seed(ctx, static=static_inputs, maps=mappings, manifest=manifest):
             resolved = dict(static)
             for field, mapping in maps.items():
-                resolved[field] = ctx.get(mapping["output"])
+                # mapping["output"] may be a dotted path (e.g. "insight.risk_level")
+                # reaching into a nested key of the source step's declared output.
+                resolved[field] = resolve_path(mapping["output"], ctx.get)
             return interpolate_template_fields(manifest, resolved, ctx.get)
 
         steps.append(StepSpec(module=module, seed=seed, timeout_seconds=DEFAULT_STEP_TIMEOUT_SECONDS))
@@ -325,25 +354,26 @@ def list_modules():
 
 
 @app.get("/api/modules/{tier}/{name}/source")
-def module_source(tier: str, name: str):
+async def module_source(tier: str, name: str):
     manifest = _manifest_by_name(tier, name)
     try:
-        return linting.read_module_source(manifest["entrypoint"])
+        return await linting.read_module_source_async(manifest["entrypoint"])
     except linting.SourceNotFoundError as exc:
         raise HTTPException(status_code=404, detail=str(exc))
 
 
 @app.post("/api/modules/{tier}/{name}/run")
-def run_module(tier: str, name: str, request: RunRequest):
+def run_module(tier: str, name: str, payload: RunRequest, http_request: Request):
+    _enforce_run_rate_limit(http_request)
     manifest = _manifest_by_name(tier, name)
     module = instantiate(manifest["entrypoint"])
-    inputs = _coerce_inputs(manifest, request.inputs)
+    inputs = _coerce_inputs(manifest, payload.inputs)
     # A template field can reference {a_sibling_field} on this same card; there's
     # no earlier pipeline step here, so the lookup is just the inputs dict itself.
     inputs = interpolate_template_fields(manifest, inputs, inputs.get)
 
     cache_key = cache.make_cache_key(tier, name, inputs)
-    if not request.force_refresh:
+    if not payload.force_refresh:
         cached = store.get_cached_result(cache_key)
         if cached is not None:
             return _replay_cached_result(tier, name, cached)
@@ -360,10 +390,11 @@ def run_module(tier: str, name: str, request: RunRequest):
 
 
 @app.post("/api/pipeline/run")
-def run_pipeline(request: RunRequest):
+def run_pipeline(payload: RunRequest, http_request: Request):
+    _enforce_run_rate_limit(http_request)
     orchestrator = Orchestrator(_build_pipeline(), state_store=store, stop_on_error=False)
     stream_id = bus.create()
-    _run_in_background(orchestrator, request.inputs, stream_id)
+    _run_in_background(orchestrator, payload.inputs, stream_id)
     return {"stream_id": stream_id}
 
 
@@ -373,11 +404,12 @@ def list_saved_pipelines():
 
 
 @app.post("/api/pipelines")
-def save_and_launch_pipeline(definition: PipelineDefinition):
+def save_and_launch_pipeline(definition: PipelineDefinition, http_request: Request):
     """One-click save-and-launch for a pipeline built in the visual sequencer:
     persists it to pipelines/<slug>.yaml (the same convention as every other
     module folder) and immediately runs it through the same background-thread
     + SSE mechanism as any other run."""
+    _enforce_run_rate_limit(http_request)
     try:
         saved = pipeline_store.save_pipeline(definition.model_dump(), TIER_DIRS)
     except pipeline_store.PipelineValidationError as exc:
@@ -389,7 +421,8 @@ def save_and_launch_pipeline(definition: PipelineDefinition):
 
 
 @app.post("/api/pipelines/{slug}/run")
-def run_saved_pipeline(slug: str):
+def run_saved_pipeline(slug: str, http_request: Request):
+    _enforce_run_rate_limit(http_request)
     try:
         definition = pipeline_store.load_pipeline(slug)
     except FileNotFoundError:
@@ -570,12 +603,36 @@ def health_check():
     return health.run_health_checks(TIER_DIRS, store)
 
 
+@app.get("/api/backup/export")
+def export_backup():
+    """A portable JSON snapshot of every run, step, schedule, ingested-file
+    record, and saved pipeline — for basic diagnostics/maintenance backup,
+    not a byte-for-byte database copy (see /api/backup/db for that)."""
+    snapshot = store.export_snapshot()
+    snapshot["pipelines"] = pipeline_store.list_pipelines()
+    return StreamingResponse(
+        iter([json.dumps(snapshot, indent=2, default=str)]),
+        media_type="application/json",
+        headers={"Content-Disposition": "attachment; filename=ai-boss-backup.json"},
+    )
+
+
+@app.get("/api/backup/db")
+def download_backup_db():
+    """The raw SQLite file itself — an exact copy, not just what
+    export_snapshot() knows how to describe (e.g. the result_cache table)."""
+    return FileResponse(store.db_path, filename="orchestrator.db", media_type="application/octet-stream")
+
+
 @app.post("/api/ingest/csv")
 async def ingest_csv(file: UploadFile = File(...)):
     """Upload a CSV, get back structured JSON records. Identical files (by
     content hash, not filename) are reported as duplicates instead of being
     reprocessed. Shared with the filesystem watcher (webapp/watcher.py)."""
-    data = await file.read()
+    try:
+        data = await ingestion.read_upload_with_limit(file)
+    except ingestion.UploadTooLargeError as exc:
+        raise HTTPException(status_code=413, detail=str(exc))
     try:
         return ingestion.ingest_csv_bytes(file.filename, data, store)
     except Exception as exc:
@@ -586,11 +643,29 @@ async def ingest_csv(file: UploadFile = File(...)):
 async def ingest_pdf(file: UploadFile = File(...)):
     """Upload a PDF, get back its extracted text. Same content-hash dedupe as CSV,
     same shared implementation as the filesystem watcher."""
-    data = await file.read()
+    try:
+        data = await ingestion.read_upload_with_limit(file)
+    except ingestion.UploadTooLargeError as exc:
+        raise HTTPException(status_code=413, detail=str(exc))
     try:
         return ingestion.ingest_pdf_bytes(file.filename, data, store)
     except Exception as exc:
         raise HTTPException(status_code=400, detail=f"Could not read PDF: {exc}")
+
+
+@app.post("/api/ingest/json")
+async def ingest_json(file: UploadFile = File(...)):
+    """Upload a JSON file (an array of records, or a single object), get back
+    the same row_count/columns/preview shape as a CSV upload. Same content-hash
+    dedupe, same shared implementation as the filesystem watcher."""
+    try:
+        data = await ingestion.read_upload_with_limit(file)
+    except ingestion.UploadTooLargeError as exc:
+        raise HTTPException(status_code=413, detail=str(exc))
+    try:
+        return ingestion.ingest_json_bytes(file.filename, data, store)
+    except Exception as exc:
+        raise HTTPException(status_code=400, detail=f"Could not parse JSON: {exc}")
 
 
 @app.get("/api/artifacts")

@@ -47,6 +47,25 @@ class Slow(BaseModule):
         return {"done": True}
 
 
+class EmitsApiKey(BaseModule):
+    name = "emits_api_key"
+    tier = Tier.AUTOMATION
+
+    def run(self, context: ExecutionContext) -> dict:
+        return {"api_key": "sk-real-secret-value", "status": "ok"}
+
+
+class ReadsApiKey(BaseModule):
+    """Proves a later step still sees the *real* value via shared context —
+    only what's recorded/emitted is redacted, not the live working state."""
+
+    name = "reads_api_key"
+    tier = Tier.WORKFLOW
+
+    def run(self, context: ExecutionContext) -> dict:
+        return {"saw_real_key": context.get("api_key") == "sk-real-secret-value"}
+
+
 def test_pipeline_threads_context_sequentially():
     orchestrator = Orchestrator([Double(), AddOne()])
     context = orchestrator.run({"value": 5})
@@ -109,3 +128,24 @@ def test_step_spec_timeout_fails_a_slow_step():
     assert step.success is False
     assert "did not finish within 0.05s" in step.error
     assert context.get("done") is None
+
+
+def test_secret_shaped_output_is_redacted_in_history_and_events_but_not_in_live_context():
+    events = []
+    orchestrator = Orchestrator([EmitsApiKey(), ReadsApiKey()])
+    context = orchestrator.run({}, on_event=events.append)
+
+    # The recorded StepRecord (what StateStore persists) never sees the real value.
+    emits_step = context.history[0]
+    assert emits_step.output["api_key"] == "***REDACTED***"
+    assert emits_step.output["status"] == "ok"
+
+    # A later step reading the same context key still got the real value.
+    assert context.get("saw_real_key") is True
+
+    # Every emitted event (step_completed, run_completed) is redacted too.
+    step_completed_events = [e for e in events if e["kind"] == "step_completed" and e["name"] == "emits_api_key"]
+    assert step_completed_events[0]["output"]["api_key"] == "***REDACTED***"
+
+    run_completed = next(e for e in events if e["kind"] == "run_completed")
+    assert run_completed["context"]["api_key"] == "***REDACTED***"

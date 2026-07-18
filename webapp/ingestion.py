@@ -10,10 +10,24 @@ import io
 import json
 import time
 from pathlib import Path
+from typing import Optional
 
 from pypdf import PdfReader
 
 ARTIFACTS_DIR = Path(__file__).resolve().parent.parent / "artifacts"
+
+# Applied to every upload and every file the folder watcher picks up. This is
+# meant for the CSV/PDF/JSON files this dashboard is actually for, not
+# arbitrary large uploads — both call sites reject before the whole file ever
+# lands in memory (a chunked read for uploads, a stat() check for the watcher).
+MAX_UPLOAD_BYTES = 20 * 1024 * 1024
+
+
+class UploadTooLargeError(ValueError):
+    def __init__(self, size_bytes: int, limit_bytes: int = MAX_UPLOAD_BYTES):
+        self.size_bytes = size_bytes
+        self.limit_bytes = limit_bytes
+        super().__init__(f"File is {size_bytes} bytes, exceeding the {limit_bytes // (1024 * 1024)} MB limit.")
 
 
 def ensure_artifacts_dir() -> Path:
@@ -23,6 +37,30 @@ def ensure_artifacts_dir() -> Path:
 
 def hash_bytes(data: bytes) -> str:
     return hashlib.sha256(data).hexdigest()
+
+
+async def read_upload_with_limit(file, max_bytes: Optional[int] = None) -> bytes:
+    """Read a FastAPI UploadFile in chunks, aborting as soon as the running
+    total exceeds `max_bytes` — so an oversized file is never fully
+    buffered into memory just to be rejected.
+
+    `max_bytes` defaults to the *current* value of `MAX_UPLOAD_BYTES` (looked
+    up at call time, not bound as a function default) so tests can monkeypatch
+    the module-level constant and have callers that don't pass one pick it up.
+    """
+    if max_bytes is None:
+        max_bytes = MAX_UPLOAD_BYTES
+    chunks = []
+    total = 0
+    while True:
+        chunk = await file.read(1024 * 1024)
+        if not chunk:
+            break
+        total += len(chunk)
+        if total > max_bytes:
+            raise UploadTooLargeError(total, max_bytes)
+        chunks.append(chunk)
+    return b"".join(chunks)
 
 
 def save_artifact(filename: str, data: bytes, suffix: str = "") -> Path:
@@ -138,6 +176,38 @@ def ingest_pdf_bytes(filename: str, data: bytes, store) -> dict:
         "char_count": len(text),
         "preview": text[:2000],
         "truncated": len(text) > 2000,
+    }
+
+
+def ingest_json_bytes(filename: str, data: bytes, store) -> dict:
+    """Shared by the upload endpoint and the filesystem watcher: hash-dedupe,
+    parse, save the artifact, record the hash.
+
+    Unlike CSV/PDF, no separate "converted" derivative is written — a JSON
+    upload already ships in the structured format ingestion turns CSV/PDF
+    into, so the raw uploaded file itself is the reusable artifact (and is
+    already picked up by search_artifacts, which looks at .json/.txt files).
+    A top-level JSON array is treated as the record list (mirroring a CSV's
+    rows); anything else (a single object, a scalar) is wrapped as one row.
+    """
+    file_hash = hash_bytes(data)
+    existing = store.find_ingested_file(file_hash)
+    if existing:
+        return {"duplicate": True, "original_filename": existing["filename"], "ingested_at": existing["ingested_at"]}
+
+    parsed = json.loads(data.decode("utf-8-sig"))
+    records = parsed if isinstance(parsed, list) else [parsed]
+
+    save_artifact(filename, data)
+    store.record_ingested_file(file_hash, filename, "json")
+
+    return {
+        "duplicate": False,
+        "filename": filename,
+        "row_count": len(records),
+        "columns": list(records[0].keys()) if records and isinstance(records[0], dict) else [],
+        "preview": records[:50],
+        "truncated": len(records) > 50,
     }
 
 

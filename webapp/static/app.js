@@ -74,6 +74,20 @@ let builderSteps = [];
 let toastHistory = [];
 let unreadNotifications = 0;
 
+// Every run-triggering fetch (module run, full pipeline, saved pipeline,
+// builder launch) shares this: `fetch()` only throws on a network failure,
+// not on a 4xx/5xx response (e.g. a 429 from the run-trigger rate limiter),
+// so without this check a rejected request would silently try to stream
+// from stream_id `undefined` instead of surfacing the server's error message.
+async function fetchRunTrigger(url, options) {
+  const res = await fetch(url, options);
+  if (!res.ok) {
+    const body = await res.json().catch(() => ({}));
+    throw new Error(body.detail || `Request failed with status ${res.status}`);
+  }
+  return res.json();
+}
+
 // ---- Field controls (shared by module cards and the pipeline builder) ----
 
 function fieldId(tier, name, fieldName) {
@@ -268,7 +282,11 @@ async function loadHealth() {
           </div>
         </div>`
         )
-        .join("")}`;
+        .join("")}
+      <div class="health-panel-footer">
+        <a class="btn btn-secondary btn-small" href="/api/backup/export" download>Export JSON backup</a>
+        <a class="btn btn-secondary btn-small" href="/api/backup/db" download>Download .db file</a>
+      </div>`;
   } catch (err) {
     healthLabel.textContent = "Unreachable";
     healthBeacon.classList.add("degraded");
@@ -955,12 +973,11 @@ async function runModule(tier, name) {
   let wasCached = false;
 
   try {
-    const res = await fetch(`/api/modules/${tier}/${name}/run`, {
+    const { stream_id } = await fetchRunTrigger(`/api/modules/${tier}/${name}/run`, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ inputs, force_refresh: forceRefresh }),
     });
-    const { stream_id } = await res.json();
 
     subscribeToStream(stream_id, {
       onEvent: (event) => {
@@ -1023,12 +1040,11 @@ async function runFullPipeline() {
   renderRunLogTabs(logContainer, log, null);
 
   try {
-    const res = await fetch("/api/pipeline/run", {
+    const { stream_id } = await fetchRunTrigger("/api/pipeline/run", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ inputs: {} }),
     });
-    const { stream_id } = await res.json();
 
     subscribeToStream(stream_id, {
       onEvent: (event) => {
@@ -1071,6 +1087,37 @@ function defaultFieldSources(module) {
   return Object.fromEntries(module.inputs.map((f) => [f.name, { type: "static", value: f.default }]));
 }
 
+// Swapping two positions only ever risks breaking a mapping in whichever step
+// ends up in the *earlier* slot — the step already in the earlier slot can't
+// reference the later one (a mapping can only point at a strictly earlier
+// step), so only the step moving down into the earlier slot needs a guard
+// before every mapping's step index gets rewritten.
+function moveBuilderStep(from, to) {
+  if (to < 0 || to >= builderSteps.length || from === to) return;
+  const earlierIndex = Math.min(from, to);
+  const laterIndex = Math.max(from, to);
+
+  const stepMovingToEarlierSlot = builderSteps[laterIndex].fieldSources || {};
+  const dependsOnStepAbove = Object.values(stepMovingToEarlierSlot).some(
+    (source) => source.type === "mapping" && source.step === earlierIndex
+  );
+  if (dependsOnStepAbove) {
+    showBuilderError("Can't move this step above a step it maps a field from.");
+    return;
+  }
+
+  for (const step of builderSteps) {
+    for (const source of Object.values(step.fieldSources || {})) {
+      if (source.type !== "mapping") continue;
+      if (source.step === earlierIndex) source.step = laterIndex;
+      else if (source.step === laterIndex) source.step = earlierIndex;
+    }
+  }
+
+  [builderSteps[from], builderSteps[to]] = [builderSteps[to], builderSteps[from]];
+  renderBuilder();
+}
+
 function renderBuilderField(stepIndex, field, source, priorOutputs) {
   const controlId = `bfield__${stepIndex}__${field.name}`;
   const srcId = `bsrc__${stepIndex}__${field.name}`;
@@ -1087,7 +1134,9 @@ function renderBuilderField(stepIndex, field, source, priorOutputs) {
     .join("");
 
   const control = isMapped
-    ? `<div class="mapping-tag">↳ Step ${source.step + 1}: ${source.output}</div>`
+    ? `<div class="mapping-tag">↳ Step ${source.step + 1}: ${source.output}${source.nestedPath ? `.${source.nestedPath}` : ""}</div>
+       <input type="text" class="nested-path-input" data-step="${stepIndex}" data-field="${field.name}"
+              placeholder="nested key (optional, e.g. risk_level)" value="${source.nestedPath || ""}" />`
     : renderControl(controlId, field, source.value);
 
   const chips =
@@ -1125,12 +1174,16 @@ function renderBuilderStep(index, step) {
     : '<p class="card-desc">Pick a module above to configure its inputs.</p>';
 
   const canRemove = builderSteps.length > 1 && index === builderSteps.length - 1;
+  const canMoveUp = index > 0;
+  const canMoveDown = index < builderSteps.length - 1;
 
   return `
     <div class="builder-step" data-index="${index}">
       <div class="builder-step-head">
         <span class="step-badge">${index + 1}</span>
         <select class="module-select" data-index="${index}">${moduleOptions}</select>
+        <button class="move-step-btn" data-index="${index}" data-dir="up" type="button" title="Move step up" ${canMoveUp ? "" : "disabled"}>▲</button>
+        <button class="move-step-btn" data-index="${index}" data-dir="down" type="button" title="Move step down" ${canMoveDown ? "" : "disabled"}>▼</button>
         ${canRemove ? `<button class="remove-step-btn" data-index="${index}" type="button" title="Remove step">×</button>` : ""}
       </div>
       <div class="builder-step-fields">${fieldsHtml}</div>
@@ -1174,6 +1227,14 @@ function attachBuilderStepListeners() {
     });
   });
 
+  builderStepsEl.querySelectorAll(".move-step-btn").forEach((btn) => {
+    btn.addEventListener("click", (e) => {
+      const index = Number(e.currentTarget.dataset.index);
+      const target = e.currentTarget.dataset.dir === "up" ? index - 1 : index + 1;
+      moveBuilderStep(index, target);
+    });
+  });
+
   builderStepsEl.querySelectorAll(".source-select").forEach((sel) => {
     sel.addEventListener("change", (e) => {
       const stepIndex = Number(e.target.dataset.step);
@@ -1192,6 +1253,7 @@ function attachBuilderStepListeners() {
   });
 
   builderStepsEl.querySelectorAll(".mapping-control input, .mapping-control select, .mapping-control textarea").forEach((control) => {
+    if (control.classList.contains("nested-path-input")) return; // handled separately below
     const handler = (e) => {
       const wrapper = e.target.closest(".field.builder-field");
       const srcSelect = wrapper.querySelector(".source-select");
@@ -1202,6 +1264,20 @@ function attachBuilderStepListeners() {
     };
     control.addEventListener("input", handler);
     control.addEventListener("change", handler);
+  });
+
+  builderStepsEl.querySelectorAll(".nested-path-input").forEach((input) => {
+    input.addEventListener("input", (e) => {
+      const stepIndex = Number(e.target.dataset.step);
+      const fieldName = e.target.dataset.field;
+      const source = builderSteps[stepIndex].fieldSources[fieldName];
+      source.nestedPath = e.target.value.trim();
+
+      // Update the mapping-tag label in place instead of a full re-render,
+      // which would steal focus from the input mid-keystroke.
+      const tag = e.target.closest(".mapping-control")?.querySelector(".mapping-tag");
+      if (tag) tag.textContent = `↳ Step ${source.step + 1}: ${source.output}${source.nestedPath ? `.${source.nestedPath}` : ""}`;
+    });
   });
 }
 
@@ -1248,7 +1324,8 @@ builderLaunchBtn.addEventListener("click", async () => {
     const mappings = {};
     for (const [fieldName, source] of Object.entries(step.fieldSources)) {
       if (source.type === "mapping") {
-        mappings[fieldName] = { step: source.step, output: source.output };
+        const output = source.nestedPath ? `${source.output}.${source.nestedPath}` : source.output;
+        mappings[fieldName] = { step: source.step, output };
       } else {
         inputs[fieldName] = source.value;
       }
@@ -1497,8 +1574,7 @@ async function runSavedPipeline(slug, name, pipelinesList) {
   renderRunLogTabs(logContainer, log, null);
 
   try {
-    const res = await fetch(`/api/pipelines/${slug}/run`, { method: "POST" });
-    const { stream_id } = await res.json();
+    const { stream_id } = await fetchRunTrigger(`/api/pipelines/${slug}/run`, { method: "POST" });
 
     subscribeToStream(stream_id, {
       onEvent: (event) => {
@@ -1610,8 +1686,9 @@ async function uploadFile(file) {
   const lowerName = file.name.toLowerCase();
   const isPdf = lowerName.endsWith(".pdf");
   const isCsv = lowerName.endsWith(".csv");
-  if (!isPdf && !isCsv) {
-    showToast("Only .csv and .pdf files are supported.", "error");
+  const isJson = lowerName.endsWith(".json");
+  if (!isPdf && !isCsv && !isJson) {
+    showToast("Only .csv, .pdf, and .json files are supported.", "error");
     return;
   }
 
@@ -1621,8 +1698,10 @@ async function uploadFile(file) {
   ingestionResultEl.classList.remove("hidden");
   ingestionResultEl.innerHTML = `<pre class="log-tab-content">Uploading ${file.name}…</pre>`;
 
+  const endpoint = isPdf ? "/api/ingest/pdf" : isJson ? "/api/ingest/json" : "/api/ingest/csv";
+
   try {
-    const res = await fetch(isPdf ? "/api/ingest/pdf" : "/api/ingest/csv", { method: "POST", body: formData });
+    const res = await fetch(endpoint, { method: "POST", body: formData });
     const body = await res.json();
 
     if (!res.ok) {
@@ -1634,7 +1713,7 @@ async function uploadFile(file) {
     if (body.duplicate) {
       ingestionResultEl.innerHTML = `<pre class="log-tab-content">This exact file was already ingested as "${body.original_filename}" at ${new Date(body.ingested_at).toLocaleString()}. Skipped.</pre>`;
       showToast(`Duplicate of "${body.original_filename}" — skipped.`, "error");
-    } else if (isCsv) {
+    } else if (isCsv || isJson) {
       const preview = JSON.stringify(body.preview, null, 2);
       const note = body.truncated ? `\n… (truncated — ${body.row_count} rows total)` : "";
       const cleaning = body.cleaning || {};

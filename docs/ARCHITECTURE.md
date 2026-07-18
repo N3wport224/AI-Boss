@@ -508,6 +508,72 @@ only a JSON parse error or timeout falls back to an empty issue list.
     hit skips re-execution, an actual slow module proving a timeout fires,
     a real scheduler thread proving it fires on interval and honors
     pause/resume) rather than asserting shapes alone.
+47. **Add pipeline step reordering** (`webapp/static/app.js`'s
+    `moveBuilderStep`): swapping two step positions rewires every explicit
+    mapping's step index that referenced either position, and is blocked
+    outright if the step moving into the earlier slot has an explicit
+    mapping referencing what's currently there (the only direction that can
+    create a forward reference, since a mapping can only ever point at a
+    strictly earlier step). Documented, not silently ignored: a step that
+    implicitly reads a shared context key another step produces *without* a
+    declared mapping can still change behavior when reordered, since every
+    module's output lands in the shared context regardless of mapping — the
+    builder shows this caveat inline.
+48. **Add nested-path (dotted) mapping and template resolution**
+    (`engine/templating.py`'s `resolve_path`, reused by both
+    `interpolate_template_fields`'s `{a.b.c}` syntax and
+    `_build_steps_from_definition`'s field-mapping seed): a path's base name
+    is resolved via the existing flat `lookup`, then each remaining segment
+    walks one level into a dict, returning `None` (leaving a template
+    literal, or `None` for a mapped field) the moment a segment is missing or
+    the value isn't a dict. `validate_pipeline` checks only a mapping's base
+    output name against the manifest's declared outputs — it can't validate
+    a nested path since the manifest doesn't describe a nested output's shape.
+49. **Add an upload/ingestion size limit** (`ingestion.read_upload_with_limit`,
+    `MAX_UPLOAD_BYTES` = 20 MB): uploads are read in 1 MB chunks and rejected
+    (413) the moment the running total exceeds the cap, so an oversized file
+    is never fully buffered into memory just to be turned away; the folder
+    watcher checks `path.stat().st_size` before ever reading a dropped file.
+50. **Move linting off the request thread** (`linting.read_module_source_async`,
+    a dedicated `ThreadPoolExecutor`): the file read + `ruff` subprocess call
+    now runs via `loop.run_in_executor`, so the async endpoint awaits it
+    without blocking the event loop on a slow lint or a large file.
+51. **Add state store backup/export** (`StateStore.export_snapshot()`,
+    `GET /api/backup/export` for a portable JSON snapshot of every run/step/
+    schedule/ingested-file record plus the saved-pipelines list, and
+    `GET /api/backup/db` for the raw SQLite file itself), surfaced as two
+    download links in the health panel dropdown.
+52. **Add secrets redaction** (`engine/redaction.py`'s `redact_secrets`,
+    wired into `Orchestrator.run()`): a dict value is masked before it's
+    used to build a `StepRecord` (what `StateStore.log_step` persists) or an
+    emitted SSE event — but *after* `context.update(output)`, so the live
+    `ExecutionContext` a later step reads still has the real value. One
+    redaction point in the engine protects every downstream consumer
+    (persisted history, live SSE, the JSON backup, the result cache) at once,
+    rather than requiring each to remember to redact separately.
+53. **Add rate limiting to run-triggering endpoints** (`webapp/ratelimit.py`'s
+    `RateLimiter`, a per-client sliding window at 30 requests/10s): guards
+    module runs, pipeline runs, and save-and-launch against an accidental
+    request storm. Also fixed a related frontend gap while adding this: the
+    run-trigger fetch calls never checked `res.ok` before destructuring
+    `stream_id`, so a 4xx/5xx response (now genuinely reachable via a 429)
+    would silently try to stream from `stream_id: undefined` instead of
+    surfacing the server's error — a shared `fetchRunTrigger()` helper fixes
+    this at all four call sites.
+54. **Add JSON file ingestion** (`ingestion.ingest_json_bytes`,
+    `POST /api/ingest/json`, folder-watcher `.json` handling): a top-level
+    array is treated as the record list (mirroring a CSV's rows); anything
+    else is wrapped as one row. Unlike CSV/PDF, no separate converted
+    artifact is written — the raw upload already ships in the format
+    ingestion turns CSV/PDF into, so it's directly reused as the
+    searchable/previewable artifact.
+55. **Add tests for all of Batch 4, plus a shared test fixture**
+    (`tests/conftest.py`'s autouse `_reset_run_rate_limiter`): the rate
+    limiter is a module-level singleton shared by every test that imports
+    `webapp.main` (Python loads a module once), so without a reset the whole
+    suite's cumulative request count could trip it well before any single
+    test meant to exercise that behavior — the fixture clears it before each
+    test so results stay independent of run order or timing. 77 tests total.
 
 ## 9. Roadmap
 
@@ -539,11 +605,11 @@ pipelines. Grow it only when a real need shows up:
 - **Auth on the dashboard** — the current `webapp/` has no auth layer, fine for
   local/single-user use; add it before exposing the control center beyond
   localhost.
-- **Pipeline step reordering + nested-field mapping** — the builder only
-  supports appending/removing the *last* step (reordering would invalidate
-  earlier steps' mapping indices) and maps a whole output value, not a nested
-  key within it (e.g. just `insight.risk_level`). Both are solvable without
-  changing the storage format; neither was needed to prove the mechanism.
+- **Pipeline step removal is still last-step-only** — reordering (Batch 4)
+  solved the "move a step" half of this; removing an arbitrary *middle* step
+  still isn't supported, since it would require shifting every later
+  mapping's step index down by one, not just swapping two. Solvable the same
+  way reordering was, just not needed yet.
 - **Committing saved pipelines to git automatically** — `POST /api/pipelines`
   writes `pipelines/<slug>.yaml` to disk (so it's a normal file to `git add`
   and commit like anything else), but it deliberately does **not** run `git
@@ -554,17 +620,23 @@ pipelines. Grow it only when a real need shows up:
   "drop a file, wait a moment"; if that's ever too slow, swap the polling loop
   for the `watchdog` package's OS-level file events without changing
   `FilesystemWatcher`'s public interface (`start()`/`stop()`/`on_new_file`).
-- **No size limits on uploads or the watch folder** — a very large CSV/PDF
-  is read entirely into memory (`await file.read()` / `path.read_bytes()`).
-  Fine for the kind of files this is meant for; add a size cap before trusting
-  it with arbitrary uploads.
-- **Template mapping has the same nested-field limitation as pipeline
-  mapping** — `{signups}` resolves because it's a flat context key; there's no
-  `{insight.risk_level}` syntax for reaching into a nested output dict.
-- **Linting runs synchronously in the request handler** — `ruff check` on one
-  file is fast enough that this hasn't mattered, but a slow linter or a huge
-  file would block that request; move it to the same background-thread/SSE
-  pattern as runs if that ever becomes true.
+- **Rate limiter is per-process, in-memory, IP-keyed** — fine for a single
+  local process behind no reverse proxy; if this ever runs behind one that
+  changes the client IP `request.client.host` sees (or if this needs to
+  survive process restarts / scale to multiple processes), swap
+  `webapp/ratelimit.py`'s in-memory dict for something shared (Redis) rather
+  than adding process-local state that silently stops working.
+- **Redaction is key-name-based, not content-based** — `engine/redaction.py`
+  masks a value only if its *key* looks like a secret; a module that embeds a
+  real secret inside a differently-named field, or inside a larger string
+  (e.g. an error message), isn't protected. Catching every possible secret
+  shape would mean scanning arbitrary string content, a much bigger and much
+  less reliable problem than this solves.
+- **JSON ingestion doesn't get CSV's auto-cleansing** — `ingest_json_bytes`
+  parses and hash-dedupes but doesn't run `cleanse_records()` — that was
+  designed for messy hand-edited/spreadsheet-exported CSVs, a failure mode
+  that doesn't really apply to JSON's more rigid structure. Revisit if a real
+  need for JSON-specific cleanup shows up.
 
 Each step above is additive — none require rewriting `BaseModule`, the manifest
 format, or the example modules.

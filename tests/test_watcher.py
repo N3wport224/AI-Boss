@@ -37,6 +37,47 @@ def test_watcher_detects_a_new_file_and_ignores_ones_already_present(tmp_path):
         watcher.WATCH_DIR = original_watch_dir
 
 
+def test_app_level_watcher_skips_a_file_over_the_size_limit(monkeypatch):
+    import webapp.main as main
+
+    if ingestion.ARTIFACTS_DIR.exists():
+        shutil.rmtree(ingestion.ARTIFACTS_DIR)
+    watcher.ensure_watch_dir()
+    monkeypatch.setattr(ingestion, "MAX_UPLOAD_BYTES", 10)
+
+    filename = f"oversized_test_{int(time.time() * 1000)}.csv"
+    (watcher.WATCH_DIR / filename).write_text("name,value\nfoo,1\nbar,2\n")  # well over 10 bytes
+
+    assert _wait_until(lambda: any(entry["filename"] == filename for entry in main._watcher_log))
+    entry = next(e for e in main._watcher_log if e["filename"] == filename)
+    assert "error" in entry and "auto-ingest limit" in entry["error"]
+    assert ingestion.list_artifacts() == []
+
+    (watcher.WATCH_DIR / filename).unlink(missing_ok=True)
+    shutil.rmtree(ingestion.ARTIFACTS_DIR, ignore_errors=True)
+
+
+def test_app_level_watcher_auto_ingests_a_dropped_json_file():
+    if ingestion.ARTIFACTS_DIR.exists():
+        shutil.rmtree(ingestion.ARTIFACTS_DIR)
+    watcher.ensure_watch_dir()
+
+    filename = f"watched_test_{int(time.time() * 1000)}.json"
+    (watcher.WATCH_DIR / filename).write_text('[{"name": "foo", "value": 1}]')
+
+    from webapp.main import _watcher_log
+
+    assert _wait_until(lambda: any(entry["filename"] == filename for entry in _watcher_log), timeout=6.0)
+    entry = next(e for e in _watcher_log if e["filename"] == filename)
+    assert "error" not in entry
+
+    saved = list(ingestion.ARTIFACTS_DIR.glob(f"*{filename}"))
+    assert len(saved) == 1
+
+    (watcher.WATCH_DIR / filename).unlink(missing_ok=True)
+    shutil.rmtree(ingestion.ARTIFACTS_DIR, ignore_errors=True)
+
+
 def test_app_level_watcher_auto_ingests_a_dropped_csv():
     if ingestion.ARTIFACTS_DIR.exists():
         shutil.rmtree(ingestion.ARTIFACTS_DIR)

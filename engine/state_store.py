@@ -296,6 +296,49 @@ class StateStore:
             self._conn.execute("DELETE FROM schedules WHERE id = ?", (schedule_id,))
             self._conn.commit()
 
+    def export_snapshot(self) -> dict:
+        """A full, human-readable JSON snapshot of everything this store has
+        recorded — every run, every step (with `output` parsed back into a
+        dict), every schedule, and every ingested-file hash record. Meant as
+        a portable backup/inspection format, not a byte-for-byte copy of the
+        database (see also: downloading the raw .db file for that)."""
+        with self._lock:
+            run_rows = self._conn.execute(
+                "SELECT id, started_at, finished_at, status FROM runs ORDER BY id"
+            ).fetchall()
+            step_rows = self._conn.execute(
+                "SELECT id, run_id, name, tier, success, output, error, started_at, finished_at "
+                "FROM steps ORDER BY id"
+            ).fetchall()
+            schedule_rows = self._conn.execute(
+                f"SELECT {', '.join(self._SCHEDULE_COLUMNS)} FROM schedules ORDER BY id"
+            ).fetchall()
+            ingested_rows = self._conn.execute(
+                "SELECT hash, filename, kind, ingested_at FROM ingested_files ORDER BY ingested_at"
+            ).fetchall()
+
+        run_cols = ("id", "started_at", "finished_at", "status")
+        step_cols = ("id", "run_id", "name", "tier", "success", "output", "error", "started_at", "finished_at")
+        ingested_cols = ("hash", "filename", "kind", "ingested_at")
+
+        steps = []
+        for row in step_rows:
+            record = dict(zip(step_cols, row))
+            record["success"] = bool(record["success"])
+            try:
+                record["output"] = json.loads(record["output"])
+            except (TypeError, json.JSONDecodeError):
+                pass
+            steps.append(record)
+
+        return {
+            "exported_at": datetime.now(timezone.utc).isoformat(),
+            "runs": [dict(zip(run_cols, row)) for row in run_rows],
+            "steps": steps,
+            "schedules": [self._schedule_row_to_dict(row) for row in schedule_rows],
+            "ingested_files": [dict(zip(ingested_cols, row)) for row in ingested_rows],
+        }
+
     def close(self) -> None:
         with self._lock:
             self._conn.close()

@@ -100,6 +100,35 @@ def test_mapping_wires_an_earlier_steps_output_into_a_later_field():
     assert "Slack notification queued" in agent_step["output"]["agent_decision"]["message"]
 
 
+def test_mapping_reaches_into_a_nested_key_of_an_earlier_steps_output():
+    # analyze_metrics' declared output is the whole "insight" dict; a dotted
+    # path lets a later step map just its nested "risk_level" string instead
+    # of the whole dict.
+    payload = {
+        "name": "Nested Mapped Notify",
+        "steps": [
+            {"tier": "automation", "name": "fetch_raw_metrics", "inputs": {"signups": 10, "churn": 9, "revenue": 1}},
+            {"tier": "workflow", "name": "analyze_metrics", "inputs": {"risk_threshold": 0.1}},
+            {
+                "tier": "agent",
+                "name": "churn_response_agent",
+                "inputs": {},
+                "mappings": {"notify_slack": {"step": 1, "output": "insight.risk_level"}},
+            },
+        ],
+    }
+
+    res = client.post("/api/pipelines", json=payload)
+    assert res.status_code == 200
+    events = _collect_stream(res.json()["stream_id"])
+    assert events[-1]["kind"] == "run_completed"
+
+    agent_step = next(e for e in events if e["kind"] == "step_completed" and e["name"] == "churn_response_agent")
+    # churn=9 out of signups=10 is a 90% churn rate, well above the 0.1 threshold -> "high",
+    # a truthy non-empty string -> the mapped-in notify_slack branch fires.
+    assert "Slack notification queued" in agent_step["output"]["agent_decision"]["message"]
+
+
 def test_pipeline_graph_reports_nodes_sequence_and_mapping_edges():
     payload = {
         "name": "Graph Test",

@@ -88,6 +88,59 @@ def test_ingest_csv_reports_auto_cleansing_stats():
     assert body["cleaning"]["duplicate_rows_removed"] == 1
 
 
+def test_ingest_csv_rejects_a_file_over_the_size_limit(monkeypatch):
+    monkeypatch.setattr(ingestion, "MAX_UPLOAD_BYTES", 10)
+    csv_bytes = b"name,revenue\nAcme,1200\nBeta,3400\n"  # well over 10 bytes
+    res = client.post("/api/ingest/csv", files={"file": ("big.csv", csv_bytes, "text/csv")})
+    assert res.status_code == 413
+    assert "exceeding" in res.json()["detail"]
+    # Rejected before any artifact was ever written.
+    assert ingestion.list_artifacts() == []
+
+
+def test_ingest_json_array_returns_structured_records():
+    json_bytes = b'[{"name": "Acme", "revenue": 1200}, {"name": "Beta", "revenue": 3400}]'
+    res = client.post("/api/ingest/json", files={"file": ("companies.json", json_bytes, "application/json")})
+    assert res.status_code == 200
+
+    body = res.json()
+    assert body["duplicate"] is False
+    assert body["row_count"] == 2
+    assert body["columns"] == ["name", "revenue"]
+    assert body["preview"] == [{"name": "Acme", "revenue": 1200}, {"name": "Beta", "revenue": 3400}]
+
+    # Unlike CSV, no separate derived artifact — the raw upload is the only file.
+    saved = ingestion.list_artifacts()
+    assert len(saved) == 1
+    assert saved[0]["name"].endswith("companies.json")
+
+
+def test_ingest_json_wraps_a_single_object_as_one_row():
+    json_bytes = b'{"name": "Acme", "revenue": 1200}'
+    res = client.post("/api/ingest/json", files={"file": ("one.json", json_bytes, "application/json")})
+    assert res.status_code == 200
+    body = res.json()
+    assert body["row_count"] == 1
+    assert body["preview"] == [{"name": "Acme", "revenue": 1200}]
+
+
+def test_ingest_json_blocks_exact_duplicate_by_content_hash():
+    json_bytes = b'[{"name": "Acme"}]'
+    first = client.post("/api/ingest/json", files={"file": ("a.json", json_bytes, "application/json")})
+    assert first.json()["duplicate"] is False
+
+    second = client.post("/api/ingest/json", files={"file": ("b.json", json_bytes, "application/json")})
+    body = second.json()
+    assert body["duplicate"] is True
+    assert body["original_filename"] == "a.json"
+
+
+def test_ingest_json_rejects_malformed_content():
+    res = client.post("/api/ingest/json", files={"file": ("bad.json", b"{not valid json", "application/json")})
+    assert res.status_code == 400
+    assert "Could not parse JSON" in res.json()["detail"]
+
+
 def test_ingest_pdf_extracts_text_and_dedupes():
     from pypdf import PdfWriter
     import io

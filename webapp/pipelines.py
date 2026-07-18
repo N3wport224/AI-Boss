@@ -67,9 +67,13 @@ def validate_pipeline(definition: dict, tier_dirs: dict) -> dict:
             source_step = steps[source_index]
             source_manifest = lookup[(source_step.get("tier"), source_step.get("name"))]
             output_names = {o["name"] for o in source_manifest.get("outputs", [])}
-            if output_name not in output_names:
+            # A dotted path (e.g. "insight.risk_level") reaches into a nested
+            # key of the declared output — only the base name is checked here,
+            # since the manifest doesn't describe a nested output's shape.
+            base_output = (output_name or "").split(".")[0]
+            if base_output not in output_names:
                 raise PipelineValidationError(
-                    f"Step {index + 1}: Step {source_index + 1} has no declared output '{output_name}'."
+                    f"Step {index + 1}: Step {source_index + 1} has no declared output '{base_output}'."
                 )
 
     return {

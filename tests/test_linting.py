@@ -1,8 +1,19 @@
+import asyncio
+
 from fastapi.testclient import TestClient
 
 from webapp.main import app
 
 client = TestClient(app)
+
+
+def test_read_module_source_async_runs_off_the_event_loop_thread():
+    from webapp import linting
+
+    result = asyncio.run(linting.read_module_source_async("agents.example_agent:ChurnResponseAgent"))
+    assert result["path"].endswith("agents/example_agent.py")
+    assert "class ChurnResponseAgent" in result["source"]
+    assert result["issues"] == []
 
 
 def test_module_source_returns_clean_source_with_no_issues():

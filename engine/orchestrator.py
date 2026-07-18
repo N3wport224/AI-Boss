@@ -6,6 +6,7 @@ from typing import Callable, Optional, Sequence, Union
 
 from .base import BaseModule
 from .context import ExecutionContext, StepRecord
+from .redaction import redact_secrets
 from .state_store import StateStore
 
 EventCallback = Callable[[dict], None]
@@ -123,13 +124,14 @@ class Orchestrator:
                 if self.stop_on_error:
                     if self.state_store:
                         self.state_store.finish_run(run_id, "failed")
-                    emit({"kind": "run_failed", "error": str(exc), "context": context.variables})
+                    emit({"kind": "run_failed", "error": str(exc), "context": redact_secrets(context.variables)})
                     raise
                 continue
 
             finished_at = datetime.now(timezone.utc)
-            context.update(output)
-            record = StepRecord(module.name, module.tier.value, started_at, finished_at, True, output)
+            context.update(output)  # the real, unredacted output — later steps may legitimately need it
+            safe_output = redact_secrets(output)
+            record = StepRecord(module.name, module.tier.value, started_at, finished_at, True, safe_output)
             context.record(record)
             if self.state_store:
                 self.state_store.log_step(run_id, record)
@@ -139,7 +141,7 @@ class Orchestrator:
                     "index": index,
                     "tier": module.tier.value,
                     "name": module.name,
-                    "output": output,
+                    "output": safe_output,
                     "duration_ms": round((finished_at - started_at).total_seconds() * 1000, 1),
                 }
             )
@@ -149,7 +151,7 @@ class Orchestrator:
         emit(
             {
                 "kind": "run_failed" if had_failure else "run_completed",
-                "context": context.variables,
+                "context": redact_secrets(context.variables),
             }
         )
         return context
