@@ -111,6 +111,37 @@ class StateStore:
         cols = ("name", "tier", "success", "output", "error", "started_at", "finished_at")
         return [dict(zip(cols, row)) for row in rows]
 
+    def metrics_summary(self) -> dict:
+        """Aggregate telemetry across every finished run: counts, success rate,
+        and average wall-clock duration — enough for a header ticker without
+        a client having to fetch and reduce the full run history itself."""
+        with self._lock:
+            cur = self._conn.execute(
+                "SELECT started_at, finished_at, status FROM runs WHERE finished_at IS NOT NULL"
+            )
+            rows = cur.fetchall()
+
+        total = len(rows)
+        completed = sum(1 for _, _, status in rows if status == "completed")
+        failed = sum(1 for _, _, status in rows if status == "failed")
+
+        durations = []
+        for started_at, finished_at, _ in rows:
+            try:
+                durations.append(
+                    (datetime.fromisoformat(finished_at) - datetime.fromisoformat(started_at)).total_seconds()
+                )
+            except ValueError:
+                continue
+
+        return {
+            "total_runs": total,
+            "completed": completed,
+            "failed": failed,
+            "success_rate": round(completed / total, 4) if total else None,
+            "avg_duration_seconds": round(sum(durations) / len(durations), 3) if durations else None,
+        }
+
     def close(self) -> None:
         with self._lock:
             self._conn.close()

@@ -76,9 +76,8 @@ class Orchestrator:
             try:
                 output = module.run(context) or {}
             except Exception as exc:
-                record = StepRecord(
-                    module.name, module.tier.value, started_at, datetime.now(timezone.utc), False, {}, str(exc)
-                )
+                finished_at = datetime.now(timezone.utc)
+                record = StepRecord(module.name, module.tier.value, started_at, finished_at, False, {}, str(exc))
                 context.record(record)
                 if self.state_store:
                     self.state_store.log_step(run_id, record)
@@ -89,6 +88,7 @@ class Orchestrator:
                         "tier": module.tier.value,
                         "name": module.name,
                         "error": str(exc),
+                        "duration_ms": round((finished_at - started_at).total_seconds() * 1000, 1),
                     }
                 )
                 had_failure = True
@@ -100,10 +100,9 @@ class Orchestrator:
                     raise
                 continue
 
+            finished_at = datetime.now(timezone.utc)
             context.update(output)
-            record = StepRecord(
-                module.name, module.tier.value, started_at, datetime.now(timezone.utc), True, output
-            )
+            record = StepRecord(module.name, module.tier.value, started_at, finished_at, True, output)
             context.record(record)
             if self.state_store:
                 self.state_store.log_step(run_id, record)
@@ -114,6 +113,7 @@ class Orchestrator:
                     "tier": module.tier.value,
                     "name": module.name,
                     "output": output,
+                    "duration_ms": round((finished_at - started_at).total_seconds() * 1000, 1),
                 }
             )
 

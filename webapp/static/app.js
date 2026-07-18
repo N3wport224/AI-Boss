@@ -12,10 +12,33 @@ const STEP_ICON = {
   failed: "🔴",
 };
 
+const THEME_STORAGE_KEY = "aiboss-theme";
+const COLLAPSE_STORAGE_KEY = "aiboss-collapsed-sections";
+const FAVORITES_STORAGE_KEY = "aiboss-favorites";
+
 const sectionsEl = document.getElementById("sections");
 const pipelineResultEl = document.getElementById("pipeline-result");
 const runPipelineBtn = document.getElementById("run-pipeline-btn");
 const toastContainer = document.getElementById("toast-container");
+
+const themeToggleBtn = document.getElementById("theme-toggle");
+const searchOmnibar = document.getElementById("search-omnibar");
+
+const healthBeacon = document.getElementById("health-beacon");
+const healthLabel = document.getElementById("health-label");
+const healthPanel = document.getElementById("health-panel");
+
+const notificationsBtn = document.getElementById("notifications-btn");
+const notifBadge = document.getElementById("notif-badge");
+const notificationsPanel = document.getElementById("notifications-panel");
+
+const metricTotalEl = document.getElementById("metric-total");
+const metricSuccessEl = document.getElementById("metric-success");
+const metricDurationEl = document.getElementById("metric-duration");
+
+const favoritesSection = document.getElementById("favorites-section");
+const favoritesGrid = document.getElementById("favorites-grid");
+const recentRunsTableEl = document.getElementById("recent-runs-table");
 
 const builderToggleBtn = document.getElementById("builder-toggle");
 const builderPanelEl = document.getElementById("builder-panel");
@@ -32,7 +55,10 @@ const savedPipelinesSection = document.getElementById("saved-pipelines-section")
 const savedPipelinesGrid = document.getElementById("saved-pipelines-grid");
 
 let currentModulesByTier = {};
+let currentPipelines = [];
 let builderSteps = [];
+let toastHistory = [];
+let unreadNotifications = 0;
 
 // ---- Field controls (shared by module cards and the pipeline builder) ----
 
@@ -85,7 +111,52 @@ function statusPill(status) {
   return `<span class="status-pill ${status}"><i class="dot dot-${status}"></i>${status}</span>`;
 }
 
-// ---- Toasts ----
+// ---- Theme toggle ----
+
+function applyTheme(theme) {
+  document.body.classList.toggle("theme-light", theme === "light");
+  themeToggleBtn.textContent = theme === "light" ? "🌙" : "☀️";
+  localStorage.setItem(THEME_STORAGE_KEY, theme);
+}
+
+themeToggleBtn.addEventListener("click", () => {
+  const next = document.body.classList.contains("theme-light") ? "dark" : "light";
+  applyTheme(next);
+});
+
+applyTheme(localStorage.getItem(THEME_STORAGE_KEY) || "dark");
+
+// ---- Toasts + notification history ----
+
+function updateNotifBadge() {
+  if (unreadNotifications > 0) {
+    notifBadge.textContent = unreadNotifications > 9 ? "9+" : String(unreadNotifications);
+    notifBadge.classList.remove("hidden");
+  } else {
+    notifBadge.classList.add("hidden");
+  }
+}
+
+function renderNotificationsPanel() {
+  if (!toastHistory.length) {
+    notificationsPanel.innerHTML = `<h4>Notifications</h4><div class="dropdown-empty">Nothing yet — run something.</div>`;
+    return;
+  }
+  notificationsPanel.innerHTML = `
+    <h4>Notifications</h4>
+    ${toastHistory
+      .map(
+        (n) => `
+      <div class="notification-row">
+        <i class="dot dot-${n.type === "success" ? "ready" : "error"}"></i>
+        <div>
+          <span class="notification-message">${n.message}</span>
+          <span class="notification-time">${n.time.toLocaleTimeString()}</span>
+        </div>
+      </div>`
+      )
+      .join("")}`;
+}
 
 function showToast(message, type = "success") {
   const el = document.createElement("div");
@@ -96,6 +167,338 @@ function showToast(message, type = "success") {
     el.classList.add("leaving");
     setTimeout(() => el.remove(), 200);
   }, 4500);
+
+  toastHistory.unshift({ message, type, time: new Date() });
+  toastHistory = toastHistory.slice(0, 30);
+  unreadNotifications += 1;
+  updateNotifBadge();
+  renderNotificationsPanel();
+}
+
+notificationsBtn.addEventListener("click", () => {
+  const opening = notificationsPanel.classList.contains("hidden");
+  notificationsPanel.classList.toggle("hidden");
+  healthPanel.classList.add("hidden");
+  if (opening) {
+    unreadNotifications = 0;
+    updateNotifBadge();
+  }
+});
+
+// ---- System health beacon ----
+
+async function loadHealth() {
+  try {
+    const res = await fetch("/api/health");
+    const body = await res.json();
+    const ready = body.status === "ready";
+
+    healthBeacon.classList.toggle("degraded", !ready);
+    healthLabel.textContent = ready ? "Ready" : "Degraded";
+    healthBeacon.querySelector(".dot").className = `dot ${ready ? "dot-ready" : "dot-error"}`;
+
+    healthPanel.innerHTML = `
+      <h4>System Health</h4>
+      ${body.checks
+        .map(
+          (c) => `
+        <div class="health-check-row">
+          <i class="dot ${c.ok ? "dot-ready" : "dot-error"}"></i>
+          <div>
+            <span class="health-check-name">${c.name.replace(/_/g, " ")}</span>
+            <span class="health-check-detail">${c.detail}</span>
+          </div>
+        </div>`
+        )
+        .join("")}`;
+  } catch (err) {
+    healthLabel.textContent = "Unreachable";
+    healthBeacon.classList.add("degraded");
+  }
+}
+
+healthBeacon.addEventListener("click", () => {
+  healthPanel.classList.toggle("hidden");
+  notificationsPanel.classList.add("hidden");
+});
+
+document.addEventListener("click", (e) => {
+  if (!e.target.closest(".dropdown-wrap")) {
+    notificationsPanel.classList.add("hidden");
+    healthPanel.classList.add("hidden");
+  }
+});
+
+// ---- Metrics ticker ----
+
+async function loadMetrics() {
+  const res = await fetch("/api/metrics");
+  const m = await res.json();
+  metricTotalEl.textContent = m.total_runs;
+  metricSuccessEl.textContent = m.success_rate != null ? `${Math.round(m.success_rate * 100)}%` : "–";
+  metricDurationEl.textContent = m.avg_duration_seconds != null ? `${m.avg_duration_seconds}s` : "–";
+}
+
+// ---- Recent runs table ----
+
+async function loadRecentRuns() {
+  const res = await fetch("/api/runs?limit=15");
+  const runs = await res.json();
+
+  if (!runs.length) {
+    recentRunsTableEl.innerHTML = `<div class="runs-empty">No runs yet — click any Run button below.</div>`;
+    return;
+  }
+
+  const rows = runs
+    .map((r) => {
+      const duration =
+        r.started_at && r.finished_at
+          ? `${((new Date(r.finished_at) - new Date(r.started_at)) / 1000).toFixed(2)}s`
+          : "–";
+      return `
+        <tr>
+          <td>#${r.id}</td>
+          <td class="status-${r.status}">${r.status}</td>
+          <td>${new Date(r.started_at).toLocaleString()}</td>
+          <td>${duration}</td>
+        </tr>`;
+    })
+    .join("");
+
+  recentRunsTableEl.innerHTML = `
+    <table>
+      <thead><tr><th>Run</th><th>Status</th><th>Started</th><th>Duration</th></tr></thead>
+      <tbody>${rows}</tbody>
+    </table>`;
+}
+
+async function refreshTelemetry() {
+  await Promise.all([loadMetrics(), loadRecentRuns()]);
+}
+
+// ---- Search omnibar ----
+
+function applySearchFilter() {
+  const q = searchOmnibar.value.trim().toLowerCase();
+  document.querySelectorAll(".card[data-search-text]").forEach((card) => {
+    const matches = !q || card.dataset.searchText.includes(q);
+    card.classList.toggle("search-hidden", !matches);
+  });
+
+  document.querySelectorAll(".tier-section").forEach((section) => {
+    const grid = section.querySelector(".card-grid");
+    if (!grid) return;
+    const cards = [...grid.querySelectorAll(".card")];
+    const anyVisible = cards.some((c) => !c.classList.contains("search-hidden"));
+    section.classList.toggle("search-no-match", Boolean(q) && cards.length > 0 && !anyVisible);
+  });
+}
+
+searchOmnibar.addEventListener("input", applySearchFilter);
+
+// ---- Collapsible sections ----
+
+function loadCollapsedState() {
+  try {
+    return JSON.parse(localStorage.getItem(COLLAPSE_STORAGE_KEY) || "{}");
+  } catch {
+    return {};
+  }
+}
+
+function saveCollapsedState(state) {
+  localStorage.setItem(COLLAPSE_STORAGE_KEY, JSON.stringify(state));
+}
+
+function applyCollapsedState(container) {
+  const state = loadCollapsedState();
+  container.querySelectorAll(".collapse-toggle").forEach((btn) => {
+    const section = btn.closest(".tier-section");
+    if (section && state[btn.dataset.collapseKey]) section.classList.add("collapsed");
+  });
+}
+
+function wireCollapseToggles(container) {
+  container.querySelectorAll(".collapse-toggle").forEach((btn) => {
+    btn.addEventListener("click", () => {
+      const section = btn.closest(".tier-section");
+      section.classList.toggle("collapsed");
+      const state = loadCollapsedState();
+      state[btn.dataset.collapseKey] = section.classList.contains("collapsed");
+      saveCollapsedState(state);
+    });
+  });
+}
+
+applyCollapsedState(document);
+wireCollapseToggles(document);
+
+// ---- Favorites ----
+
+function loadFavoriteKeys() {
+  try {
+    return new Set(JSON.parse(localStorage.getItem(FAVORITES_STORAGE_KEY) || "[]"));
+  } catch {
+    return new Set();
+  }
+}
+
+let favoriteKeys = loadFavoriteKeys();
+
+function saveFavoriteKeys() {
+  localStorage.setItem(FAVORITES_STORAGE_KEY, JSON.stringify([...favoriteKeys]));
+}
+
+function isFavorite(key) {
+  return favoriteKeys.has(key);
+}
+
+function toggleFavoriteKey(key) {
+  if (favoriteKeys.has(key)) favoriteKeys.delete(key);
+  else favoriteKeys.add(key);
+  saveFavoriteKeys();
+}
+
+function favoriteButtonHtml(key) {
+  const active = isFavorite(key);
+  return `<button class="favorite-toggle ${active ? "active" : ""}" data-fav-key="${key}" type="button" title="${active ? "Remove from" : "Add to"} favorites">${active ? "★" : "☆"}</button>`;
+}
+
+function wireFavoriteToggles(container) {
+  container.querySelectorAll(".favorite-toggle").forEach((btn) => {
+    btn.addEventListener("click", (e) => {
+      e.stopPropagation();
+      const key = btn.dataset.favKey;
+      toggleFavoriteKey(key);
+      btn.classList.toggle("active", isFavorite(key));
+      btn.textContent = isFavorite(key) ? "★" : "☆";
+      btn.title = `${isFavorite(key) ? "Remove from" : "Add to"} favorites`;
+      renderFavoritesSection();
+    });
+  });
+}
+
+function renderFavoriteChip(entry) {
+  return `
+    <div class="card favorite-chip">
+      <div class="card-head">
+        <h3 class="card-title">${entry.label}</h3>
+        ${favoriteButtonHtml(entry.key)}
+      </div>
+      <p class="card-desc">${entry.description || ""}</p>
+      <button class="btn btn-run" data-fav-run="${entry.key}" type="button">Run</button>
+    </div>`;
+}
+
+function renderFavoritesSection() {
+  const entries = [];
+  for (const key of favoriteKeys) {
+    if (key.startsWith("module::")) {
+      const [, tier, name] = key.split("::");
+      const module = (currentModulesByTier[tier] || []).find((m) => m.name === name);
+      if (module) entries.push({ key, label: module.name, description: module.description });
+    } else if (key.startsWith("pipeline::")) {
+      const slug = key.slice("pipeline::".length);
+      const pipeline = currentPipelines.find((p) => p.slug === slug);
+      if (pipeline) entries.push({ key, label: pipeline.name, description: pipeline.description });
+    }
+  }
+
+  if (!entries.length) {
+    favoritesSection.classList.add("hidden");
+    return;
+  }
+
+  favoritesSection.classList.remove("hidden");
+  favoritesGrid.innerHTML = entries.map(renderFavoriteChip).join("");
+  wireFavoriteToggles(favoritesGrid);
+  favoritesGrid.querySelectorAll("[data-fav-run]").forEach((btn) => {
+    btn.addEventListener("click", () => runFavorite(btn.dataset.favRun));
+  });
+}
+
+function runFavorite(key) {
+  if (key.startsWith("module::")) {
+    const [, tier, name] = key.split("::");
+    runModule(tier, name);
+  } else if (key.startsWith("pipeline::")) {
+    const slug = key.slice("pipeline::".length);
+    const pipeline = currentPipelines.find((p) => p.slug === slug);
+    if (pipeline) runSavedPipeline(slug, pipeline.name, currentPipelines);
+  }
+}
+
+// ---- Skeleton loaders ----
+
+function skeletonCardHtml() {
+  return `
+    <div class="skeleton-card">
+      <div class="skeleton-line short"></div>
+      <div class="skeleton-line"></div>
+      <div class="skeleton-line"></div>
+      <div class="skeleton-line tall"></div>
+    </div>`;
+}
+
+function renderSkeletonSections() {
+  sectionsEl.innerHTML = TIER_ORDER.map(
+    (tier) => `
+      <section class="tier-section tier-${tier}">
+        <div class="tier-heading">
+          <span class="bar"></span>
+          <h2>${TIER_LABELS[tier]}</h2>
+        </div>
+        <div class="card-grid">${skeletonCardHtml()}${skeletonCardHtml()}</div>
+      </section>`
+  ).join("");
+}
+
+// ---- Interactive log filtering tabs (System Info / Agent Thoughts / Raw Output) ----
+
+function createRunLog() {
+  return { system: [], thoughts: [] };
+}
+
+function logSystemEvent(log, event) {
+  const ts = new Date().toLocaleTimeString();
+  if (event.kind === "step_started") {
+    log.system.push(`[${ts}] Step ${event.index + 1} (${event.tier}: ${event.name}) started`);
+  } else if (event.kind === "step_completed") {
+    log.system.push(`[${ts}] Step ${event.index + 1} (${event.tier}: ${event.name}) completed in ${event.duration_ms}ms`);
+  } else if (event.kind === "step_failed") {
+    log.system.push(`[${ts}] Step ${event.index + 1} (${event.tier}: ${event.name}) FAILED after ${event.duration_ms}ms: ${event.error}`);
+  } else if (event.kind === "thought" || event.kind === "tool_call") {
+    log.thoughts.push(`[${event.tier}: ${event.name}] ${event.kind === "tool_call" ? "🔧" : "💭"} ${event.message}`);
+  }
+}
+
+function renderRunLogTabs(container, log, rawContext) {
+  const active = container.dataset.activeTab || "system";
+  const tabs = [
+    { key: "system", label: "System Info" },
+    { key: "thoughts", label: "Agent Thoughts" },
+    { key: "raw", label: "Raw Output" },
+  ];
+  const content = {
+    system: log.system.length ? log.system.join("\n") : "No system events yet.",
+    thoughts: log.thoughts.length ? log.thoughts.join("\n") : "No agent thoughts in this run.",
+    raw: rawContext ? JSON.stringify(rawContext, null, 2) : "Run still in progress…",
+  };
+
+  container.dataset.activeTab = active;
+  container.innerHTML = `
+    <div class="log-tabs">
+      ${tabs.map((t) => `<button class="log-tab ${t.key === active ? "active" : ""}" data-tab="${t.key}" type="button">${t.label}</button>`).join("")}
+    </div>
+    <pre class="log-tab-content">${content[active]}</pre>`;
+
+  container.querySelectorAll(".log-tab").forEach((btn) => {
+    btn.addEventListener("click", () => {
+      container.dataset.activeTab = btn.dataset.tab;
+      renderRunLogTabs(container, log, rawContext);
+    });
+  });
 }
 
 // ---- Live progress tracker + agent thought stream ----
@@ -196,15 +599,20 @@ function subscribeToStream(streamId, { onEvent, onDone }) {
 
 function renderCard(module) {
   const cardId = `card__${module.tier}__${module.name}`;
+  const favKey = `module::${module.tier}::${module.name}`;
+  const searchText = `${module.name} ${module.description}`.toLowerCase();
   const fieldsHtml = module.inputs.length
     ? `<div class="form-fields">${module.inputs.map((f) => renderField(module.tier, module.name, f)).join("")}</div>`
     : "";
 
   return `
-    <div class="card" id="${cardId}">
+    <div class="card" id="${cardId}" data-search-text="${searchText}">
       <div class="card-head">
         <h3 class="card-title">${module.name}</h3>
-        <div class="status-slot">${statusPill(module.status)}</div>
+        <div class="card-head-actions">
+          ${favoriteButtonHtml(favKey)}
+          <div class="status-slot">${statusPill(module.status)}</div>
+        </div>
       </div>
       <p class="card-desc">${module.description}</p>
       ${fieldsHtml}
@@ -223,6 +631,9 @@ function renderSections(modulesByTier) {
         <div class="tier-heading">
           <span class="bar"></span>
           <h2>${TIER_LABELS[tier]}</h2>
+          <div class="tier-heading-actions">
+            <button class="collapse-toggle" type="button" data-collapse-key="tier-${tier}">▾</button>
+          </div>
         </div>
         <div class="card-grid">
           ${modules.map(renderCard).join("")}
@@ -233,6 +644,10 @@ function renderSections(modulesByTier) {
   sectionsEl.querySelectorAll(".btn-run").forEach((btn) => {
     btn.addEventListener("click", () => runModule(btn.dataset.tier, btn.dataset.name));
   });
+  wireFavoriteToggles(sectionsEl);
+  applyCollapsedState(sectionsEl);
+  wireCollapseToggles(sectionsEl);
+  applySearchFilter();
 }
 
 async function loadModules() {
@@ -240,6 +655,7 @@ async function loadModules() {
   const modulesByTier = await res.json();
   currentModulesByTier = modulesByTier;
   renderSections(modulesByTier);
+  renderFavoritesSection();
   return modulesByTier;
 }
 
@@ -252,6 +668,8 @@ function setCardStatus(cardId, status) {
 async function runModule(tier, name) {
   const cardId = `card__${tier}__${name}`;
   const card = document.getElementById(cardId);
+  card.scrollIntoView({ behavior: "smooth", block: "center" });
+
   const button = card.querySelector(".btn-run");
   const resultPanel = card.querySelector(".result-panel");
   const tracker = card.querySelector(".tracker");
@@ -286,7 +704,7 @@ async function runModule(tier, name) {
         if (event.kind === "step_completed") lastOutput = event.output;
         if (event.kind === "step_failed") lastError = event.error;
       },
-      onDone: (event) => {
+      onDone: async (event) => {
         button.disabled = false;
         const success = event.kind === "run_completed";
         setCardStatus(cardId, success ? "ready" : "error");
@@ -303,6 +721,7 @@ async function runModule(tier, name) {
           success ? `${name} completed successfully.` : `${name} failed: ${lastError ?? event.error}`,
           success ? "success" : "error"
         );
+        await refreshTelemetry();
       },
     });
   } catch (err) {
@@ -326,9 +745,12 @@ async function runFullPipeline() {
   pipelineResultEl.innerHTML = `
     <h3>Full Pipeline</h3>
     <div class="tracker" id="pipeline-tracker"></div>
-    <div class="result-panel hidden" id="pipeline-context"></div>`;
+    <div class="log-tabs-wrap" id="pipeline-log"></div>`;
   const tracker = document.getElementById("pipeline-tracker");
+  const logContainer = document.getElementById("pipeline-log");
   renderTracker(tracker, steps);
+  const log = createRunLog();
+  renderRunLogTabs(logContainer, log, null);
 
   try {
     const res = await fetch("/api/pipeline/run", {
@@ -339,21 +761,24 @@ async function runFullPipeline() {
     const { stream_id } = await res.json();
 
     subscribeToStream(stream_id, {
-      onEvent: (event) => handleTrackerEvent(tracker, event),
+      onEvent: (event) => {
+        handleTrackerEvent(tracker, event);
+        logSystemEvent(log, event);
+        renderRunLogTabs(logContainer, log, null);
+      },
       onDone: async (event) => {
         runPipelineBtn.disabled = false;
         runPipelineBtn.textContent = "Run Full Pipeline";
 
         const success = event.kind === "run_completed";
-        const contextPanel = document.getElementById("pipeline-context");
-        contextPanel.classList.remove("hidden");
-        contextPanel.textContent = JSON.stringify(event.context ?? {}, null, 2);
+        renderRunLogTabs(logContainer, log, event.context ?? {});
 
         showToast(
           success ? "Full pipeline completed successfully." : `Full pipeline failed: ${event.error}`,
           success ? "success" : "error"
         );
         await loadModules();
+        await refreshTelemetry();
       },
     });
   } catch (err) {
@@ -576,25 +1001,30 @@ builderLaunchBtn.addEventListener("click", async () => {
     const { stream_id } = await res.json();
     const trackerSteps = builderSteps.map((s) => ({ tier: s.tier, name: s.name }));
     builderTrackerEl.classList.remove("hidden");
-    builderResultEl.classList.add("hidden");
+    builderResultEl.classList.remove("hidden");
     renderTracker(builderTrackerEl, trackerSteps);
+    const log = createRunLog();
+    renderRunLogTabs(builderResultEl, log, null);
 
     subscribeToStream(stream_id, {
-      onEvent: (event) => handleTrackerEvent(builderTrackerEl, event),
+      onEvent: (event) => {
+        handleTrackerEvent(builderTrackerEl, event);
+        logSystemEvent(log, event);
+        renderRunLogTabs(builderResultEl, log, null);
+      },
       onDone: async (event) => {
         builderLaunchBtn.disabled = false;
         builderLaunchBtn.textContent = "Save & Launch";
 
         const success = event.kind === "run_completed";
-        builderResultEl.classList.remove("hidden", "error");
-        if (!success) builderResultEl.classList.add("error");
-        builderResultEl.textContent = JSON.stringify(event.context ?? {}, null, 2);
+        renderRunLogTabs(builderResultEl, log, event.context ?? {});
 
         showToast(
           success ? `Pipeline "${name}" completed successfully.` : `Pipeline "${name}" failed: ${event.error}`,
           success ? "success" : "error"
         );
         await loadSavedPipelines();
+        await refreshTelemetry();
       },
     });
   } catch (err) {
@@ -607,32 +1037,47 @@ builderLaunchBtn.addEventListener("click", async () => {
 // ---- Saved pipelines ----
 
 function renderSavedPipelines(pipelinesList) {
+  currentPipelines = pipelinesList;
+
   if (!pipelinesList.length) {
     savedPipelinesSection.classList.add("hidden");
-    return;
+  } else {
+    savedPipelinesSection.classList.remove("hidden");
+
+    savedPipelinesGrid.innerHTML = pipelinesList
+      .map((p) => {
+        const chain = p.steps.map((s) => `[${s.tier}] ${s.name}`).join(" → ");
+        const favKey = `pipeline::${p.slug}`;
+        const searchText = `${p.name} ${p.description || ""} ${chain}`.toLowerCase();
+        return `
+          <div class="card" id="pipeline-card__${p.slug}" data-search-text="${searchText}">
+            <div class="card-head">
+              <h3 class="card-title">${p.name}</h3>
+              ${favoriteButtonHtml(favKey)}
+            </div>
+            <p class="card-desc">${p.description || "No description."}</p>
+            <p class="card-desc pipeline-chain">${chain}</p>
+            <div class="pipeline-card-actions">
+              <button class="btn btn-run" data-slug="${p.slug}" data-name="${p.name}">Run</button>
+              <button class="btn btn-secondary btn-small" data-clone-slug="${p.slug}" type="button">Clone</button>
+            </div>
+            <div class="tracker hidden"></div>
+            <div class="log-tabs-wrap hidden"></div>
+          </div>`;
+      })
+      .join("");
+
+    savedPipelinesGrid.querySelectorAll(".btn-run").forEach((btn) => {
+      btn.addEventListener("click", () => runSavedPipeline(btn.dataset.slug, btn.dataset.name, pipelinesList));
+    });
+    savedPipelinesGrid.querySelectorAll("[data-clone-slug]").forEach((btn) => {
+      btn.addEventListener("click", () => clonePipeline(btn.dataset.cloneSlug));
+    });
+    wireFavoriteToggles(savedPipelinesGrid);
   }
-  savedPipelinesSection.classList.remove("hidden");
 
-  savedPipelinesGrid.innerHTML = pipelinesList
-    .map((p) => {
-      const chain = p.steps.map((s) => `[${s.tier}] ${s.name}`).join(" → ");
-      return `
-        <div class="card" id="pipeline-card__${p.slug}">
-          <div class="card-head">
-            <h3 class="card-title">${p.name}</h3>
-          </div>
-          <p class="card-desc">${p.description || "No description."}</p>
-          <p class="card-desc pipeline-chain">${chain}</p>
-          <button class="btn btn-run" data-slug="${p.slug}" data-name="${p.name}">Run</button>
-          <div class="tracker hidden"></div>
-          <div class="result-panel hidden"></div>
-        </div>`;
-    })
-    .join("");
-
-  savedPipelinesGrid.querySelectorAll(".btn-run").forEach((btn) => {
-    btn.addEventListener("click", () => runSavedPipeline(btn.dataset.slug, btn.dataset.name, pipelinesList));
-  });
+  applySearchFilter();
+  renderFavoritesSection();
 }
 
 async function loadSavedPipelines() {
@@ -642,36 +1087,59 @@ async function loadSavedPipelines() {
   return pipelinesList;
 }
 
+async function clonePipeline(slug) {
+  try {
+    const res = await fetch(`/api/pipelines/${slug}/duplicate`, { method: "POST" });
+    if (!res.ok) {
+      const err = await res.json();
+      showToast(err.detail || "Failed to clone this pipeline.", "error");
+      return;
+    }
+    const { pipeline } = await res.json();
+    showToast(`Cloned as "${pipeline.name}".`, "success");
+    await loadSavedPipelines();
+  } catch (err) {
+    showToast(`Clone failed: ${err}`, "error");
+  }
+}
+
 async function runSavedPipeline(slug, name, pipelinesList) {
   const card = document.getElementById(`pipeline-card__${slug}`);
+  card.scrollIntoView({ behavior: "smooth", block: "center" });
+
   const button = card.querySelector(".btn-run");
   const tracker = card.querySelector(".tracker");
-  const resultPanel = card.querySelector(".result-panel");
+  const logContainer = card.querySelector(".log-tabs-wrap");
 
   const definition = pipelinesList.find((p) => p.slug === slug);
   const trackerSteps = (definition?.steps || []).map((s) => ({ tier: s.tier, name: s.name }));
 
   button.disabled = true;
-  resultPanel.classList.add("hidden");
   renderTracker(tracker, trackerSteps);
   tracker.classList.remove("hidden");
+  logContainer.classList.remove("hidden");
+  const log = createRunLog();
+  renderRunLogTabs(logContainer, log, null);
 
   try {
     const res = await fetch(`/api/pipelines/${slug}/run`, { method: "POST" });
     const { stream_id } = await res.json();
 
     subscribeToStream(stream_id, {
-      onEvent: (event) => handleTrackerEvent(tracker, event),
-      onDone: (event) => {
+      onEvent: (event) => {
+        handleTrackerEvent(tracker, event);
+        logSystemEvent(log, event);
+        renderRunLogTabs(logContainer, log, null);
+      },
+      onDone: async (event) => {
         button.disabled = false;
         const success = event.kind === "run_completed";
-        resultPanel.classList.remove("hidden", "error");
-        if (!success) resultPanel.classList.add("error");
-        resultPanel.textContent = JSON.stringify(event.context ?? {}, null, 2);
+        renderRunLogTabs(logContainer, log, event.context ?? {});
         showToast(
           success ? `${name} completed successfully.` : `${name} failed: ${event.error}`,
           success ? "success" : "error"
         );
+        await refreshTelemetry();
       },
     });
   } catch (err) {
@@ -680,5 +1148,11 @@ async function runSavedPipeline(slug, name, pipelinesList) {
   }
 }
 
+// ---- Boot ----
+
+renderSkeletonSections();
 loadModules();
 loadSavedPipelines();
+loadHealth();
+refreshTelemetry();
+renderNotificationsPanel();

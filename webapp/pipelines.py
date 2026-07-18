@@ -99,3 +99,23 @@ def load_pipeline(slug: str) -> dict:
     if not path.exists():
         raise FileNotFoundError(slug)
     return yaml.safe_load(path.read_text()) or {}
+
+
+def duplicate_pipeline(slug: str, tier_dirs: dict) -> dict:
+    """Clone a saved pipeline under a new, non-colliding name — same steps,
+    same mappings, ready to tweak independently of the original."""
+    original = load_pipeline(slug)
+
+    base_name = f"{original['name']} (copy)"
+    candidate_name = base_name
+    counter = 2
+    while (PIPELINES_DIR / f"{_slugify(candidate_name)}.yaml").exists():
+        candidate_name = f"{base_name} {counter}"
+        counter += 1
+
+    new_definition = {
+        "name": candidate_name,
+        "description": original.get("description", ""),
+        "steps": original["steps"],
+    }
+    return save_pipeline(new_definition, tier_dirs)

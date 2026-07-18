@@ -232,7 +232,44 @@ no UI for "just its `risk_level` key" — the target field either wants that
 whole value or it doesn't). Both are addressable later without changing the
 storage format.
 
-## 6. Step-by-step: how this was built (and how to extend it)
+## 6. Diagnostics, telemetry, and everyday UI
+
+A batch of additions that don't change how runs execute, only how visible their
+state is:
+
+- **`webapp/health.py`** runs four checks on demand (`GET /api/health`): the
+  `StateStore` is reachable, every `*.yaml` manifest parses and has a `name`/
+  `entrypoint`, every enabled entrypoint actually imports and instantiates, and
+  which optional environment variables (currently just `ANTHROPIC_API_KEY`)
+  aren't set. The last one never marks the app "degraded" — it's informational,
+  since nothing bundled requires it yet. The other three do, because they'd
+  otherwise surface later as a confusing error the first time someone clicks
+  Run on a module with a broken manifest.
+- **`StateStore.metrics_summary()`** aggregates every finished run into total
+  count, success rate, and average duration — read by the header ticker.
+  `GET /api/runs.csv` streams the same history as CSV via the stdlib `csv`
+  module, no new dependency.
+- **Per-step `duration_ms`** was added to the orchestrator's `step_completed`/
+  `step_failed` events (`engine/orchestrator.py`) so the dashboard's log tabs
+  can show real timing, not just pass/fail.
+- **`pipeline_store.duplicate_pipeline()`** clones a saved pipeline's `steps`
+  under an auto-incremented "(copy)" name, reusing the same `validate_pipeline`
+  + `save_pipeline` path a fresh save takes — no separate write path to keep
+  in sync.
+- **Favorites are shortcuts, not copies.** An earlier design would have
+  rendered a favorited card a second time inside a "Favorites" shelf — but two
+  DOM elements sharing one `id` (`card__automation__fetch_raw_metrics`) breaks
+  every `getElementById` lookup the tracker/status code relies on, silently
+  updating only whichever element the browser finds first. Favorites are
+  instead thin chips that call the exact same `runModule`/`runSavedPipeline`
+  functions, which scroll to and animate the one real card elsewhere on the
+  page — no duplicate IDs, ever.
+- **Collapsible sections and the search bar** operate purely on CSS classes
+  (`.collapsed`, `.search-hidden`, `.search-no-match`) applied to existing DOM,
+  re-applied after every re-render since `innerHTML` replacement wipes any
+  classes added by a previous pass.
+
+## 7. Step-by-step: how this was built (and how to extend it)
 
 1. **Define the contract.** `BaseModule` with `name`, `tier`, `description`, and a
    single `run(context) -> dict` method. Every tier implements the same shape on
@@ -311,13 +348,31 @@ storage format.
     end, a mapping actually changing a module's behavior (not just being
     accepted), and both validation failure modes (unknown module, bad
     mapping reference).
-24. **Extend from here:** to add a real module, drop a `<name>.py` + `<name>.yaml`
+24. **Add startup/runtime diagnostics** (`webapp/health.py`): validate
+    manifests, entrypoints, and the state store on demand via `GET
+    /api/health`, surfaced as a header beacon.
+25. **Add metrics + CSV export** (`StateStore.metrics_summary()`, `GET
+    /api/runs.csv`, `GET /api/metrics`): aggregate run telemetry for the
+    header ticker and a downloadable history.
+26. **Add pipeline duplication** (`pipeline_store.duplicate_pipeline()`): clone
+    a saved pipeline under an auto-incremented name via the same
+    validate-and-save path a fresh save uses.
+27. **Add per-step timing** (`duration_ms` on `step_completed`/`step_failed`
+    events) so the dashboard's log tabs can show real durations.
+28. **Build the remaining dashboard polish** (`webapp/static/`): theme toggle,
+    search, favorites (as shortcuts to the one real card, not duplicates),
+    collapsible sections, toast/notification history, skeleton loaders, and
+    the System Info / Agent Thoughts / Raw Output log tabs.
+29. **Add diagnostics tests** (`tests/test_diagnostics.py`): health check
+    shape, metrics reflecting a completed run, CSV export format, and
+    duplication (including the 404 case).
+30. **Extend from here:** to add a real module, drop a `<name>.py` + `<name>.yaml`
     pair into the right tier folder (see the README's "Adding a new module"
     section) — it appears in `cli.py list`, the dashboard, and the pipeline
     builder's module picker with no engine or webapp code changes. Declare
     `outputs` too if you want other steps to be able to map from it.
 
-## 7. Roadmap
+## 8. Roadmap
 
 The current engine is intentionally a single-process, synchronous, SQLite-backed
 core — enough to prove the three-tier handoff and be genuinely useful for small

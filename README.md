@@ -33,7 +33,8 @@ AI-Boss/
 │   ├── main.py               #   REST API: list modules, run one, run the pipeline, history
 │   ├── pipelines.py           #   Storage/validation for user-built pipelines
 │   ├── events.py               #   SSE event bus for live run streaming
-│   └── static/                  #   index.html / styles.css / app.js — the dashboard itself
+│   ├── health.py                #   Startup diagnostics (manifests, entrypoints, state store)
+│   └── static/                    #   index.html / styles.css / app.js — the dashboard itself
 ├── automations/              # Tier 1 — drop in a <name>.py + <name>.yaml pair
 │   ├── example_automation.py
 │   └── example_automation.yaml
@@ -48,7 +49,8 @@ AI-Boss/
 ├── tests/
 │   ├── test_orchestrator.py
 │   ├── test_webapp.py
-│   └── test_pipelines.py
+│   ├── test_pipelines.py
+│   └── test_diagnostics.py
 ├── docs/
 │   └── ARCHITECTURE.md
 ├── cli.py                    # Scriptable control layer: list / run / status
@@ -153,6 +155,40 @@ No core engine code changes are required — the registry scans each tier folder
 manifests at pipeline-build time, the dashboard reads the same `inputs` schema to
 render the card's form, and the pipeline builder reads `outputs` to populate the
 "map from an earlier step" dropdown.
+
+## Diagnostics, telemetry, and everyday UI
+
+A few things live in the header/subheader on every page load:
+
+- **System health beacon** — click it for a breakdown of four checks: the state
+  store is reachable, every manifest parses, every entrypoint actually imports
+  and instantiates, and which optional environment variables aren't set. Backed
+  by `GET /api/health` (`webapp/health.py`) — a broken manifest or a typo'd
+  entrypoint shows up here with a specific reason, not as a confusing error the
+  first time someone clicks Run.
+- **Metrics ticker** — total runs, success rate, and average duration across
+  everything ever run, from `GET /api/metrics`.
+- **Recent Runs** — the last 15 runs with status and duration, plus an
+  **Export CSV** link (`GET /api/runs.csv`) for the full history.
+- **Search bar** — filters every module and saved-pipeline card by name/tier/
+  description as you type; a tier section with zero matches hides itself.
+- **Favorites** — click the ☆ on any card to pin it to a shelf at the top;
+  clicking a favorite's own Run button scrolls to and runs the *actual* card
+  elsewhere on the page (so its live tracker/thought stream shows up in its
+  one true location, not a second copy).
+- **Collapsible sections** — every tier section, Favorites, Saved Pipelines,
+  and Recent Runs can be collapsed via the chevron next to its heading; state
+  persists in `localStorage`.
+- **Light/dark theme toggle** — persists across reloads.
+- **Notifications** — the bell icon keeps the last 30 toasts (success and
+  error) so a background run's result isn't missed if you look away.
+- **Clone a saved pipeline** — the "Clone" button on a saved-pipeline card
+  duplicates it under a new name (`POST /api/pipelines/{slug}/duplicate`) so
+  you can branch off an existing chain without rebuilding it.
+- **System Info / Agent Thoughts / Raw Output tabs** — the full-pipeline and
+  builder run panels split their live log into three views instead of one
+  undifferentiated dump: a timestamped step log, the aggregated agent
+  thought/tool-call stream, and the final JSON context.
 
 ## Tech stack
 

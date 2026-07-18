@@ -10,8 +10,11 @@ Runs execute in a background thread and stream their progress back over SSE
 for Tier 3 agents, a running "thought" log — not just a final result once the
 whole thing is done.
 """
+import csv
+import io
 import json
 import threading
+from datetime import datetime
 from pathlib import Path
 from typing import Any
 
@@ -23,7 +26,7 @@ from pydantic import BaseModel
 from engine import Orchestrator, StateStore, StepSpec, discover
 from engine.registry import instantiate, load_manifests
 
-from . import pipelines as pipeline_store
+from . import health, pipelines as pipeline_store
 from .events import RunEventBus
 
 ROOT = Path(__file__).resolve().parent.parent
@@ -207,6 +210,15 @@ def run_saved_pipeline(slug: str):
     return {"stream_id": stream_id}
 
 
+@app.post("/api/pipelines/{slug}/duplicate")
+def duplicate_pipeline(slug: str):
+    try:
+        duplicated = pipeline_store.duplicate_pipeline(slug, TIER_DIRS)
+    except FileNotFoundError:
+        raise HTTPException(status_code=404, detail=f"No saved pipeline named '{slug}'.")
+    return {"pipeline": duplicated}
+
+
 @app.get("/api/stream/{stream_id}")
 def stream_events(stream_id: int):
     def event_source():
@@ -219,6 +231,37 @@ def stream_events(stream_id: int):
 @app.get("/api/runs")
 def recent_runs(limit: int = 10):
     return store.recent_runs(limit)
+
+
+@app.get("/api/runs.csv")
+def recent_runs_csv(limit: int = 100):
+    buffer = io.StringIO()
+    writer = csv.DictWriter(buffer, fieldnames=["id", "started_at", "finished_at", "status", "duration_seconds"])
+    writer.writeheader()
+    for run in store.recent_runs(limit):
+        duration = None
+        if run["started_at"] and run["finished_at"]:
+            duration = round(
+                (datetime.fromisoformat(run["finished_at"]) - datetime.fromisoformat(run["started_at"])).total_seconds(),
+                3,
+            )
+        writer.writerow({**run, "duration_seconds": duration})
+
+    return StreamingResponse(
+        iter([buffer.getvalue()]),
+        media_type="text/csv",
+        headers={"Content-Disposition": "attachment; filename=run_history.csv"},
+    )
+
+
+@app.get("/api/metrics")
+def metrics():
+    return store.metrics_summary()
+
+
+@app.get("/api/health")
+def health_check():
+    return health.run_health_checks(TIER_DIRS, store)
 
 
 app.mount("/static", StaticFiles(directory=STATIC_DIR), name="static")
