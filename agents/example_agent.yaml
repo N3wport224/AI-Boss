@@ -1,0 +1,5 @@
+name: churn_response_agent
+tier: agent
+entrypoint: agents.example_agent:ChurnResponseAgent
+description: Decides and narrates a follow-up action based on the churn-risk insight.
+enabled: true

@@ -1,0 +1,5 @@
+name: analyze_metrics
+tier: workflow
+entrypoint: workflows.example_workflow:MetricsAnalysisWorkflow
+description: Derives a churn-risk signal from the raw metrics produced upstream.
+enabled: true
