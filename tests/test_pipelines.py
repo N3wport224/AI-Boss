@@ -143,7 +143,8 @@ def test_pipeline_graph_reports_nodes_sequence_and_mapping_edges():
             },
         ],
     }
-    client.post("/api/pipelines", json=payload)
+    launch = client.post("/api/pipelines", json=payload)
+    _collect_stream(launch.json()["stream_id"])  # wait for the launch to finish before moving on
 
     res = client.get("/api/pipelines/graph_test/graph")
     assert res.status_code == 200
@@ -160,6 +161,36 @@ def test_pipeline_graph_reports_nodes_sequence_and_mapping_edges():
 
 def test_pipeline_graph_404s_for_unknown_slug():
     assert client.get("/api/pipelines/does-not-exist/graph").status_code == 404
+
+
+def test_agent_remembers_risk_level_trend_across_separate_pipeline_runs():
+    from webapp.main import store
+
+    store.set_memory("last_risk_level", None)  # known baseline: nothing remembered yet
+
+    def run_and_get_message(signups, churn):
+        payload = {
+            "name": f"Trend Test {signups}-{churn}",
+            "steps": [
+                {"tier": "automation", "name": "fetch_raw_metrics", "inputs": {"signups": signups, "churn": churn, "revenue": 1}},
+                {"tier": "workflow", "name": "analyze_metrics", "inputs": {"risk_threshold": 0.1}},
+                {"tier": "agent", "name": "churn_response_agent", "inputs": {}},
+            ],
+        }
+        res = client.post("/api/pipelines", json=payload)
+        events = _collect_stream(res.json()["stream_id"])
+        agent_step = next(e for e in events if e["kind"] == "step_completed" and e["name"] == "churn_response_agent")
+        return agent_step["output"]["agent_decision"]["message"]
+
+    # First run: churn_rate = 1/100 = 1% -> "low" risk. Nothing was remembered before it.
+    first_message = run_and_get_message(100, 1)
+    assert "Risk moved" not in first_message
+
+    # A second, completely separate pipeline run: churn_rate = 9/10 = 90% -> "high" risk.
+    # The trend note can only appear if the *first* run's "low" survived in memory
+    # across these two independent Orchestrator.run() calls.
+    second_message = run_and_get_message(10, 9)
+    assert "Risk moved from low to high since the last run." in second_message
 
 
 def test_template_field_interpolates_against_an_earlier_steps_flat_context_keys():

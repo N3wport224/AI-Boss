@@ -1,6 +1,6 @@
 from .base import BaseModule, Tier
 from .context import ExecutionContext, StepRecord
-from .orchestrator import Orchestrator, StepSpec
+from .orchestrator import Orchestrator, ParallelGroup, StepSpec
 from .redaction import redact_secrets
 from .registry import discover
 from .state_store import StateStore
@@ -13,6 +13,7 @@ __all__ = [
     "StepRecord",
     "Orchestrator",
     "StepSpec",
+    "ParallelGroup",
     "discover",
     "StateStore",
     "render_template",

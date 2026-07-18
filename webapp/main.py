@@ -24,7 +24,7 @@ from fastapi.responses import FileResponse, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 
-from engine import Orchestrator, StateStore, StepSpec, interpolate_template_fields, resolve_path
+from engine import Orchestrator, StateStore, StepSpec, interpolate_template_fields, redact_secrets, resolve_path
 from engine.registry import instantiate, load_manifests
 
 from . import cache, graph, health, ingestion, linting, perf, pipelines as pipeline_store
@@ -503,10 +503,16 @@ def delete_schedule(schedule_id: int):
 
 
 @app.get("/api/stream/{stream_id}")
-def stream_events(stream_id: int):
+def stream_events(stream_id: int, request: Request):
+    # A reconnecting EventSource sends back whatever `id:` it last saw, so a
+    # dropped connection (network blip, browser reload) resumes exactly where
+    # it left off instead of replaying from scratch or losing events.
+    last_event_id = request.headers.get("last-event-id")
+    from_index = int(last_event_id) + 1 if last_event_id is not None else 0
+
     def event_source():
-        for event in bus.stream(stream_id):
-            yield f"data: {json.dumps(event)}\n\n"
+        for index, event in bus.stream(stream_id, from_index=from_index):
+            yield f"id: {index}\ndata: {json.dumps(event)}\n\n"
 
     return StreamingResponse(event_source(), media_type="text/event-stream", headers={"Cache-Control": "no-cache"})
 
@@ -535,6 +541,15 @@ def recent_runs_csv(limit: int = 100):
         media_type="text/csv",
         headers={"Content-Disposition": "attachment; filename=run_history.csv"},
     )
+
+
+@app.post("/api/runs/purge")
+def purge_runs(older_than_hours: float = 24 * 30):
+    """Delete finished runs (and their steps) older than `older_than_hours`
+    — mirrors artifact purge, but for run history instead of uploaded files.
+    Defaults to 30 days; never touches a run that's still in progress."""
+    removed = store.prune_runs(older_than_hours)
+    return {"removed_count": removed}
 
 
 def _parsed_steps_for_run(run_id: int) -> list[dict]:
@@ -622,6 +637,64 @@ def download_backup_db():
     """The raw SQLite file itself — an exact copy, not just what
     export_snapshot() knows how to describe (e.g. the result_cache table)."""
     return FileResponse(store.db_path, filename="orchestrator.db", media_type="application/octet-stream")
+
+
+@app.post("/api/backup/restore")
+async def restore_backup(file: UploadFile = File(...)):
+    """Restore a JSON snapshot from GET /api/backup/export. Additive only —
+    fills in whatever isn't already present (by id/key/slug), never
+    overwrites existing data. A pipeline referencing a module that no longer
+    exists here is skipped rather than failing the whole restore."""
+    try:
+        data = await ingestion.read_upload_with_limit(file)
+    except ingestion.UploadTooLargeError as exc:
+        raise HTTPException(status_code=413, detail=str(exc))
+    try:
+        snapshot = json.loads(data)
+    except json.JSONDecodeError as exc:
+        raise HTTPException(status_code=400, detail=f"Could not parse backup file: {exc}")
+
+    counts = store.restore_snapshot(snapshot)
+
+    restored_pipelines = 0
+    for pipeline in snapshot.get("pipelines", []):
+        slug = pipeline.get("slug")
+        if slug and (pipeline_store.PIPELINES_DIR / f"{slug}.yaml").exists():
+            continue  # never clobber an existing pipeline of the same name
+        try:
+            pipeline_store.save_pipeline(pipeline, TIER_DIRS)
+            restored_pipelines += 1
+        except pipeline_store.PipelineValidationError:
+            continue  # references a module that doesn't exist in this install
+
+    counts["pipelines"] = restored_pipelines
+    return counts
+
+
+@app.get("/api/memory")
+def list_memory():
+    """Every key currently in the persistent cross-run memory store
+    (`context.memory` inside a module), redacted the same way run history
+    is — this is an inspection/debugging view, not the mechanism agents
+    actually use to read/write it."""
+    entries = store.all_memory()
+    # redact_secrets checks a *key* against its own value, so treating the
+    # whole memory table as one flat {key: value} dict catches a secret-shaped
+    # memory key even when its value is a bare string, not just a nested dict.
+    redacted = redact_secrets({entry["key"]: entry["value"] for entry in entries})
+    return [{**entry, "value": redacted[entry["key"]]} for entry in entries]
+
+
+@app.delete("/api/memory/{key}")
+def delete_memory_key(key: str):
+    store.delete_memory(key)
+    return {"deleted": key}
+
+
+@app.delete("/api/memory")
+def clear_memory():
+    store.clear_memory()
+    return {"cleared": True}
 
 
 @app.post("/api/ingest/csv")

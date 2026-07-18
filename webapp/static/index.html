@@ -29,6 +29,7 @@
         <div id="notifications-panel" class="dropdown-panel hidden"></div>
       </div>
       <button id="theme-toggle" class="icon-btn" type="button" title="Toggle light/dark theme">☀️</button>
+      <button id="density-toggle" class="icon-btn" type="button" title="Toggle compact card view">▤</button>
       <button id="builder-toggle" class="btn btn-secondary" type="button">+ New Pipeline</button>
       <button id="run-pipeline-btn" class="btn btn-primary">Run Full Pipeline</button>
     </div>
@@ -214,11 +215,32 @@
       </div>
     </section>
 
+    <section class="tier-section tier-memory" id="memory-section">
+      <div class="tier-heading">
+        <span class="bar"></span>
+        <h2>Agent Memory</h2>
+        <div class="tier-heading-actions">
+          <button id="memory-clear-btn" class="btn btn-secondary btn-small" type="button">Clear all</button>
+          <button class="collapse-toggle" type="button" data-collapse-key="memory">▾</button>
+        </div>
+      </div>
+      <p class="card-desc">
+        Persistent key/value state any module can read or write via
+        <code>context.memory</code> — unlike a run's own context, this survives
+        across separate runs (e.g. an agent remembering last run's decision).
+      </p>
+      <div id="memory-list" class="runs-empty">Nothing remembered yet.</div>
+    </section>
+
     <section class="tier-section tier-runs" id="recent-runs-section">
       <div class="tier-heading">
         <span class="bar"></span>
         <h2>Recent Runs</h2>
         <div class="tier-heading-actions">
+          <label for="runs-purge-hours" class="runs-purge-label">Purge older than</label>
+          <input type="number" id="runs-purge-hours" value="720" min="0" step="1" />
+          <span class="runs-purge-label">hours</span>
+          <button id="runs-purge-btn" class="btn btn-secondary btn-small" type="button">Purge</button>
           <a id="export-csv-link" class="btn btn-secondary btn-small" href="/api/runs.csv" download>Export CSV</a>
           <button class="collapse-toggle" type="button" data-collapse-key="recent-runs">▾</button>
         </div>

@@ -198,6 +198,24 @@ themeToggleBtn.addEventListener("click", () => {
 
 applyTheme(localStorage.getItem(THEME_STORAGE_KEY) || "dark");
 
+// ---- Compact/dense card view toggle ----
+
+const DENSITY_STORAGE_KEY = "aiboss-density";
+const densityToggleBtn = document.getElementById("density-toggle");
+
+function applyDensity(density) {
+  document.body.classList.toggle("density-compact", density === "compact");
+  densityToggleBtn.classList.toggle("active", density === "compact");
+  localStorage.setItem(DENSITY_STORAGE_KEY, density);
+}
+
+densityToggleBtn.addEventListener("click", () => {
+  const next = document.body.classList.contains("density-compact") ? "comfortable" : "compact";
+  applyDensity(next);
+});
+
+applyDensity(localStorage.getItem(DENSITY_STORAGE_KEY) || "comfortable");
+
 // ---- Toasts + notification history ----
 
 function updateNotifBadge() {
@@ -286,7 +304,37 @@ async function loadHealth() {
       <div class="health-panel-footer">
         <a class="btn btn-secondary btn-small" href="/api/backup/export" download>Export JSON backup</a>
         <a class="btn btn-secondary btn-small" href="/api/backup/db" download>Download .db file</a>
+      </div>
+      <div class="health-panel-footer">
+        <label class="btn btn-secondary btn-small restore-backup-label" for="restore-backup-input">Restore backup…</label>
+        <input type="file" id="restore-backup-input" accept=".json" hidden />
       </div>`;
+
+    document.getElementById("restore-backup-input").addEventListener("change", async (e) => {
+      const file = e.target.files[0];
+      if (!file) return;
+      const formData = new FormData();
+      formData.append("file", file);
+      try {
+        const res = await fetch("/api/backup/restore", { method: "POST", body: formData });
+        const body = await res.json();
+        if (!res.ok) {
+          showToast(`Restore failed: ${body.detail || "unknown error"}`, "error");
+          return;
+        }
+        const parts = Object.entries(body)
+          .filter(([, count]) => count > 0)
+          .map(([kind, count]) => `${count} ${kind}`);
+        showToast(parts.length ? `Restored: ${parts.join(", ")}.` : "Nothing new to restore — already up to date.", "success");
+        await refreshTelemetry();
+        await loadMemory();
+        await loadSchedules();
+        await loadSavedPipelines();
+      } catch (err) {
+        showToast(`Restore failed: ${err}`, "error");
+      }
+      e.target.value = "";
+    });
   } catch (err) {
     healthLabel.textContent = "Unreachable";
     healthBeacon.classList.add("degraded");
@@ -791,6 +839,7 @@ function highlightSlowestStep(container) {
 function subscribeToStream(streamId, { onEvent, onDone }) {
   const source = new EventSource(`/api/stream/${streamId}`);
   let finished = false;
+  let consecutiveErrors = 0;
 
   const finish = (event) => {
     if (finished) return;
@@ -800,6 +849,7 @@ function subscribeToStream(streamId, { onEvent, onDone }) {
   };
 
   source.onmessage = (e) => {
+    consecutiveErrors = 0;
     const event = JSON.parse(e.data);
     onEvent(event);
     if (event.kind === "run_completed" || event.kind === "run_failed") {
@@ -808,7 +858,14 @@ function subscribeToStream(streamId, { onEvent, onDone }) {
   };
 
   source.onerror = () => {
-    finish({ kind: "run_failed", error: "Connection to the server was lost." });
+    if (finished) return;
+    // EventSource retries a dropped connection on its own (and the server
+    // replays anything missed via Last-Event-ID) — only give up after
+    // several failed attempts in a row, rather than on the first blip.
+    consecutiveErrors += 1;
+    if (consecutiveErrors >= 5) {
+      finish({ kind: "run_failed", error: "Connection to the server was lost." });
+    }
   };
 }
 
@@ -1118,6 +1175,34 @@ function moveBuilderStep(from, to) {
   renderBuilder();
 }
 
+// Removing a step shifts every later step up one position, so any mapping
+// referencing an index after the removed one needs to shift down by one to
+// keep pointing at the same step. Blocked outright if another step's
+// explicit mapping depends on the one being removed — there's no "step N no
+// longer exists" value to fall back to.
+function removeBuilderStep(index) {
+  if (builderSteps.length <= 1) return;
+
+  const hasDependents = builderSteps.some(
+    (step, i) => i !== index && Object.values(step.fieldSources || {}).some((source) => source.type === "mapping" && source.step === index)
+  );
+  if (hasDependents) {
+    showBuilderError("Can't remove this step — another step maps a field from it.");
+    return;
+  }
+
+  for (const step of builderSteps) {
+    for (const source of Object.values(step.fieldSources || {})) {
+      if (source.type === "mapping" && source.step > index) {
+        source.step -= 1;
+      }
+    }
+  }
+
+  builderSteps.splice(index, 1);
+  renderBuilder();
+}
+
 function renderBuilderField(stepIndex, field, source, priorOutputs) {
   const controlId = `bfield__${stepIndex}__${field.name}`;
   const srcId = `bsrc__${stepIndex}__${field.name}`;
@@ -1173,7 +1258,7 @@ function renderBuilderStep(index, step) {
     ? step.module.inputs.map((field) => renderBuilderField(index, field, step.fieldSources[field.name], priorOutputs)).join("")
     : '<p class="card-desc">Pick a module above to configure its inputs.</p>';
 
-  const canRemove = builderSteps.length > 1 && index === builderSteps.length - 1;
+  const canRemove = builderSteps.length > 1;
   const canMoveUp = index > 0;
   const canMoveDown = index < builderSteps.length - 1;
 
@@ -1222,8 +1307,7 @@ function attachBuilderStepListeners() {
 
   builderStepsEl.querySelectorAll(".remove-step-btn").forEach((btn) => {
     btn.addEventListener("click", (e) => {
-      builderSteps.splice(Number(e.currentTarget.dataset.index), 1);
-      renderBuilder();
+      removeBuilderStep(Number(e.currentTarget.dataset.index));
     });
   });
 
@@ -1774,6 +1858,17 @@ purgeBtn.addEventListener("click", async () => {
   await loadArtifacts();
 });
 
+const runsPurgeHoursInput = document.getElementById("runs-purge-hours");
+const runsPurgeBtn = document.getElementById("runs-purge-btn");
+
+runsPurgeBtn.addEventListener("click", async () => {
+  const hours = Number(runsPurgeHoursInput.value) || 0;
+  const res = await fetch(`/api/runs/purge?older_than_hours=${hours}`, { method: "POST" });
+  const body = await res.json();
+  showToast(`Purged ${body.removed_count} old run(s) from history.`, "success");
+  await refreshTelemetry();
+});
+
 // ---- Folder watcher (polls for auto-ingested files) ----
 
 const watcherFeedEl = document.getElementById("watcher-feed");
@@ -1970,6 +2065,53 @@ scheduleCreateBtn.addEventListener("click", async () => {
 setInterval(loadSchedules, 5000);
 setInterval(loadPerformance, 3000);
 
+// ---- Agent memory ----
+
+const memoryListEl = document.getElementById("memory-list");
+const memoryClearBtn = document.getElementById("memory-clear-btn");
+
+async function loadMemory() {
+  const res = await fetch("/api/memory");
+  const entries = await res.json();
+
+  if (!entries.length) {
+    memoryListEl.className = "runs-empty";
+    memoryListEl.textContent = "Nothing remembered yet.";
+    return;
+  }
+
+  memoryListEl.className = "runs-table";
+  memoryListEl.innerHTML = entries
+    .map(
+      (entry) => `
+      <div class="schedule-row">
+        <div class="schedule-row-main">
+          <strong>${escapeHtml(entry.key)}</strong>
+          <span class="schedule-row-meta">${escapeHtml(JSON.stringify(entry.value))} · updated ${new Date(entry.updated_at).toLocaleString()}</span>
+        </div>
+        <div class="schedule-row-actions">
+          <button class="btn btn-secondary btn-small" data-memory-delete="${encodeURIComponent(entry.key)}">Delete</button>
+        </div>
+      </div>`
+    )
+    .join("");
+
+  memoryListEl.querySelectorAll("[data-memory-delete]").forEach((btn) => {
+    btn.addEventListener("click", async () => {
+      await fetch(`/api/memory/${btn.dataset.memoryDelete}`, { method: "DELETE" });
+      await loadMemory();
+    });
+  });
+}
+
+memoryClearBtn.addEventListener("click", async () => {
+  await fetch("/api/memory", { method: "DELETE" });
+  await loadMemory();
+  showToast("Agent memory cleared.", "success");
+});
+
+setInterval(loadMemory, 5000);
+
 // ---- Regex tester ----
 
 const regexPatternEl = document.getElementById("regex-pattern");
@@ -2047,3 +2189,4 @@ loadArtifacts();
 pollWatcherStatus();
 renderNotificationsPanel();
 loadSchedules();
+loadMemory();

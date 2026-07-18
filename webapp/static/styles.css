@@ -110,6 +110,11 @@ h1 {
   border-color: var(--accent-automation);
 }
 
+.icon-btn.active {
+  border-color: var(--accent-automation);
+  color: var(--accent-automation);
+}
+
 .notif-badge {
   position: absolute;
   top: -4px;
@@ -376,6 +381,22 @@ main {
   gap: 8px;
 }
 
+.runs-purge-label {
+  font-size: 0.78rem;
+  color: var(--text-dim);
+  white-space: nowrap;
+}
+
+#runs-purge-hours {
+  width: 64px;
+  background: var(--bg-elevated);
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  padding: 5px 8px;
+  color: var(--text);
+  font-size: 0.82rem;
+}
+
 .collapse-toggle {
   background: none;
   border: 1px solid var(--border);
@@ -442,6 +463,51 @@ main {
   flex-direction: column;
   gap: 14px;
   box-shadow: 0 10px 30px -18px rgba(0, 0, 0, 0.7);
+}
+
+/* Compact/dense view — fits more cards on screen at once, for installs with
+   a lot of modules/pipelines. Toggled via #density-toggle, persisted in
+   localStorage the same way the theme is. */
+body.density-compact .card-grid {
+  grid-template-columns: repeat(auto-fill, minmax(260px, 1fr));
+  gap: 12px;
+}
+
+body.density-compact .card {
+  padding: 14px;
+  gap: 8px;
+}
+
+body.density-compact .card-title {
+  font-size: 0.95rem;
+}
+
+body.density-compact .card-desc {
+  font-size: 0.78rem;
+}
+
+body.density-compact .form-fields {
+  gap: 6px;
+}
+
+body.density-compact .field label {
+  font-size: 0.76rem;
+}
+
+body.density-compact .field input,
+body.density-compact .field select,
+body.density-compact .field textarea {
+  padding: 6px 9px;
+  font-size: 0.82rem;
+}
+
+body.density-compact .btn-run {
+  padding: 8px 16px;
+  font-size: 0.85rem;
+}
+
+body.density-compact .tier-section {
+  margin-bottom: 20px;
 }
 
 .tier-automation .card { --border-accent: var(--accent-automation); }

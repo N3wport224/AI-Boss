@@ -25,16 +25,16 @@ back to the shared context.
 AI-Boss/
 ├── engine/                  # Core orchestrator — the only "framework" code
 │   ├── base.py              #   BaseModule contract + Tier enum
-│   ├── context.py           #   ExecutionContext: the shared context window
-│   ├── orchestrator.py      #   Sequential runner that threads context between modules
+│   ├── context.py           #   ExecutionContext (run-scoped) + MemoryStore (cross-run, persistent)
+│   ├── orchestrator.py      #   Sequential runner + ParallelGroup for concurrent branches
 │   ├── registry.py          #   Discovers modules + reads manifests (incl. input schemas)
 │   ├── templating.py        #   {variable} and {nested.path} interpolation
 │   ├── redaction.py         #   Masks secret-shaped keys before they're persisted/streamed
-│   └── state_store.py       #   SQLite-backed run/step history + schedules + snapshot export
+│   └── state_store.py       #   SQLite-backed run/step history + schedules + memory + snapshot export/restore
 ├── webapp/                  # Visual control center (FastAPI + vanilla JS, no build step)
 │   ├── main.py               #   REST API: list modules, run one, run the pipeline, history
 │   ├── pipelines.py           #   Storage/validation for user-built pipelines
-│   ├── events.py               #   SSE event bus for live run streaming
+│   ├── events.py               #   SSE event bus with reconnect/replay for live run streaming
 │   ├── health.py                #   Startup diagnostics (manifests, entrypoints, state store)
 │   ├── ingestion.py              #   CSV/PDF/JSON upload, hash-dedupe, auto-cleansing, artifact search/purge
 │   ├── watcher.py                 #   Polling-based folder watcher (no watchdog dependency)
@@ -69,7 +69,8 @@ AI-Boss/
 │   ├── test_watcher.py
 │   ├── test_linting.py
 │   ├── test_scheduler.py
-│   └── test_redaction.py
+│   ├── test_redaction.py
+│   └── test_events.py
 ├── docs/
 │   └── ARCHITECTURE.md
 ├── cli.py                    # Scriptable control layer: list / run / status
@@ -131,14 +132,15 @@ hand:
    Step 3's `notify_slack` field. Need just a piece of a nested output (e.g.
    `insight.risk_level` instead of the whole `insight` dict)? Fill in the
    small "nested key" box that appears once a mapping is selected.
-3. Use the **▲/▼** buttons on a step to reorder it. This checks and rewires
-   this pipeline's own explicit mappings so they still point at the right
-   step afterward — but it can't know about a step that implicitly reads a
-   shared context key another step happens to produce *without* a declared
-   mapping (any module output lands in the shared context regardless of
-   mapping), so reordering steps with that kind of hidden coupling can still
-   change behavior. A move that would make an explicit mapping point at a
-   later step instead of an earlier one is blocked outright.
+3. Use the **▲/▼** buttons to reorder a step, or **×** to remove any step
+   (not just the last one). Both rewrite this pipeline's own explicit
+   mappings so they still point at the right step afterward, and both are
+   blocked outright if doing so would leave a mapping pointing at a later
+   step, or at a step that no longer exists. Neither can know about a step
+   that implicitly reads a shared context key another step happens to
+   produce *without* a declared mapping (any module output lands in the
+   shared context regardless of mapping) — that kind of hidden coupling can
+   still change behavior on reorder or removal.
 4. **Save & Launch** does exactly what it says in one click: it writes the
    pipeline to `pipelines/<slug>.yaml` (the same manifest convention as every
    other module folder — check it into git like anything else here) and
@@ -356,6 +358,48 @@ A few things live in the header/subheader on every page load:
   (`webapp/ratelimit.py`), an in-memory sliding window with no external
   dependency — a guard against an accidental request storm (a stuck retry
   loop, a misconfigured schedule), not multi-tenant abuse prevention.
+
+## Concurrency, memory, and recovery
+
+- **Arbitrary step removal** — the builder's **×** now removes any step, not
+  just the last one, shifting every later mapping's step index down by one
+  and blocking the removal outright if another step's explicit mapping
+  depends on the one being removed.
+- **Parallel branch execution** — `engine.ParallelGroup` runs a set of
+  independent steps concurrently in one pipeline slot (each still gets its
+  own `StepRecord`/tracker events, tagged `parallel: true` with a
+  `branch_index`), then merges their outputs back before the next step. Not
+  yet exposed in the no-code visual builder (a genuinely separate UI
+  surface) — construct one directly in Python: `Orchestrator([Double(),
+  ParallelGroup(steps=[StepA(), StepB()]), AddOne()])`. Branches must be
+  genuinely independent; two branches writing the same output key is
+  undefined (whichever merges last wins).
+- **SSE reconnect/replay** — the live run stream now records events in an
+  append-only log per run instead of draining a queue, and pairs this with
+  SSE's native `id:`/`Last-Event-ID` mechanism, so a dropped connection
+  (network blip, browser reload) resumes exactly where it left off via a
+  plain `EventSource` — no custom client-side retry logic needed.
+- **Persistent cross-run agent memory** — `context.memory` is a key/value
+  store any module can read or write that survives across *separate* runs,
+  unlike `context.variables` (scoped to one run). `churn_response_agent`
+  demonstrates it: it remembers the last run's risk level and calls out
+  when a completely independent later run's risk level has changed. Browse,
+  delete, or clear it from the new **Agent Memory** section, or via
+  `GET /api/memory`.
+- **Run history retention** — a **Purge older than N hours** control next to
+  Recent Runs (`POST /api/runs/purge`) deletes old finished runs and their
+  steps, mirroring the existing artifact purge; a still-in-progress run is
+  never a candidate no matter how old it started.
+- **Backup restore** — the health panel's **Restore backup…** upload
+  complements the existing export: it re-populates runs/steps/schedules/
+  ingested-file records/memory/pipelines from a previously exported JSON
+  snapshot. Strictly additive — it fills in whatever isn't already present
+  by id/key/slug and never overwrites existing data, so restoring the same
+  snapshot twice (or into a store that already has some of this data) is
+  always safe.
+- **Compact/dense view** — a header toggle next to the theme switch shrinks
+  card padding and text size to fit more on screen at once, persisted in
+  `localStorage` the same way the theme is.
 
 ## Tech stack
 

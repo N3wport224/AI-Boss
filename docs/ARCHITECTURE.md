@@ -224,13 +224,10 @@ Once saved, a pipeline gets its own card in the dashboard's **Saved Pipelines**
 section (`GET /api/pipelines` to list, `POST /api/pipelines/{slug}/run` to
 relaunch it later without rebuilding it).
 
-**What this deliberately doesn't do:** step reordering (only appending and
-removing the last step — reordering would require rewriting every later
-step's mapping indices, more complexity than the builder needs right now) and
-nested-field mapping (an output like `insight` is mapped as a whole dict; there's
-no UI for "just its `risk_level` key" — the target field either wants that
-whole value or it doesn't). Both are addressable later without changing the
-storage format.
+Step reordering, arbitrary-step removal, and nested-field (dotted-path)
+mapping were all originally deferred here as "addressable later without
+changing the storage format" — Batches 4 and 5 addressed all three; see
+their build-history entries in section 8 for how.
 
 ## 6. Diagnostics, telemetry, and everyday UI
 
@@ -574,6 +571,91 @@ only a JSON parse error or timeout falls back to an empty issue list.
     suite's cumulative request count could trip it well before any single
     test meant to exercise that behavior — the fixture clears it before each
     test so results stay independent of run order or timing. 77 tests total.
+56. **Add arbitrary middle-step removal to the builder**
+    (`webapp/static/app.js`'s `removeBuilderStep`): the mirror image of
+    Batch 4's reordering — removing a step shifts every later mapping's
+    step index down by one, and is blocked outright if another step's
+    explicit mapping depends on the one being removed (there's no "step N
+    no longer exists" fallback value).
+57. **Add parallel branch execution** (`engine.orchestrator.ParallelGroup`,
+    `Orchestrator._run_parallel_group`): branches are seeded sequentially
+    (a plain dict merge — no need for concurrency there) before any
+    branch's `module.run()` is submitted, so no branch ever sees a
+    sibling's output during setup; then every branch's `module.run()` is
+    submitted directly to the shared `_EXECUTOR` and awaited with its own
+    optional timeout via `future.result(timeout=...)` — deliberately not
+    routed through `_run_module()`'s own timeout path, which would
+    re-submit to the same pool from within a pool thread and risk
+    exhausting it. Each branch still gets its own `StepRecord` and
+    step_started/step_completed/step_failed events (tagged `parallel: True`
+    plus `branch_index`), so nothing about a single step's own behavior
+    needs to know it ran inside a group. `_EXECUTOR`'s worker count was
+    bumped from 8 to 16 for headroom, since a group submits every branch at
+    once. Not yet exposed in the no-code visual builder — a real, separate
+    UI feature (see the roadmap).
+58. **Add SSE reconnect/replay** (`webapp/events.py`'s `RunEventBus`
+    rewritten from a destructive `queue.Queue` per stream to an append-only
+    event list per stream, guarded by a `threading.Condition`; the
+    `/api/stream/{id}` endpoint pairs this with SSE's native
+    `id:`/`Last-Event-ID` mechanism): the previous queue-based bus's own
+    docstring claimed "a client that connects a moment late still gets
+    everything from the start," which was only true for the *first*
+    connection — a second connection (or a reconnect after a drop) got
+    nothing, since `queue.Queue.get()` permanently removes what it reads.
+    The frontend's `subscribeToStream` also used to treat any `onerror` as
+    fatal, closing the connection immediately and pre-empting the browser's
+    own auto-reconnect; it now only gives up after 5 consecutive errors,
+    letting a transient drop resolve itself via reconnect-and-resume.
+    Finished streams' event logs are kept for 5 minutes (swept lazily on
+    the next `create()` call) so a reconnect shortly after a run ends can
+    still replay it.
+59. **Add persistent cross-run agent memory** (`engine.context.MemoryStore`,
+    exposed as `context.memory`; `StateStore.get_memory`/`set_memory`/
+    `delete_memory`/`all_memory`, a new `memory` table): accepts a
+    `state_store` as `Any` rather than importing `StateStore` by type, to
+    avoid a `context`↔`state_store` import cycle (`state_store.py` already
+    imports `StepRecord` from `context.py`). Falls back to a local
+    in-memory dict when no store is attached (e.g. a bare `ExecutionContext`
+    in a test), so nothing about existing code needs to change. Demonstrated
+    in `churn_response_agent`, which now remembers the last run's risk
+    level and calls out when a *separate, independent* later run's risk
+    level differs — proving the persistence is real, not just plumbing.
+    Surfaced for inspection (redacted, like everything else) via
+    `GET /api/memory` and a new **Agent Memory** dashboard section.
+    Fixed a latent test-isolation gap along the way:
+    `test_pipeline_graph_reports_nodes_sequence_and_mapping_edges` launched
+    a pipeline via `POST /api/pipelines` but never waited for it to finish,
+    so its background run could leak into whichever test ran next — harmless
+    before (the agent had no observable side effects), but a real source of
+    flakiness the moment it gained one.
+60. **Add run history retention** (`StateStore.prune_runs`,
+    `POST /api/runs/purge`, a purge control next to Recent Runs): deletes
+    finished runs and their steps older than a cutoff, mirroring artifact
+    purge — a run still in progress is never a candidate no matter how old
+    it started.
+61. **Add backup restore** (`StateStore.restore_snapshot`,
+    `POST /api/backup/restore`, a **Restore backup…** upload in the health
+    panel): strictly additive — every table is restored via
+    `INSERT OR IGNORE` keyed by its own primary key/slug, so restoring the
+    same snapshot twice, or into a store that already has some of this
+    data, never overwrites anything and is always safe to repeat. A
+    pipeline referencing a module that doesn't exist in this install is
+    skipped rather than failing the whole restore. `export_snapshot()` was
+    extended to include `memory` (previously omitted) so a restore is a
+    genuine round trip of everything `context.memory` can hold.
+62. **Add a compact/dense view toggle** (`#density-toggle`, a
+    `body.density-compact` class): shrinks card padding, grid column
+    minimum width, and form-field sizing; persisted in `localStorage` via
+    the exact same pattern as the light/dark theme toggle.
+63. **Add tests for all of Batch 5**: `ParallelGroup` concurrency proven by
+    wall-clock timing (concurrent branches finish in ~1 branch's duration,
+    not the sum of all of them), `webapp/events.py`'s replay/reconnect
+    behavior at both the bus level and through the real `/api/stream`
+    endpoint with a genuine `Last-Event-ID` header, cross-run memory
+    proven via two separate `Orchestrator.run()` calls (and, at the API
+    level, two separate pipeline launches) sharing one `StateStore`, and
+    restore's additive/idempotent guarantee (restoring twice inserts
+    nothing new; an existing key is never clobbered). 100 tests total.
 
 ## 9. Roadmap
 
@@ -594,22 +676,17 @@ pipelines. Grow it only when a real need shows up:
   that agent internally as a LangGraph graph while it still presents a single
   `BaseModule` interface to the orchestrator, calling `context.emit()` at each
   internal step so the dashboard's thought accordion keeps working unchanged.
-- **Stream replay / reconnect** — `RunEventBus` has no persistence or replay:
-  if a client's `EventSource` drops mid-run and reconnects, whatever was
-  already drained from the queue by the dropped connection is gone. Fine for a
-  single-user local dashboard; move events into something replayable (e.g. a
-  per-run log in `StateStore`) before relying on this over a flaky connection.
-- **Parallel branches** — if two tier-2 workflows are independent, the
-  orchestrator can grow a `run_parallel(modules)` that fans out and merges
-  results back into one context before continuing, without changing `BaseModule`.
 - **Auth on the dashboard** — the current `webapp/` has no auth layer, fine for
   local/single-user use; add it before exposing the control center beyond
   localhost.
-- **Pipeline step removal is still last-step-only** — reordering (Batch 4)
-  solved the "move a step" half of this; removing an arbitrary *middle* step
-  still isn't supported, since it would require shifting every later
-  mapping's step index down by one, not just swapping two. Solvable the same
-  way reordering was, just not needed yet.
+- **`ParallelGroup` isn't exposed in the no-code visual builder** — Batch 5
+  added concurrent branch execution at the engine level
+  (`engine.ParallelGroup`), but authoring one requires writing Python
+  directly; the builder's linear step model has no UI yet for "these N
+  steps run together." A real, separate UI feature if it's ever needed.
+  Relatedly: two branches writing the same output key is undefined
+  (whichever merges back into context last wins) — there's no detection or
+  warning for this today.
 - **Committing saved pipelines to git automatically** — `POST /api/pipelines`
   writes `pipelines/<slug>.yaml` to disk (so it's a normal file to `git add`
   and commit like anything else), but it deliberately does **not** run `git

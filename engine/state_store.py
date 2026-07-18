@@ -1,7 +1,7 @@
 import json
 import sqlite3
 import threading
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from typing import Optional
 
 from .context import StepRecord
@@ -53,6 +53,12 @@ CREATE TABLE IF NOT EXISTS schedules (
     last_run_at TEXT,
     last_status TEXT,
     created_at TEXT NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS memory (
+    key TEXT PRIMARY KEY,
+    value TEXT NOT NULL,
+    updated_at TEXT NOT NULL
 );
 """
 
@@ -171,6 +177,25 @@ class StateStore:
             "avg_duration_seconds": round(sum(durations) / len(durations), 3) if durations else None,
         }
 
+    def prune_runs(self, older_than_hours: float) -> int:
+        """Delete finished runs (and their steps) older than `older_than_hours`,
+        mirroring artifact purge — scoped strictly to `runs`/`steps`, never
+        touching schedules, memory, or the result cache. Returns how many
+        runs were removed. A run still in progress (`finished_at IS NULL`)
+        is never a candidate, no matter how old `started_at` is."""
+        cutoff = (datetime.now(timezone.utc) - timedelta(hours=older_than_hours)).isoformat()
+        with self._lock:
+            rows = self._conn.execute(
+                "SELECT id FROM runs WHERE finished_at IS NOT NULL AND finished_at < ?", (cutoff,)
+            ).fetchall()
+            run_ids = [row[0] for row in rows]
+            if run_ids:
+                placeholders = ",".join("?" * len(run_ids))
+                self._conn.execute(f"DELETE FROM steps WHERE run_id IN ({placeholders})", run_ids)
+                self._conn.execute(f"DELETE FROM runs WHERE id IN ({placeholders})", run_ids)
+                self._conn.commit()
+        return len(run_ids)
+
     def record_ingested_file(self, file_hash: str, filename: str, kind: str) -> None:
         """Record a successfully-ingested file's hash for future dedupe checks.
         INSERT OR IGNORE: if this exact hash was already recorded, keep the
@@ -223,6 +248,40 @@ class StateStore:
     def clear_cache(self) -> None:
         with self._lock:
             self._conn.execute("DELETE FROM result_cache")
+            self._conn.commit()
+
+    def get_memory(self, key: str, default=None):
+        """Backs `context.memory.get()` — a persistent key/value store any
+        module can read, surviving across separate runs (unlike
+        `context.variables`, which only lives for one run)."""
+        with self._lock:
+            row = self._conn.execute("SELECT value FROM memory WHERE key = ?", (key,)).fetchone()
+        if row is None:
+            return default
+        return json.loads(row[0])
+
+    def set_memory(self, key: str, value) -> None:
+        with self._lock:
+            self._conn.execute(
+                "INSERT INTO memory (key, value, updated_at) VALUES (?, ?, ?) "
+                "ON CONFLICT(key) DO UPDATE SET value = excluded.value, updated_at = excluded.updated_at",
+                (key, json.dumps(value), datetime.now(timezone.utc).isoformat()),
+            )
+            self._conn.commit()
+
+    def delete_memory(self, key: str) -> None:
+        with self._lock:
+            self._conn.execute("DELETE FROM memory WHERE key = ?", (key,))
+            self._conn.commit()
+
+    def all_memory(self) -> list[dict]:
+        with self._lock:
+            rows = self._conn.execute("SELECT key, value, updated_at FROM memory ORDER BY key").fetchall()
+        return [{"key": key, "value": json.loads(value), "updated_at": updated_at} for key, value, updated_at in rows]
+
+    def clear_memory(self) -> None:
+        with self._lock:
+            self._conn.execute("DELETE FROM memory")
             self._conn.commit()
 
     _SCHEDULE_COLUMNS = (
@@ -337,7 +396,75 @@ class StateStore:
             "steps": steps,
             "schedules": [self._schedule_row_to_dict(row) for row in schedule_rows],
             "ingested_files": [dict(zip(ingested_cols, row)) for row in ingested_rows],
+            "memory": self.all_memory(),
         }
+
+    def restore_snapshot(self, snapshot: dict) -> dict:
+        """Additively restore a JSON snapshot produced by `export_snapshot()`:
+        fills in any run/step/schedule/ingested-file/memory-key not already
+        present (matched by primary key), never overwriting something already
+        there. Not a full sync/replace — restoring the same snapshot twice,
+        or into a store that already has some of this data, is always safe
+        and just a no-op for whatever already exists. Returns how many rows
+        of each kind were actually inserted."""
+        counts = {"runs": 0, "steps": 0, "schedules": 0, "ingested_files": 0, "memory": 0}
+        with self._lock:
+            for run in snapshot.get("runs", []):
+                cur = self._conn.execute(
+                    "INSERT OR IGNORE INTO runs (id, started_at, finished_at, status) VALUES (?, ?, ?, ?)",
+                    (run["id"], run["started_at"], run.get("finished_at"), run["status"]),
+                )
+                if cur.rowcount > 0:
+                    counts["runs"] += 1
+
+            for step in snapshot.get("steps", []):
+                cur = self._conn.execute(
+                    "INSERT OR IGNORE INTO steps (id, run_id, name, tier, success, output, error, started_at, finished_at) "
+                    "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                    (
+                        step["id"], step["run_id"], step["name"], step["tier"], int(step["success"]),
+                        json.dumps(step["output"]), step.get("error"), step["started_at"], step["finished_at"],
+                    ),
+                )
+                if cur.rowcount > 0:
+                    counts["steps"] += 1
+
+            for schedule in snapshot.get("schedules", []):
+                cur = self._conn.execute(
+                    "INSERT OR IGNORE INTO schedules (id, kind, tier, name, inputs, interval_seconds, enabled, "
+                    "next_run_at, last_run_at, last_status, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                    (
+                        schedule["id"], schedule["kind"], schedule.get("tier"), schedule["name"],
+                        json.dumps(schedule["inputs"]), schedule["interval_seconds"], int(schedule["enabled"]),
+                        schedule["next_run_at"], schedule.get("last_run_at"), schedule.get("last_status"),
+                        schedule["created_at"],
+                    ),
+                )
+                if cur.rowcount > 0:
+                    counts["schedules"] += 1
+
+            for entry in snapshot.get("ingested_files", []):
+                cur = self._conn.execute(
+                    "INSERT OR IGNORE INTO ingested_files (hash, filename, kind, ingested_at) VALUES (?, ?, ?, ?)",
+                    (entry["hash"], entry["filename"], entry["kind"], entry["ingested_at"]),
+                )
+                if cur.rowcount > 0:
+                    counts["ingested_files"] += 1
+
+            for entry in snapshot.get("memory", []):
+                cur = self._conn.execute(
+                    "INSERT OR IGNORE INTO memory (key, value, updated_at) VALUES (?, ?, ?)",
+                    (
+                        entry["key"],
+                        json.dumps(entry["value"]),
+                        entry.get("updated_at") or datetime.now(timezone.utc).isoformat(),
+                    ),
+                )
+                if cur.rowcount > 0:
+                    counts["memory"] += 1
+
+            self._conn.commit()
+        return counts
 
     def close(self) -> None:
         with self._lock:

@@ -50,6 +50,47 @@ def test_run_single_module_streams_progress_and_completion():
     assert completed["output"]["raw_metrics"] == {"signups": 200.0, "churn": 5.0, "revenue": 999.0}
 
 
+def test_stream_reconnect_with_last_event_id_resumes_from_where_it_left_off():
+    res = client.post(
+        "/api/modules/automation/fetch_raw_metrics/run",
+        json={"inputs": {"signups": 1, "churn": 1, "revenue": 1}, "force_refresh": True},
+    )
+    stream_id = res.json()["stream_id"]
+
+    # Drain the whole stream once, recording each SSE "id:" line alongside its event.
+    ids_and_kinds = []
+    with client.stream("GET", f"/api/stream/{stream_id}") as response:
+        current_id = None
+        for line in response.iter_lines():
+            if line.startswith("id: "):
+                current_id = int(line[len("id: "):])
+            elif line.startswith("data: "):
+                event = json.loads(line[len("data: "):])
+                ids_and_kinds.append((current_id, event["kind"]))
+                if event["kind"] in ("run_completed", "run_failed"):
+                    break
+
+    assert [kind for _, kind in ids_and_kinds] == ["step_started", "step_completed", "run_completed"]
+    first_id = ids_and_kinds[0][0]
+
+    # Reconnect claiming we already saw the first event — the browser's own
+    # Last-Event-ID reconnect behavior — and confirm we resume after it
+    # instead of replaying the whole stream again.
+    resumed_kinds = []
+    with client.stream(
+        "GET", f"/api/stream/{stream_id}", headers={"Last-Event-ID": str(first_id)}
+    ) as response:
+        for line in response.iter_lines():
+            if not line.startswith("data: "):
+                continue
+            event = json.loads(line[len("data: "):])
+            resumed_kinds.append(event["kind"])
+            if event["kind"] in ("run_completed", "run_failed"):
+                break
+
+    assert resumed_kinds == ["step_completed", "run_completed"]
+
+
 def test_run_unknown_module_returns_404():
     res = client.post("/api/modules/automation/does_not_exist/run", json={"inputs": {}})
     assert res.status_code == 404

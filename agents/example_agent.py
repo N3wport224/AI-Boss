@@ -38,6 +38,13 @@ class ChurnResponseAgent(BaseModule):
         context.emit("thought", "Reviewing the churn-risk insight from the upstream workflow...")
         time.sleep(0.3)
 
+        # context.memory persists across separate runs (unlike context.variables,
+        # which starts fresh every time) — remembering the last risk level here
+        # lets a completely independent later run notice a trend, not just react
+        # to this run's numbers in isolation.
+        previous_risk_level = context.memory.get("last_risk_level")
+        context.memory.set("last_risk_level", risk_level)
+
         context.emit("tool_call", f'risk_policy_lookup(risk_level="{risk_level}")')
         time.sleep(0.3)
 
@@ -56,6 +63,8 @@ class ChurnResponseAgent(BaseModule):
         message = f"{prefix} churn rate is {churn_rate:.2%} ({risk_level} risk). {action}"
         if notify_slack:
             message += " (Slack notification queued.)"
+        if previous_risk_level is not None and previous_risk_level != risk_level:
+            message += f" (Risk moved from {previous_risk_level} to {risk_level} since the last run.)"
         if custom_note:
             message += f" Note: {custom_note}"
 

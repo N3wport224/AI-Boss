@@ -14,6 +14,48 @@ class StepRecord:
     error: Optional[str] = None
 
 
+class MemoryStore:
+    """A namespaced, best-effort persistent key/value interface exposed on
+    `ExecutionContext` as `context.memory` — unlike `context.variables`
+    (scoped to a single run), a value written here is visible to a later,
+    completely independent run, so one run's agent can leave a note for the
+    next one to read.
+
+    Backed by `StateStore`'s `memory` table when one is attached (accepted
+    as `Any` here, not imported by type, to avoid a context<->state_store
+    import cycle — it only needs to look like a `StateStore` at runtime).
+    Falls back to a plain in-memory dict scoped to just this one
+    `ExecutionContext` when no store is attached (e.g. an `ExecutionContext`
+    built directly in a test, with no persistence intended).
+    """
+
+    def __init__(self, state_store: Optional[Any] = None):
+        self._state_store = state_store
+        self._fallback: dict[str, Any] = {}
+
+    def get(self, key: str, default: Any = None) -> Any:
+        if self._state_store is not None:
+            return self._state_store.get_memory(key, default)
+        return self._fallback.get(key, default)
+
+    def set(self, key: str, value: Any) -> None:
+        if self._state_store is not None:
+            self._state_store.set_memory(key, value)
+        else:
+            self._fallback[key] = value
+
+    def delete(self, key: str) -> None:
+        if self._state_store is not None:
+            self._state_store.delete_memory(key)
+        else:
+            self._fallback.pop(key, None)
+
+    def all(self) -> list[dict]:
+        if self._state_store is not None:
+            return self._state_store.all_memory()
+        return [{"key": k, "value": v} for k, v in self._fallback.items()]
+
+
 class ExecutionContext:
     """Shared state threaded through every module in a pipeline run.
 
@@ -27,11 +69,17 @@ class ExecutionContext:
     emitted event is automatically tagged with which tier/module produced it.
     """
 
-    def __init__(self, initial: Optional[dict] = None, on_event: Optional[Callable[[dict], None]] = None):
+    def __init__(
+        self,
+        initial: Optional[dict] = None,
+        on_event: Optional[Callable[[dict], None]] = None,
+        state_store: Optional[Any] = None,
+    ):
         self.variables: dict[str, Any] = dict(initial or {})
         self.history: list[StepRecord] = []
         self.active_module: Optional[tuple[str, str]] = None
         self._on_event = on_event
+        self.memory = MemoryStore(state_store)
 
     def get(self, key: str, default: Any = None) -> Any:
         return self.variables.get(key, default)
