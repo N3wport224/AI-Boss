@@ -7,6 +7,7 @@ mirrors the same YAML-manifest convention already used by automations/,
 workflows/, and agents/: `pipelines/<slug>.yaml`.
 """
 import re
+from datetime import datetime, timezone
 from pathlib import Path
 
 import yaml
@@ -15,6 +16,8 @@ from engine.conditions import OPERATORS as CONDITION_OPERATORS
 from engine.registry import load_manifests
 
 PIPELINES_DIR = Path(__file__).resolve().parent.parent / "pipelines"
+_VERSIONS_DIR_NAME = "_versions"
+_VERSION_ID_FORMAT = "%Y%m%dT%H%M%S%f"
 
 
 class PipelineValidationError(ValueError):
@@ -164,12 +167,74 @@ def validate_pipeline(definition: dict, tier_dirs: dict) -> dict:
     }
 
 
+def _versions_dir(slug: str) -> Path:
+    return PIPELINES_DIR / _VERSIONS_DIR_NAME / slug
+
+
+def _archive_current_version(slug: str) -> None:
+    """Snapshot a pipeline's current on-disk YAML into its version history
+    before it gets overwritten — by a builder re-save, an import under an
+    existing name, or a restore. A no-op if the pipeline doesn't exist yet
+    (a brand-new pipeline has no prior version to keep)."""
+    path = PIPELINES_DIR / f"{slug}.yaml"
+    if not path.exists():
+        return
+    versions_dir = _versions_dir(slug)
+    versions_dir.mkdir(parents=True, exist_ok=True)
+    version_id = datetime.now(timezone.utc).strftime(_VERSION_ID_FORMAT)
+    version_path = versions_dir / f"{version_id}.yaml"
+    # Two saves within the same microsecond (rare, but possible on a fast
+    # machine/test run) would otherwise silently overwrite one archived
+    # version with another — disambiguate with a numeric suffix instead.
+    suffix = 2
+    while version_path.exists():
+        version_path = versions_dir / f"{version_id}-{suffix}.yaml"
+        suffix += 1
+    version_path.write_text(path.read_text())
+
+
 def save_pipeline(definition: dict, tier_dirs: dict) -> dict:
     validated = validate_pipeline(definition, tier_dirs)
     PIPELINES_DIR.mkdir(exist_ok=True)
     path = PIPELINES_DIR / f"{validated['slug']}.yaml"
+    _archive_current_version(validated["slug"])
     path.write_text(yaml.safe_dump(validated, sort_keys=False))
     return validated
+
+
+def list_pipeline_versions(slug: str) -> list[dict]:
+    """Every archived version of a pipeline, newest first. The version id is
+    itself a fixed-width UTC timestamp (plus an occasional `-N` disambiguator
+    suffix, see `_archive_current_version`), so lexicographic and
+    chronological order coincide on the timestamp portion — no separate sort
+    key needed."""
+    versions_dir = _versions_dir(slug)
+    if not versions_dir.exists():
+        return []
+    versions = []
+    for version_path in sorted(versions_dir.glob("*.yaml"), reverse=True):
+        version_id = version_path.stem
+        timestamp_part = version_id.split("-")[0]
+        saved_at = datetime.strptime(timestamp_part, _VERSION_ID_FORMAT).replace(tzinfo=timezone.utc)
+        versions.append({"version_id": version_id, "saved_at": saved_at.isoformat()})
+    return versions
+
+
+def load_pipeline_version(slug: str, version_id: str) -> dict:
+    version_path = _versions_dir(slug) / f"{version_id}.yaml"
+    if not version_path.exists():
+        raise FileNotFoundError(version_id)
+    return yaml.safe_load(version_path.read_text()) or {}
+
+
+def restore_pipeline_version(slug: str, version_id: str, tier_dirs: dict) -> dict:
+    """Restore an archived version back to current. Re-validated against
+    modules on disk today — a version saved when a module existed may no
+    longer validate if that module's manifest changed or was removed since.
+    The current definition is archived first (via save_pipeline's own
+    archiving), so a restore is itself undoable with another restore."""
+    old_definition = load_pipeline_version(slug, version_id)
+    return save_pipeline(old_definition, tier_dirs)
 
 
 def list_pipelines() -> list[dict]:

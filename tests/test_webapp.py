@@ -271,6 +271,23 @@ def test_schedule_rejects_unknown_schedule_type():
     assert res.status_code == 400
 
 
+def test_scheduler_pause_resume_status_roundtrip():
+    try:
+        assert client.get("/api/scheduler/status").json() == {"paused": False}
+
+        pause_res = client.post("/api/scheduler/pause")
+        assert pause_res.status_code == 200
+        assert pause_res.json() == {"paused": True}
+        assert client.get("/api/scheduler/status").json() == {"paused": True}
+
+        resume_res = client.post("/api/scheduler/resume")
+        assert resume_res.status_code == 200
+        assert resume_res.json() == {"paused": False}
+        assert client.get("/api/scheduler/status").json() == {"paused": False}
+    finally:
+        client.post("/api/scheduler/resume")  # never leave the shared app-level scheduler paused for later tests
+
+
 def test_run_detail_and_compare_endpoints():
     res1 = client.post(
         "/api/modules/automation/fetch_raw_metrics/run",

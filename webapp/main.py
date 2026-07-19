@@ -124,8 +124,12 @@ def _on_watched_file(path: Path) -> None:
             result = ingestion.ingest_pdf_bytes(path.name, data, store)
         elif suffix == ".json":
             result = ingestion.ingest_json_bytes(path.name, data, store)
+        elif suffix == ".xlsx":
+            result = ingestion.ingest_xlsx_bytes(path.name, data, store)
         else:
-            entry["error"] = f"Unsupported file type '{suffix}' — only .csv, .pdf, and .json are auto-ingested."
+            entry["error"] = (
+                f"Unsupported file type '{suffix}' — only .csv, .pdf, .json, and .xlsx are auto-ingested."
+            )
             _watcher_log.append(entry)
             return
         entry["duplicate"] = result.get("duplicate", False)
@@ -714,6 +718,39 @@ def pipeline_graph(slug: str):
     return graph.build_pipeline_graph(definition)
 
 
+@app.get("/api/pipelines/{slug}/versions")
+def list_pipeline_versions(slug: str):
+    try:
+        pipeline_store.load_pipeline(slug)  # 404s if the pipeline itself doesn't exist
+    except FileNotFoundError:
+        raise HTTPException(status_code=404, detail=f"No saved pipeline named '{slug}'.")
+    return pipeline_store.list_pipeline_versions(slug)
+
+
+@app.get("/api/pipelines/{slug}/versions/{version_id}")
+def get_pipeline_version(slug: str, version_id: str):
+    try:
+        current = pipeline_store.load_pipeline(slug)
+    except FileNotFoundError:
+        raise HTTPException(status_code=404, detail=f"No saved pipeline named '{slug}'.")
+    try:
+        version = pipeline_store.load_pipeline_version(slug, version_id)
+    except FileNotFoundError:
+        raise HTTPException(status_code=404, detail=f"No version '{version_id}' for pipeline '{slug}'.")
+    return {"version": version, "diff": _diff_dicts(version, current)}
+
+
+@app.post("/api/pipelines/{slug}/versions/{version_id}/restore")
+def restore_pipeline_version(slug: str, version_id: str):
+    try:
+        restored = pipeline_store.restore_pipeline_version(slug, version_id, TIER_DIRS)
+    except FileNotFoundError:
+        raise HTTPException(status_code=404, detail=f"No version '{version_id}' for pipeline '{slug}'.")
+    except pipeline_store.PipelineValidationError as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
+    return {"pipeline": restored}
+
+
 @app.get("/api/schedules")
 def list_schedules():
     return store.list_schedules()
@@ -774,6 +811,26 @@ def update_schedule(schedule_id: int, payload: ScheduleUpdate):
 def delete_schedule(schedule_id: int):
     store.delete_schedule(schedule_id)
     return {"deleted": schedule_id}
+
+
+@app.get("/api/scheduler/status")
+def scheduler_status():
+    return {"paused": _scheduler.paused}
+
+
+@app.post("/api/scheduler/pause")
+def pause_scheduler():
+    """Master pause for the whole scheduler — a maintenance-window switch,
+    distinct from pausing any individual schedule. Every schedule's own
+    `enabled` flag is left untouched; nothing fires until resumed."""
+    _scheduler.pause()
+    return {"paused": True}
+
+
+@app.post("/api/scheduler/resume")
+def resume_scheduler():
+    _scheduler.resume()
+    return {"paused": False}
 
 
 @app.get("/api/stream/{stream_id}")
@@ -942,7 +999,7 @@ def run_detail(run_id: int):
     steps = _parsed_steps_for_run(run_id)
     if not steps:
         raise HTTPException(status_code=404, detail=f"No recorded steps for run {run_id}.")
-    return {"run_id": run_id, "steps": steps}
+    return {"run_id": run_id, "steps": steps, "blackboard": store.get_run_blackboard(run_id)}
 
 
 @app.post("/api/runs/{run_id}/rerun")
@@ -1115,6 +1172,21 @@ async def ingest_csv(file: UploadFile = File(...)):
         return ingestion.ingest_csv_bytes(file.filename, data, store)
     except Exception as exc:
         raise HTTPException(status_code=400, detail=f"Could not parse CSV: {exc}")
+
+
+@app.post("/api/ingest/xlsx")
+async def ingest_xlsx(file: UploadFile = File(...)):
+    """Upload an .xlsx spreadsheet, get back the same row_count/columns/preview
+    shape as a CSV upload (first sheet, row 1 as headers). Same content-hash
+    dedupe, same shared implementation as the filesystem watcher."""
+    try:
+        data = await ingestion.read_upload_with_limit(file)
+    except ingestion.UploadTooLargeError as exc:
+        raise HTTPException(status_code=413, detail=str(exc))
+    try:
+        return ingestion.ingest_xlsx_bytes(file.filename, data, store)
+    except Exception as exc:
+        raise HTTPException(status_code=400, detail=f"Could not parse XLSX: {exc}")
 
 
 @app.post("/api/ingest/pdf")

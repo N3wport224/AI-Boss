@@ -283,6 +283,21 @@ h1 {
   color: var(--text);
 }
 
+.metrics-ticker strong.metric-warn {
+  color: var(--error);
+}
+
+.resource-warning-banner {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-size: 0.82rem;
+  color: var(--error);
+  background: rgba(248, 113, 113, 0.08);
+  border-bottom: 1px dashed var(--error);
+  padding: 8px 40px;
+}
+
 .legend {
   display: flex;
   gap: 16px;
@@ -340,6 +355,23 @@ h1 {
 .breaker-reset-btn:hover {
   background: var(--error);
   color: #fff;
+}
+
+.scheduler-paused-banner {
+  display: flex;
+  align-items: center;
+  font-size: 0.82rem;
+  color: var(--accent-pipeline);
+  background: rgba(251, 191, 36, 0.08);
+  border: 1px dashed var(--accent-pipeline);
+  border-radius: 8px;
+  padding: 10px 12px;
+  margin-bottom: 12px;
+}
+
+#scheduler-pause-toggle.active {
+  border-color: var(--accent-pipeline);
+  color: var(--accent-pipeline);
 }
 
 .btn-run:disabled {
@@ -1624,6 +1656,33 @@ body.density-compact .tier-section {
   min-width: 0;
 }
 
+.blackboard-section {
+  padding: 10px 14px;
+  border-top: 1px dashed var(--border);
+  background: var(--bg-elevated);
+}
+
+.blackboard-title {
+  margin: 0 0 4px;
+  font-size: 0.82rem;
+}
+
+.blackboard-entry {
+  padding: 6px 0;
+  border-bottom: 1px solid var(--border);
+}
+
+.blackboard-entry:last-child {
+  border-bottom: none;
+}
+
+.blackboard-entry-head {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  font-size: 0.8rem;
+}
+
 .runs-empty {
   color: var(--text-dim);
   font-size: 0.85rem;
@@ -1794,6 +1853,27 @@ body.density-compact .tier-section {
 
 .dag-scroll {
   overflow-x: auto;
+}
+
+.history-panel {
+  margin-top: 10px;
+  background: var(--bg-elevated);
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  padding: 10px;
+}
+
+.version-history-list {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.version-diff-detail {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  padding: 0 0 6px 12px;
 }
 
 /* Interactive log filtering tabs (System Info / Agent Thoughts / Raw Output) */

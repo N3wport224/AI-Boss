@@ -11,6 +11,10 @@ package) to pick up. This is genuine agent-to-agent delegation, not just the
 usual tier-1 -> tier-2 -> tier-3 handoff: one agent deciding *another agent*
 should take over, and handing it just enough context to act without redoing
 the upstream analysis. See `escalation_agent.py` for the receiving side.
+
+It also posts a note to `context.blackboard` — a second, complementary
+multi-agent pattern alongside the handoff: a broadcast channel any agent in
+the run can read, rather than a request aimed at one specific agent.
 """
 import time
 
@@ -61,6 +65,7 @@ class ChurnResponseAgent(BaseModule):
         else:
             action = "No action needed — churn is within the acceptable range."
         context.emit("thought", f"Decided on action: {action}")
+        context.blackboard.post(self.name, f"Assessed churn risk as {risk_level} (rate {churn_rate:.2%}). Decision: {action}")
         time.sleep(0.2)
 
         if notify_slack:

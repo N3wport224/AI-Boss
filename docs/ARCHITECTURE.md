@@ -956,6 +956,104 @@ only a JSON parse error or timeout falls back to an empty issue list.
     including a Ctrl+K open/filter/Escape-close/jump-to-pipeline/run-a-
     module/toggle-density round trip and a bulk-select-then-delete round
     trip confirming rows actually disappear. 212 tests total.
+87. **Add .xlsx spreadsheet ingestion** (`ingestion.xlsx_bytes_to_records()`,
+    reading the first sheet's row 1 as headers via openpyxl — already a
+    dependency for the XLSX run-history export, imported lazily here too so
+    serving the dashboard never pays for it; `POST /api/ingest/xlsx`): reuses
+    `cleanse_records()` unchanged, so an .xlsx upload gets the exact same
+    trim/blank-row/duplicate-row cleanup a CSV upload already does once it's
+    parsed into records. Wired into the dropzone, the file-type accept list,
+    and the filesystem watcher's `.csv`/`.pdf`/`.json`/`.xlsx` dispatch.
+88. **Add pipeline version history with diff/restore**
+    (`pipelines/_versions/<slug>/<timestamp>.yaml`, one file per prior
+    version, written by `_archive_current_version()` right before
+    `save_pipeline()` overwrites the current file — covers a builder
+    re-save, an import under an existing name, and a restore alike, since
+    all three go through the same `save_pipeline()` call): `GET
+    /api/pipelines/{slug}/versions` lists them newest-first (the version id
+    is itself a fixed-width UTC timestamp, so lexicographic and
+    chronological order coincide), `GET .../versions/{id}` returns the
+    archived definition plus a `_diff_dicts()` comparison against current
+    (the same shallow key-level diff helper `/api/runs/compare` already
+    uses), and `POST .../versions/{id}/restore` re-validates the old
+    definition against modules on disk *today* and saves it as current —
+    which means restoring is itself undoable, since `save_pipeline()`
+    archives the pre-restore definition on the way in. A same-microsecond
+    double-save (unlikely, but possible on a fast test run) gets a `-N`
+    disambiguating suffix rather than silently overwriting one archived
+    version with another. A **History** action on each saved-pipeline card
+    expands a version list with **View diff** / **Restore** per row.
+89. **Add a global scheduler pause/resume switch** (`Scheduler.paused`, an
+    in-memory flag checked first thing in `_tick()`; `POST
+    /api/scheduler/pause` / `/resume`, `GET /api/scheduler/status`): a
+    maintenance-window control distinct from disabling an individual
+    schedule — while paused, nothing fires no matter what any one
+    schedule's own `enabled` state says, and every schedule's state is left
+    completely untouched, so resuming picks up exactly where pausing left
+    off. In-memory only (like `poll_interval`), so it resets to unpaused on
+    a server restart — deliberately not persisted, since this is a live
+    "stop everything right now" switch, not a saved setting. The Schedules
+    section header gets a **⏸ Pause all** / **▶ Resume all** toggle plus a
+    banner while paused.
+90. **Add a resource usage alert banner** (pure frontend — `loadPerformance()`
+    in `app.js`, already polling the existing `/api/performance` endpoint
+    every 3s): crossing a CPU (80%) or memory (500MB) threshold highlights
+    the specific ticker stat and shows a dismissable-by-recovery banner
+    below the header, plus a one-time toast on the OK→WARN transition (not
+    on every poll, so it doesn't spam). Thresholds are fixed constants, not
+    user-configurable — this is a single lightweight local process, and the
+    two numbers are called out in comments if they ever need revisiting.
+91. **Add pipeline builder undo** (`builderUndoStack`, a bounded array of
+    deep-cloned `builderSteps` snapshots; Ctrl/Cmd+Z or a new **↶ Undo**
+    button): scoped deliberately to *structural* changes — add/remove a
+    step or branch, reorder, swap a step's module — not every field-level
+    keystroke or toggle, which would flood the stack with edits nobody
+    thinks of as an undoable "action." `snapshotBuilderUndo()` is called
+    once at each such mutation's call site, right after its own guard
+    clauses pass (so a blocked removal/move, which changes nothing, never
+    pushes a spurious snapshot); the stack is cleared whenever `builderSteps`
+    is replaced wholesale instead of incrementally edited (opening a
+    different pipeline for editing, or canceling an edit back to a blank
+    pipeline), since undoing "into" an unrelated pipeline's history would
+    make no sense.
+92. **Add a shared agent blackboard** (`engine.context.Blackboard`, exposed
+    as `context.blackboard`; a new `blackboard` column on `runs`, populated
+    by `Orchestrator.run()` at every `finish_run()` call site and redacted
+    the same way `context.variables` already is before persisting): a
+    second, complementary multi-agent collaboration pattern alongside batch
+    8's handoff — where a handoff is a point-to-point request from one
+    named agent to another, the blackboard is a broadcast channel any
+    agent-tier module can post a free-form, timestamped note to and any
+    other agent (now or later in the same run) can read in full, with
+    neither side needing to know who else is participating. Wired for
+    real: `churn_response_agent` posts its risk assessment and decision;
+    `escalation_agent` reads whatever's already on the board (not just the
+    `handoff` key) before acting, and posts its own outcome whether it acts
+    or declines. `GET /api/runs/{run_id}` now also returns `blackboard`;
+    the run detail drill-down renders a **🗒 Shared Agent Blackboard**
+    section when it's non-empty.
+93. **Add tests for all of Batch 9**: XLSX ingestion's structured-record
+    parsing, blank-row skipping, content-hash dedupe, and malformed-file
+    rejection, plus a filesystem-watcher round trip; pipeline version
+    history's archive-on-first-save no-op, archive-on-resave, multiple
+    versions surviving multiple resaves, restore bringing back the old
+    definition (and archiving the pre-restore one), and 404s for an
+    unknown pipeline or version; `Scheduler.paused` blocking a due-and-
+    enabled schedule from firing and resuming letting it fire, plus an API
+    round trip through pause/status/resume that always resumes at the end
+    so it can't leak into later tests sharing the same app-level scheduler;
+    `Blackboard.post()`/`.all()` ordering, extra fields, and copy-not-
+    reference semantics, an orchestrator run persisting a real module's
+    blackboard entry with a secret-shaped extra field redacted, an empty
+    blackboard for a run where nothing posted, and both
+    `churn_response_agent`/`escalation_agent` posting genuine notes
+    through a real chained pipeline (high-risk and low-risk alike, since
+    `escalation_agent` posts a note whether it acts or declines). The
+    resource-usage banner and builder undo are pure frontend features with
+    no new backend surface (consistent with how earlier frontend-only
+    features were verified) — both were live-verified in a real browser
+    instead, including a mocked-high-usage round trip for the banner and
+    an add/remove/undo/Ctrl+Z round trip for the builder. 238 tests total.
 
 ## 9. Roadmap
 

@@ -53,6 +53,7 @@ const perfCpuEl = document.getElementById("perf-cpu");
 const perfMemEl = document.getElementById("perf-mem");
 const perfThreadsEl = document.getElementById("perf-threads");
 const perfUptimeEl = document.getElementById("perf-uptime");
+const resourceWarningBannerEl = document.getElementById("resource-warning-banner");
 
 const favoritesSection = document.getElementById("favorites-section");
 const favoritesGrid = document.getElementById("favorites-grid");
@@ -87,11 +88,19 @@ const scheduleDailyTimeEl = document.getElementById("schedule-daily-time");
 const scheduleErrorEl = document.getElementById("schedule-error");
 const scheduleCreateBtn = document.getElementById("schedule-create-btn");
 const schedulesListEl = document.getElementById("schedules-list");
+const schedulerPauseToggleBtn = document.getElementById("scheduler-pause-toggle");
+const schedulerPausedBannerEl = document.getElementById("scheduler-paused-banner");
 
 let currentModulesByTier = {};
 let currentPipelines = [];
 let builderSteps = [];
 let editingPipelineSlug = null; // non-null while the builder holds a loaded saved pipeline
+
+// Undo covers structural changes only — add/remove a step or branch, reorder,
+// swap a step's module — not every field-level keystroke or toggle, which
+// would flood the stack with edits nobody thinks of as an undo-able "action."
+const BUILDER_UNDO_LIMIT = 20;
+let builderUndoStack = [];
 let toastHistory = [];
 let unreadNotifications = 0;
 
@@ -567,7 +576,30 @@ function showTrendTooltip(event, bar, tooltip) {
 // entirely, at which point there's nothing left to look up anyway.
 const runDetailCache = {};
 
-function renderRunDetailSteps(runId, steps) {
+function renderBlackboardSection(blackboard) {
+  if (!blackboard || !blackboard.length) return "";
+  const entriesHtml = blackboard
+    .map(
+      (entry) => `
+      <div class="blackboard-entry">
+        <div class="blackboard-entry-head">
+          <strong>${escapeHtml(entry.author)}</strong>
+          <span class="run-detail-step-timing">${new Date(entry.at).toLocaleTimeString()}</span>
+        </div>
+        <p class="card-desc">${escapeHtml(entry.note)}</p>
+      </div>`
+    )
+    .join("");
+
+  return `
+    <div class="blackboard-section">
+      <h4 class="blackboard-title">🗒 Shared Agent Blackboard</h4>
+      <p class="card-desc">Notes any agent in this run posted for any other agent to read — not addressed to a specific recipient.</p>
+      ${entriesHtml}
+    </div>`;
+}
+
+function renderRunDetailSteps(runId, steps, blackboard) {
   if (!steps.length) return `<div class="runs-empty">No recorded steps for this run.</div>`;
   const stepsHtml = steps
     .map(
@@ -589,6 +621,7 @@ function renderRunDetailSteps(runId, steps) {
       <button class="btn btn-secondary btn-small rerun-btn" data-run-id="${runId}" type="button">↻ Re-run with these inputs</button>
     </div>
     ${stepsHtml}
+    ${renderBlackboardSection(blackboard)}
     <div class="tracker hidden rerun-tracker" data-run-id="${runId}"></div>
     <div class="log-tabs-wrap hidden rerun-log" data-run-id="${runId}"></div>`;
 }
@@ -673,14 +706,14 @@ async function toggleRunDetail(runId) {
         cell.innerHTML = `<div class="runs-empty">${escapeHtml(body.detail || "Could not load run detail.")}</div>`;
         return;
       }
-      runDetailCache[runId] = body.steps;
+      runDetailCache[runId] = { steps: body.steps, blackboard: body.blackboard || [] };
     } catch (err) {
       cell.innerHTML = `<div class="runs-empty">Failed to load run detail: ${err}</div>`;
       return;
     }
   }
-  cell.innerHTML = renderRunDetailSteps(runId, runDetailCache[runId]);
-  cell.querySelector(".rerun-btn").addEventListener("click", () => rerunHistoricalRun(runId, runDetailCache[runId]));
+  cell.innerHTML = renderRunDetailSteps(runId, runDetailCache[runId].steps, runDetailCache[runId].blackboard);
+  cell.querySelector(".rerun-btn").addEventListener("click", () => rerunHistoricalRun(runId, runDetailCache[runId].steps));
 }
 
 // ---- Run comparison ----
@@ -756,6 +789,12 @@ function formatUptime(seconds) {
   return `${(seconds / 3600).toFixed(1)}h`;
 }
 
+// Reasonable defaults for a single lightweight local process — not user
+// configurable (yet); revisit if this app's own baseline usage ever changes.
+const CPU_WARN_PERCENT = 80;
+const MEMORY_WARN_MB = 500;
+let resourceWarningActive = false;
+
 async function loadPerformance() {
   const res = await fetch("/api/performance");
   const p = await res.json();
@@ -763,6 +802,27 @@ async function loadPerformance() {
   perfMemEl.textContent = `${p.memory_rss_mb} MB`;
   perfThreadsEl.textContent = p.active_run_threads > 0 ? `${p.thread_count} (${p.active_run_threads} running)` : p.thread_count;
   perfUptimeEl.textContent = formatUptime(p.uptime_seconds);
+
+  const cpuOver = p.cpu_percent >= CPU_WARN_PERCENT;
+  const memOver = p.memory_rss_mb >= MEMORY_WARN_MB;
+  perfCpuEl.classList.toggle("metric-warn", cpuOver);
+  perfMemEl.classList.toggle("metric-warn", memOver);
+
+  const isOver = cpuOver || memOver;
+  if (isOver) {
+    const reasons = [];
+    if (cpuOver) reasons.push(`CPU at ${p.cpu_percent.toFixed(1)}%`);
+    if (memOver) reasons.push(`memory at ${p.memory_rss_mb} MB`);
+    resourceWarningBannerEl.textContent = `⚠ High resource usage — ${reasons.join(", ")}.`;
+    resourceWarningBannerEl.classList.remove("hidden");
+  } else {
+    resourceWarningBannerEl.classList.add("hidden");
+  }
+
+  if (isOver && !resourceWarningActive) {
+    showToast("Resource usage is unusually high — see the banner below the header.", "error");
+  }
+  resourceWarningActive = isOver;
 }
 
 async function refreshTelemetry() {
@@ -1551,6 +1611,7 @@ function moveBuilderStep(from, to) {
     return;
   }
 
+  snapshotBuilderUndo();
   for (const sources of allBuilderFieldSources()) {
     for (const source of Object.values(sources)) {
       if (source.type !== "mapping") continue;
@@ -1583,6 +1644,7 @@ function removeBuilderStep(index) {
     return;
   }
 
+  snapshotBuilderUndo();
   for (const sources of allBuilderFieldSources()) {
     for (const source of Object.values(sources)) {
       if (source.type === "mapping" && source.step > index) {
@@ -1801,6 +1863,32 @@ function resetMappingsAfterSlot(index) {
   }
 }
 
+const builderUndoBtn = document.getElementById("builder-undo");
+
+function snapshotBuilderUndo() {
+  builderUndoStack.push(JSON.parse(JSON.stringify(builderSteps)));
+  if (builderUndoStack.length > BUILDER_UNDO_LIMIT) builderUndoStack.shift();
+  updateBuilderUndoButton();
+}
+
+function clearBuilderUndo() {
+  builderUndoStack = [];
+  updateBuilderUndoButton();
+}
+
+function updateBuilderUndoButton() {
+  builderUndoBtn.disabled = builderUndoStack.length === 0;
+}
+
+function undoBuilderStep() {
+  if (!builderUndoStack.length) return;
+  builderSteps = builderUndoStack.pop();
+  updateBuilderUndoButton();
+  renderBuilder();
+}
+
+builderUndoBtn.addEventListener("click", undoBuilderStep);
+
 function attachBuilderStepListeners() {
   builderStepsEl.querySelectorAll(".module-select").forEach((sel) => {
     sel.addEventListener("change", (e) => {
@@ -1810,6 +1898,7 @@ function attachBuilderStepListeners() {
       const [tier, name] = e.target.value.split("::");
       const module = tier && name ? (currentModulesByTier[tier] || []).find((m) => m.name === name) : null;
 
+      snapshotBuilderUndo();
       if (branchStr !== undefined) {
         const oldBranch = builderSteps[slot].branches[Number(branchStr)];
         builderSteps[slot].branches[Number(branchStr)] = module
@@ -1839,6 +1928,7 @@ function attachBuilderStepListeners() {
 
   builderStepsEl.querySelectorAll(".add-branch-btn").forEach((btn) => {
     btn.addEventListener("click", (e) => {
+      snapshotBuilderUndo();
       builderSteps[Number(e.currentTarget.dataset.index)].branches.push(blankBuilderBranch());
       renderBuilder();
     });
@@ -1849,6 +1939,7 @@ function attachBuilderStepListeners() {
       const [slotStr, branchStr] = e.currentTarget.dataset.index.split(":");
       const step = builderSteps[Number(slotStr)];
       if (step.branches.length <= 2) return; // groups need at least two branches
+      snapshotBuilderUndo();
       step.branches.splice(Number(branchStr), 1);
       resetMappingsAfterSlot(Number(slotStr));
       renderBuilder();
@@ -2034,6 +2125,7 @@ function openPipelineForEditing(slug) {
   builderNameEl.value = definition.name;
   builderDescriptionEl.value = definition.description || "";
   editingPipelineSlug = slug;
+  clearBuilderUndo(); // a freshly loaded pipeline starts its own undo history, not the last one's
 
   openBuilder();
   renderBuilder();
@@ -2046,6 +2138,7 @@ builderCancelEditBtn.addEventListener("click", () => {
   builderSteps = [blankBuilderStep()];
   builderNameEl.value = "";
   builderDescriptionEl.value = "";
+  clearBuilderUndo();
   renderBuilder();
   updateBuilderEditingUI();
 });
@@ -2077,12 +2170,14 @@ builderToggleBtn.addEventListener("click", () => {
 });
 
 builderAddStepBtn.addEventListener("click", () => {
+  snapshotBuilderUndo();
   builderSteps.push(blankBuilderStep());
   renderBuilder();
 });
 
 document.getElementById("builder-add-group").addEventListener("click", () => {
   if (builderPanelEl.classList.contains("hidden")) openBuilder();
+  snapshotBuilderUndo();
   builderSteps.push(blankBuilderGroup());
   renderBuilder();
 });
@@ -2223,11 +2318,13 @@ function renderSavedPipelines(pipelinesList) {
               <button class="btn btn-secondary btn-small" data-edit-slug="${p.slug}" type="button">Edit</button>
               <button class="btn btn-secondary btn-small" data-clone-slug="${p.slug}" type="button">Clone</button>
               <button class="btn btn-secondary btn-small" data-graph-slug="${p.slug}" type="button">Graph</button>
+              <button class="btn btn-secondary btn-small" data-history-slug="${p.slug}" type="button">History</button>
               <a class="btn btn-secondary btn-small" href="/api/pipelines/${p.slug}/export" download="${p.slug}.yaml">Export</a>
             </div>
             <div class="tracker hidden"></div>
             <div class="log-tabs-wrap hidden"></div>
             <div class="dag-panel hidden"></div>
+            <div class="history-panel hidden"></div>
           </div>`;
       })
       .join("");
@@ -2243,6 +2340,9 @@ function renderSavedPipelines(pipelinesList) {
     });
     savedPipelinesGrid.querySelectorAll("[data-graph-slug]").forEach((btn) => {
       btn.addEventListener("click", () => togglePipelineGraph(btn.dataset.graphSlug));
+    });
+    savedPipelinesGrid.querySelectorAll("[data-history-slug]").forEach((btn) => {
+      btn.addEventListener("click", () => togglePipelineHistory(btn.dataset.historySlug));
     });
     savedPipelinesGrid.querySelectorAll(".webhook-copy-btn").forEach((btn) => {
       btn.addEventListener("click", async () => {
@@ -2352,6 +2452,111 @@ async function togglePipelineGraph(slug) {
     panel.innerHTML = `<div class="dag-scroll">${renderDagSvg(graph)}</div>`;
   } catch (err) {
     panel.innerHTML = `<p class="card-desc">Could not load graph: ${err}</p>`;
+  }
+}
+
+async function togglePipelineHistory(slug) {
+  const card = document.getElementById(`pipeline-card__${slug}`);
+  const panel = card.querySelector(".history-panel");
+
+  if (!panel.classList.contains("hidden")) {
+    panel.classList.add("hidden");
+    return;
+  }
+
+  panel.classList.remove("hidden");
+  panel.innerHTML = `<p class="card-desc">Loading version history…</p>`;
+
+  try {
+    const res = await fetch(`/api/pipelines/${slug}/versions`);
+    const versions = await res.json();
+    renderPipelineHistory(slug, panel, versions);
+  } catch (err) {
+    panel.innerHTML = `<p class="card-desc">Could not load version history: ${err}</p>`;
+  }
+}
+
+function renderPipelineHistory(slug, panel, versions) {
+  if (!versions.length) {
+    panel.innerHTML = `<p class="card-desc">No earlier versions yet — saved once, no overwrites recorded.</p>`;
+    return;
+  }
+
+  const rows = versions
+    .map(
+      (v) => `
+      <div class="schedule-row" data-version-row="${v.version_id}">
+        <div class="schedule-row-main">
+          <strong>${new Date(v.saved_at).toLocaleString()}</strong>
+          <span class="schedule-row-meta">version ${escapeHtml(v.version_id)}</span>
+        </div>
+        <div class="schedule-row-actions">
+          <button class="btn btn-secondary btn-small" data-view-version="${v.version_id}" type="button">View diff</button>
+          <button class="btn btn-secondary btn-small" data-restore-version="${v.version_id}" type="button">Restore</button>
+        </div>
+      </div>
+      <div class="version-diff-detail hidden" data-diff-for="${v.version_id}"></div>`
+    )
+    .join("");
+
+  panel.innerHTML = `<div class="version-history-list">${rows}</div>`;
+
+  panel.querySelectorAll("[data-view-version]").forEach((btn) => {
+    btn.addEventListener("click", () => togglePipelineVersionDiff(slug, panel, btn.dataset.viewVersion));
+  });
+
+  panel.querySelectorAll("[data-restore-version]").forEach((btn) => {
+    btn.addEventListener("click", () => restorePipelineVersion(slug, btn.dataset.restoreVersion));
+  });
+}
+
+async function togglePipelineVersionDiff(slug, panel, versionId) {
+  const detail = panel.querySelector(`[data-diff-for="${versionId}"]`);
+  if (!detail.classList.contains("hidden")) {
+    detail.classList.add("hidden");
+    return;
+  }
+
+  detail.classList.remove("hidden");
+  detail.innerHTML = `<p class="card-desc">Loading diff…</p>`;
+
+  try {
+    const res = await fetch(`/api/pipelines/${slug}/versions/${versionId}`);
+    const body = await res.json();
+    const diffKeys = Object.keys(body.diff);
+    if (!diffKeys.length) {
+      detail.innerHTML = `<p class="card-desc">No differences from the current definition.</p>`;
+      return;
+    }
+    detail.innerHTML = diffKeys
+      .map(
+        (key) => `
+        <div class="schedule-row">
+          <div class="schedule-row-main">
+            <strong>${escapeHtml(key)}</strong>
+            <span class="schedule-row-meta">this version: ${escapeHtml(JSON.stringify(body.diff[key].a))}</span>
+            <span class="schedule-row-meta">current: ${escapeHtml(JSON.stringify(body.diff[key].b))}</span>
+          </div>
+        </div>`
+      )
+      .join("");
+  } catch (err) {
+    detail.innerHTML = `<p class="card-desc">Could not load diff: ${err}</p>`;
+  }
+}
+
+async function restorePipelineVersion(slug, versionId) {
+  try {
+    const res = await fetch(`/api/pipelines/${slug}/versions/${versionId}/restore`, { method: "POST" });
+    const body = await res.json();
+    if (!res.ok) {
+      showToast(body.detail || "Restore failed.", "error");
+      return;
+    }
+    showToast(`Restored "${body.pipeline.name}" to this version.`, "success");
+    await loadSavedPipelines();
+  } catch (err) {
+    showToast(`Restore failed: ${err}`, "error");
   }
 }
 
@@ -2571,8 +2776,9 @@ async function uploadFile(file) {
   const isPdf = lowerName.endsWith(".pdf");
   const isCsv = lowerName.endsWith(".csv");
   const isJson = lowerName.endsWith(".json");
-  if (!isPdf && !isCsv && !isJson) {
-    showToast("Only .csv, .pdf, and .json files are supported.", "error");
+  const isXlsx = lowerName.endsWith(".xlsx");
+  if (!isPdf && !isCsv && !isJson && !isXlsx) {
+    showToast("Only .csv, .pdf, .json, and .xlsx files are supported.", "error");
     return;
   }
 
@@ -2582,7 +2788,7 @@ async function uploadFile(file) {
   ingestionResultEl.classList.remove("hidden");
   ingestionResultEl.innerHTML = `<pre class="log-tab-content">Uploading ${file.name}…</pre>`;
 
-  const endpoint = isPdf ? "/api/ingest/pdf" : isJson ? "/api/ingest/json" : "/api/ingest/csv";
+  const endpoint = isPdf ? "/api/ingest/pdf" : isJson ? "/api/ingest/json" : isXlsx ? "/api/ingest/xlsx" : "/api/ingest/csv";
 
   try {
     const res = await fetch(endpoint, { method: "POST", body: formData });
@@ -2597,7 +2803,7 @@ async function uploadFile(file) {
     if (body.duplicate) {
       ingestionResultEl.innerHTML = `<pre class="log-tab-content">This exact file was already ingested as "${body.original_filename}" at ${new Date(body.ingested_at).toLocaleString()}. Skipped.</pre>`;
       showToast(`Duplicate of "${body.original_filename}" — skipped.`, "error");
-    } else if (isCsv || isJson) {
+    } else if (isCsv || isJson || isXlsx) {
       const preview = JSON.stringify(body.preview, null, 2);
       const note = body.truncated ? `\n… (truncated — ${body.row_count} rows total)` : "";
       const cleaning = body.cleaning || {};
@@ -2935,6 +3141,24 @@ scheduleCreateBtn.addEventListener("click", async () => {
   showToast("Schedule created.", "success");
 });
 
+async function loadSchedulerStatus() {
+  const res = await fetch("/api/scheduler/status");
+  const body = await res.json();
+  schedulerPausedBannerEl.classList.toggle("hidden", !body.paused);
+  schedulerPauseToggleBtn.textContent = body.paused ? "▶ Resume all" : "⏸ Pause all";
+  schedulerPauseToggleBtn.classList.toggle("active", body.paused);
+}
+
+schedulerPauseToggleBtn.addEventListener("click", async () => {
+  const isPaused = schedulerPauseToggleBtn.textContent.startsWith("▶");
+  const endpoint = isPaused ? "/api/scheduler/resume" : "/api/scheduler/pause";
+  await fetch(endpoint, { method: "POST" });
+  await loadSchedulerStatus();
+  showToast(isPaused ? "Scheduler resumed." : "Scheduler paused — no schedule will fire until resumed.", "success");
+});
+
+loadSchedulerStatus();
+setInterval(loadSchedulerStatus, 5000);
 setInterval(loadSchedules, 5000);
 setInterval(loadPerformance, 3000);
 
@@ -3247,6 +3471,11 @@ document.addEventListener("keydown", (event) => {
     event.preventDefault();
     if (commandPaletteOverlay.classList.contains("hidden")) openCommandPalette();
     else closeCommandPalette();
+  } else if ((event.metaKey || event.ctrlKey) && event.key.toLowerCase() === "z" && !isTyping) {
+    if (!builderPanelEl.classList.contains("hidden") && builderUndoStack.length) {
+      event.preventDefault();
+      undoBuilderStep();
+    }
   } else if (event.key === "/" && !isTyping) {
     event.preventDefault();
     searchOmnibar.focus();
@@ -3255,7 +3484,7 @@ document.addEventListener("keydown", (event) => {
     notificationsPanel.classList.add("hidden");
     healthPanel.classList.add("hidden");
   } else if (event.key === "?" && !isTyping) {
-    showToast("Shortcuts: “Ctrl/Cmd+K” command palette · “/” search · Esc close panels · “?” this help", "success");
+    showToast("Shortcuts: “Ctrl/Cmd+K” command palette · “Ctrl/Cmd+Z” undo in builder · “/” search · Esc close panels · “?” this help", "success");
   }
 });
 

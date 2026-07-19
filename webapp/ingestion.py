@@ -134,6 +134,29 @@ def pdf_bytes_to_text(data: bytes) -> str:
     return "\n\n".join((page.extract_text() or "") for page in reader.pages)
 
 
+def xlsx_bytes_to_records(data: bytes) -> list[dict]:
+    """Reads the first sheet of an uploaded .xlsx workbook, treating row 1 as
+    headers — the spreadsheet counterpart to csv_bytes_to_records. openpyxl
+    is imported lazily (same reason as the XLSX run-history export in
+    webapp/main.py) so serving the dashboard never pays for the dependency."""
+    from openpyxl import load_workbook
+
+    workbook = load_workbook(io.BytesIO(data), read_only=True, data_only=True)
+    rows = workbook.worksheets[0].iter_rows(values_only=True)
+    try:
+        header_row = next(rows)
+    except StopIteration:
+        return []
+
+    headers = [str(cell) if cell is not None else f"column_{i + 1}" for i, cell in enumerate(header_row)]
+    records = []
+    for row in rows:
+        if all(cell is None for cell in row):
+            continue
+        records.append({headers[i]: (row[i] if i < len(row) else None) for i in range(len(headers))})
+    return records
+
+
 def ingest_csv_bytes(filename: str, data: bytes, store) -> dict:
     """Shared by the upload endpoint and the filesystem watcher: hash-dedupe,
     parse, save the artifact + its JSON conversion, record the hash."""
@@ -147,6 +170,35 @@ def ingest_csv_bytes(filename: str, data: bytes, store) -> dict:
     saved_path = save_artifact(filename, data)
     saved_path.with_suffix(".json").write_text(json.dumps(records, indent=2))
     store.record_ingested_file(file_hash, filename, "csv")
+
+    return {
+        "duplicate": False,
+        "filename": filename,
+        "row_count": len(records),
+        "columns": list(records[0].keys()) if records else [],
+        "preview": records[:50],
+        "truncated": len(records) > 50,
+        "cleaning": cleaning_stats,
+    }
+
+
+def ingest_xlsx_bytes(filename: str, data: bytes, store) -> dict:
+    """Shared by the upload endpoint: hash-dedupe, parse the first sheet,
+    save the artifact + its JSON conversion, record the hash — the
+    spreadsheet counterpart to ingest_csv_bytes, reusing the exact same
+    cleanse_records() pass (trim/blank-row/duplicate-row cleanup, no
+    schema inference) so an .xlsx upload gets identical treatment to a CSV
+    one once it's parsed into records."""
+    file_hash = hash_bytes(data)
+    existing = store.find_ingested_file(file_hash)
+    if existing:
+        return {"duplicate": True, "original_filename": existing["filename"], "ingested_at": existing["ingested_at"]}
+
+    records = xlsx_bytes_to_records(data)
+    records, cleaning_stats = cleanse_records(records)
+    saved_path = save_artifact(filename, data)
+    saved_path.with_suffix(".json").write_text(json.dumps(records, indent=2, default=str))
+    store.record_ingested_file(file_hash, filename, "xlsx")
 
     return {
         "duplicate": False,

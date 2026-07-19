@@ -156,3 +156,62 @@ def test_escalation_agent_is_listed_but_excluded_from_the_fixed_full_pipeline():
     res = client.post("/api/pipeline/run", json={"inputs": {}})
     events = _collect_stream(res.json()["stream_id"])
     assert "escalation_result" not in events[-1]["context"]
+
+
+# ---- Shared blackboard: both agents post real notes, a second collaboration
+# pattern alongside the point-to-point handoff above ----
+
+def test_churn_response_agent_posts_a_blackboard_note_directly():
+    context = ExecutionContext({"insight": {"risk_level": "high", "churn_rate": 0.3}})
+    ChurnResponseAgent().run(context)
+
+    notes = context.blackboard.all()
+    assert len(notes) == 1
+    assert notes[0]["author"] == "churn_response_agent"
+    assert "high" in notes[0]["note"]
+
+
+def test_escalation_agent_reads_prior_notes_and_posts_its_own_when_it_acts():
+    context = ExecutionContext(
+        {"handoff": {"requested": True, "reason": "x", "priority": "high", "risk_level": "high", "churn_rate": 0.5}}
+    )
+    context.blackboard.post("churn_response_agent", "prior note from the churn agent")
+    EscalationAgent().run(context)
+
+    notes = context.blackboard.all()
+    assert len(notes) == 2
+    assert notes[1]["author"] == "escalation_agent"
+    assert "senior_retention_specialist" in notes[1]["note"] or "Escalated" in notes[1]["note"]
+
+
+def test_escalation_agent_posts_a_note_even_when_declining():
+    context = ExecutionContext({})
+    EscalationAgent().run(context)
+
+    notes = context.blackboard.all()
+    assert len(notes) == 1
+    assert notes[0]["author"] == "escalation_agent"
+
+
+def test_high_risk_pipeline_leaves_both_agents_notes_on_the_run_blackboard():
+    payload = _handoff_pipeline_payload("Blackboard High API", signups=10, churn=9)
+    res = client.post("/api/pipelines", json=payload)
+    _collect_stream(res.json()["stream_id"])
+
+    run_id = client.get("/api/runs?limit=1").json()[0]["id"]
+    detail = client.get(f"/api/runs/{run_id}").json()
+
+    authors = [entry["author"] for entry in detail["blackboard"]]
+    assert authors == ["churn_response_agent", "escalation_agent"]
+
+
+def test_low_risk_pipeline_still_leaves_both_agents_notes_even_without_a_handoff():
+    payload = _handoff_pipeline_payload("Blackboard Low API", signups=1000, churn=1)
+    res = client.post("/api/pipelines", json=payload)
+    _collect_stream(res.json()["stream_id"])
+
+    run_id = client.get("/api/runs?limit=1").json()[0]["id"]
+    detail = client.get(f"/api/runs/{run_id}").json()
+
+    authors = [entry["author"] for entry in detail["blackboard"]]
+    assert authors == ["churn_response_agent", "escalation_agent"]

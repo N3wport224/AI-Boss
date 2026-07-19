@@ -11,7 +11,8 @@ CREATE TABLE IF NOT EXISTS runs (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     started_at TEXT NOT NULL,
     finished_at TEXT,
-    status TEXT NOT NULL
+    status TEXT NOT NULL,
+    blackboard TEXT NOT NULL DEFAULT '[]'
 );
 
 CREATE TABLE IF NOT EXISTS steps (
@@ -113,6 +114,10 @@ class StateStore:
         if "daily_time" not in schedule_columns:
             self._conn.execute("ALTER TABLE schedules ADD COLUMN daily_time TEXT")
 
+        run_columns = {row[1] for row in self._conn.execute("PRAGMA table_info(runs)").fetchall()}
+        if "blackboard" not in run_columns:
+            self._conn.execute("ALTER TABLE runs ADD COLUMN blackboard TEXT NOT NULL DEFAULT '[]'")
+
     def start_run(self) -> int:
         with self._lock:
             cur = self._conn.execute(
@@ -122,13 +127,20 @@ class StateStore:
             self._conn.commit()
             return cur.lastrowid
 
-    def finish_run(self, run_id: int, status: str) -> None:
+    def finish_run(self, run_id: int, status: str, blackboard: Optional[list] = None) -> None:
         with self._lock:
             self._conn.execute(
-                "UPDATE runs SET finished_at = ?, status = ? WHERE id = ?",
-                (datetime.now(timezone.utc).isoformat(), status, run_id),
+                "UPDATE runs SET finished_at = ?, status = ?, blackboard = ? WHERE id = ?",
+                (datetime.now(timezone.utc).isoformat(), status, json.dumps(blackboard or []), run_id),
             )
             self._conn.commit()
+
+    def get_run_blackboard(self, run_id: int) -> list:
+        with self._lock:
+            row = self._conn.execute("SELECT blackboard FROM runs WHERE id = ?", (run_id,)).fetchone()
+        if row is None or not row[0]:
+            return []
+        return json.loads(row[0])
 
     def log_step(self, run_id: int, step: StepRecord) -> None:
         with self._lock:

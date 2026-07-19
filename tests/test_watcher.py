@@ -98,3 +98,31 @@ def test_app_level_watcher_auto_ingests_a_dropped_csv():
 
     (watcher.WATCH_DIR / filename).unlink(missing_ok=True)
     shutil.rmtree(ingestion.ARTIFACTS_DIR, ignore_errors=True)
+
+
+def test_app_level_watcher_auto_ingests_a_dropped_xlsx():
+    from openpyxl import Workbook
+
+    if ingestion.ARTIFACTS_DIR.exists():
+        shutil.rmtree(ingestion.ARTIFACTS_DIR)
+    watcher.ensure_watch_dir()
+
+    filename = f"watched_test_{int(time.time() * 1000)}.xlsx"
+    workbook = Workbook()
+    sheet = workbook.active
+    sheet.append(["name", "value"])
+    sheet.append(["foo", 1])
+    workbook.save(watcher.WATCH_DIR / filename)
+
+    from webapp.main import _watcher_log
+
+    assert _wait_until(lambda: any(entry["filename"] == filename for entry in _watcher_log), timeout=6.0)
+
+    entry = next(e for e in _watcher_log if e["filename"] == filename)
+    assert "error" not in entry
+
+    json_artifacts = list(ingestion.ARTIFACTS_DIR.glob(f"*{filename.replace('.xlsx', '.json')}"))
+    assert len(json_artifacts) == 1
+
+    (watcher.WATCH_DIR / filename).unlink(missing_ok=True)
+    shutil.rmtree(ingestion.ARTIFACTS_DIR, ignore_errors=True)

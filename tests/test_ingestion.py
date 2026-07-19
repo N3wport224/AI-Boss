@@ -141,6 +141,65 @@ def test_ingest_json_rejects_malformed_content():
     assert "Could not parse JSON" in res.json()["detail"]
 
 
+def _build_xlsx_bytes(rows):
+    import io as _io
+
+    from openpyxl import Workbook
+
+    workbook = Workbook()
+    sheet = workbook.active
+    for row in rows:
+        sheet.append(row)
+    buffer = _io.BytesIO()
+    workbook.save(buffer)
+    return buffer.getvalue()
+
+
+def test_ingest_xlsx_returns_structured_records():
+    xlsx_bytes = _build_xlsx_bytes([["name", "revenue"], ["Acme", 1200], ["Beta", 3400]])
+    res = client.post(
+        "/api/ingest/xlsx",
+        files={"file": ("companies.xlsx", xlsx_bytes, "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")},
+    )
+    assert res.status_code == 200
+
+    body = res.json()
+    assert body["duplicate"] is False
+    assert body["row_count"] == 2
+    assert body["columns"] == ["name", "revenue"]
+    assert body["preview"] == [{"name": "Acme", "revenue": 1200}, {"name": "Beta", "revenue": 3400}]
+
+    # Same dual-artifact shape as CSV: the raw upload plus its JSON conversion.
+    saved_json = list(ingestion.ARTIFACTS_DIR.glob("*.json"))
+    assert len(saved_json) == 1
+    saved_xlsx = list(ingestion.ARTIFACTS_DIR.glob("*.xlsx"))
+    assert len(saved_xlsx) == 1
+
+
+def test_ingest_xlsx_skips_blank_rows():
+    xlsx_bytes = _build_xlsx_bytes([["name", "revenue"], ["Acme", 1200], [None, None], ["Beta", 3400]])
+    res = client.post("/api/ingest/xlsx", files={"file": ("blanks.xlsx", xlsx_bytes, "application/octet-stream")})
+    assert res.status_code == 200
+    assert res.json()["row_count"] == 2
+
+
+def test_ingest_xlsx_blocks_exact_duplicate_by_content_hash():
+    xlsx_bytes = _build_xlsx_bytes([["name"], ["Acme"]])
+    first = client.post("/api/ingest/xlsx", files={"file": ("a.xlsx", xlsx_bytes, "application/octet-stream")})
+    assert first.json()["duplicate"] is False
+
+    second = client.post("/api/ingest/xlsx", files={"file": ("b.xlsx", xlsx_bytes, "application/octet-stream")})
+    body = second.json()
+    assert body["duplicate"] is True
+    assert body["original_filename"] == "a.xlsx"
+
+
+def test_ingest_xlsx_rejects_unparseable_content():
+    res = client.post("/api/ingest/xlsx", files={"file": ("bad.xlsx", b"not a real xlsx file", "application/octet-stream")})
+    assert res.status_code == 400
+    assert "Could not parse XLSX" in res.json()["detail"]
+
+
 def test_ingest_pdf_extracts_text_and_dedupes():
     from pypdf import PdfWriter
     import io

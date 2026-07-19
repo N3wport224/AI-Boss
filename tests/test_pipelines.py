@@ -830,3 +830,112 @@ def test_import_under_an_existing_name_overwrites_it():
     matching = [p for p in listed if p["slug"] == "import_overwrite_target"]
     assert len(matching) == 1
     assert matching[0]["steps"][0]["inputs"]["signups"] == 555
+
+
+# ---- Pipeline version history: archive-on-overwrite, diff, restore ----
+
+def test_first_save_of_a_new_pipeline_creates_no_version():
+    client.post(
+        "/api/pipelines",
+        json={"name": "Fresh Pipeline", "steps": [{"tier": "automation", "name": "fetch_raw_metrics"}]},
+    )
+    res = client.get("/api/pipelines/fresh_pipeline/versions")
+    assert res.status_code == 200
+    assert res.json() == []
+
+
+def test_resaving_a_pipeline_archives_the_previous_definition():
+    client.post(
+        "/api/pipelines",
+        json={
+            "name": "Versioned Pipeline",
+            "steps": [{"tier": "automation", "name": "fetch_raw_metrics", "inputs": {"signups": 1, "churn": 1, "revenue": 1}}],
+        },
+    )
+    client.post(
+        "/api/pipelines",
+        json={
+            "name": "Versioned Pipeline",
+            "steps": [{"tier": "automation", "name": "fetch_raw_metrics", "inputs": {"signups": 2, "churn": 2, "revenue": 2}}],
+        },
+    )
+
+    versions = client.get("/api/pipelines/versioned_pipeline/versions").json()
+    assert len(versions) == 1
+    assert versions[0]["saved_at"]
+
+    version_detail = client.get(f"/api/pipelines/versioned_pipeline/versions/{versions[0]['version_id']}").json()
+    assert version_detail["version"]["steps"][0]["inputs"]["signups"] == 1  # the OLD value, archived pre-overwrite
+    assert "steps" in version_detail["diff"]  # current vs. archived differ on the steps key
+
+
+def test_saving_a_third_time_keeps_both_older_versions():
+    for signups in (1, 2, 3):
+        client.post(
+            "/api/pipelines",
+            json={
+                "name": "Triple Saved",
+                "steps": [{"tier": "automation", "name": "fetch_raw_metrics", "inputs": {"signups": signups, "churn": 1, "revenue": 1}}],
+            },
+        )
+    versions = client.get("/api/pipelines/triple_saved/versions").json()
+    assert len(versions) == 2  # the first two saves, not the current (3rd) one
+    # newest archived version first
+    saved_signups = [
+        client.get(f"/api/pipelines/triple_saved/versions/{v['version_id']}").json()["version"]["steps"][0]["inputs"]["signups"]
+        for v in versions
+    ]
+    assert saved_signups == [2, 1]
+
+
+def test_restore_pipeline_version_brings_back_the_old_definition():
+    client.post(
+        "/api/pipelines",
+        json={
+            "name": "Restore Target",
+            "steps": [{"tier": "automation", "name": "fetch_raw_metrics", "inputs": {"signups": 1, "churn": 1, "revenue": 1}}],
+        },
+    )
+    client.post(
+        "/api/pipelines",
+        json={
+            "name": "Restore Target",
+            "steps": [{"tier": "automation", "name": "fetch_raw_metrics", "inputs": {"signups": 999, "churn": 1, "revenue": 1}}],
+        },
+    )
+    old_version_id = client.get("/api/pipelines/restore_target/versions").json()[0]["version_id"]
+
+    res = client.post(f"/api/pipelines/restore_target/versions/{old_version_id}/restore")
+    assert res.status_code == 200
+    restored = res.json()["pipeline"]
+    assert restored["steps"][0]["inputs"]["signups"] == 1
+
+    current = client.get("/api/pipelines/restore_target/graph")  # loads current definition indirectly
+    assert current.status_code == 200
+
+    # restoring is itself undoable: the pre-restore (signups=999) definition
+    # is now archived as a new version
+    versions_after_restore = client.get("/api/pipelines/restore_target/versions").json()
+    assert len(versions_after_restore) == 2
+
+
+def test_pipeline_versions_for_unknown_slug_404s():
+    assert client.get("/api/pipelines/does_not_exist/versions").status_code == 404
+
+
+def test_get_unknown_pipeline_version_404s():
+    client.post(
+        "/api/pipelines",
+        json={"name": "No Versions Yet", "steps": [{"tier": "automation", "name": "fetch_raw_metrics"}]},
+    )
+    res = client.get("/api/pipelines/no_versions_yet/versions/20200101T000000000000")
+    assert res.status_code == 404
+
+
+def test_restore_unknown_pipeline_version_404s():
+    client.post(
+        "/api/pipelines",
+        json={"name": "No Versions To Restore", "steps": [{"tier": "automation", "name": "fetch_raw_metrics"}]},
+    )
+    res = client.post("/api/pipelines/no_versions_to_restore/versions/20200101T000000000000/restore")
+    assert res.status_code == 404

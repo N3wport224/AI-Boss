@@ -227,7 +227,7 @@ class Orchestrator:
                     had_failure = True
                     if self.stop_on_error:
                         if self.state_store:
-                            self.state_store.finish_run(run_id, "failed")
+                            self.state_store.finish_run(run_id, "failed", redact_secrets(context.blackboard.all()))
                         error = f"Parallel group '{step.name}' had a failing branch."
                         emit({"kind": "run_failed", "error": error, "context": redact_secrets(context.variables)})
                         raise RuntimeError(error)
@@ -284,7 +284,7 @@ class Orchestrator:
 
                 if self.stop_on_error:
                     if self.state_store:
-                        self.state_store.finish_run(run_id, "failed")
+                        self.state_store.finish_run(run_id, "failed", redact_secrets(context.blackboard.all()))
                     emit({"kind": "run_failed", "error": str(exc), "context": redact_secrets(context.variables)})
                     raise
                 continue
@@ -311,7 +311,9 @@ class Orchestrator:
             )
 
         if self.state_store:
-            self.state_store.finish_run(run_id, "failed" if had_failure else "completed")
+            self.state_store.finish_run(
+                run_id, "failed" if had_failure else "completed", redact_secrets(context.blackboard.all())
+            )
         emit(
             {
                 "kind": "run_failed" if had_failure else "run_completed",

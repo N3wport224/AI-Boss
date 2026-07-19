@@ -1,5 +1,5 @@
 from dataclasses import dataclass, field
-from datetime import datetime
+from datetime import datetime, timezone
 from typing import Any, Callable, Optional
 
 
@@ -62,6 +62,31 @@ class MemoryStore:
         return [{"key": k, "value": v} for k, v in self._fallback.items()]
 
 
+class Blackboard:
+    """A shared, run-scoped notes channel any agent-tier module can post to
+    during a run — exposed on `ExecutionContext` as `context.blackboard`.
+
+    Distinct from both `variables` (named context keys every tier reads and
+    writes as its actual inputs/outputs) and `memory` (persists across
+    separate runs). Where a handoff is point-to-point delegation between two
+    named agents (one agent writes a structured request another specific
+    agent reads), the blackboard is a broadcast channel: any agent can post
+    a free-form note, and any agent — now or later in the same run — can
+    read the whole board, without either side needing to know who else is
+    participating. Scoped to a single run; nothing here survives past it."""
+
+    def __init__(self):
+        self._entries: list[dict] = []
+
+    def post(self, author: str, note: str, **extra: Any) -> None:
+        entry = {"author": author, "note": note, "at": datetime.now(timezone.utc).isoformat()}
+        entry.update(extra)
+        self._entries.append(entry)
+
+    def all(self) -> list[dict]:
+        return list(self._entries)
+
+
 class ExecutionContext:
     """Shared state threaded through every module in a pipeline run.
 
@@ -86,6 +111,7 @@ class ExecutionContext:
         self.active_module: Optional[tuple[str, str]] = None
         self._on_event = on_event
         self.memory = MemoryStore(state_store)
+        self.blackboard = Blackboard()
 
     def get(self, key: str, default: Any = None) -> Any:
         return self.variables.get(key, default)

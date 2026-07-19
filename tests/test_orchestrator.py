@@ -519,3 +519,71 @@ def test_parallel_branch_step_record_captures_its_own_resolved_inputs():
     double_record = next(s for s in context.history if s.name == "double")
     assert echo_record.inputs["heard"] == "branch_a_value"
     assert double_record.inputs["value"] == 9
+
+
+# ---- Shared agent blackboard: a broadcast notes channel, distinct from
+# variables/memory/handoff, that any agent-tier module can post to and read ----
+
+def test_blackboard_post_and_all_preserve_order_and_extra_fields():
+    from engine.context import Blackboard
+
+    board = Blackboard()
+    board.post("agent_a", "first note")
+    board.post("agent_b", "second note", priority="high")
+
+    entries = board.all()
+    assert [e["author"] for e in entries] == ["agent_a", "agent_b"]
+    assert entries[0]["note"] == "first note"
+    assert entries[1]["priority"] == "high"
+    assert all("at" in e for e in entries)
+
+
+def test_blackboard_all_returns_a_copy_not_the_live_list():
+    from engine.context import Blackboard
+
+    board = Blackboard()
+    board.post("agent_a", "note")
+    snapshot = board.all()
+    snapshot.append({"author": "tampered", "note": "should not persist"})
+
+    assert len(board.all()) == 1
+
+
+class PostsToBlackboard(BaseModule):
+    name = "posts_to_blackboard"
+    tier = Tier.AGENT
+
+    def run(self, context: ExecutionContext) -> dict:
+        context.blackboard.post(self.name, "hello from posts_to_blackboard", api_key="sk-should-be-redacted")
+        return {}
+
+
+def test_orchestrator_persists_the_blackboard_onto_the_finished_run(tmp_path):
+    store = StateStore(str(tmp_path / "blackboard_test.db"))
+    Orchestrator([PostsToBlackboard()], state_store=store).run({})
+
+    run_id = store.recent_runs(limit=1)[0]["id"]
+    blackboard = store.get_run_blackboard(run_id)
+
+    assert len(blackboard) == 1
+    assert blackboard[0]["author"] == "posts_to_blackboard"
+    assert blackboard[0]["note"] == "hello from posts_to_blackboard"
+    # Secret-shaped extra fields are redacted the same way step outputs are —
+    # the blackboard is part of the persisted audit trail, not the live context.
+    assert blackboard[0]["api_key"] == "***REDACTED***"
+    store.close()
+
+
+def test_orchestrator_persists_an_empty_blackboard_when_no_module_posts(tmp_path):
+    store = StateStore(str(tmp_path / "blackboard_empty.db"))
+    Orchestrator([Double()], state_store=store).run({"value": 1})
+
+    run_id = store.recent_runs(limit=1)[0]["id"]
+    assert store.get_run_blackboard(run_id) == []
+    store.close()
+
+
+def test_get_run_blackboard_for_unknown_run_id_is_empty(tmp_path):
+    store = StateStore(str(tmp_path / "blackboard_unknown.db"))
+    assert store.get_run_blackboard(999999) == []
+    store.close()

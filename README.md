@@ -531,6 +531,34 @@ A few things live in the header/subheader on every page load:
   select-all checkbox) enable a "Delete selected" action, for pruning
   specific runs rather than everything older than a cutoff.
 
+## XLSX ingestion, pipeline versioning, and a shared agent blackboard
+
+- **XLSX ingestion** — upload (or drop into the folder watcher) an .xlsx
+  spreadsheet, not just CSV/PDF/JSON. The first sheet's row 1 becomes
+  headers; everything after gets the same auto-cleansing (trim/blank-row/
+  duplicate-row) a CSV upload already gets.
+- **Pipeline version history** — every time a saved pipeline is overwritten
+  (a builder re-save, or importing under an existing name), its previous
+  definition is archived. A **History** action on the pipeline card lists
+  past versions, shows a diff against the current definition, and can
+  restore an old version back to current — restoring is itself undoable,
+  since it archives the pre-restore definition on the way in.
+- **Global scheduler pause** — a **⏸ Pause all** / **▶ Resume all** toggle
+  in the Schedules section stops every schedule from firing for a
+  maintenance window, without touching any individual schedule's own
+  enabled/disabled state.
+- **Resource usage alert banner** — the existing CPU/memory ticker now
+  flags unusually high usage with a highlighted stat and a banner, so it's
+  noticeable without watching the numbers.
+- **Pipeline builder undo** — Ctrl/Cmd+Z or an **↶ Undo** button reverts
+  the last structural change (add/remove a step or branch, reorder, swap a
+  step's module) in the visual pipeline builder.
+- **Shared agent blackboard** — a second multi-agent collaboration pattern
+  alongside the handoff above: any agent in a run can post a free-form,
+  timestamped note any other agent can read, without either side needing
+  to know who else is participating. Shown as a **🗒 Shared Agent
+  Blackboard** section in a run's detail drill-down when notes exist.
+
 ## Tech stack
 
 - **Language:** Python 3.11+ — first-class async/sync support and native SDKs

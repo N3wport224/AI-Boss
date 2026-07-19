@@ -507,6 +507,21 @@ def test_run_detail_endpoint_includes_recorded_inputs():
     assert detail["steps"][0]["inputs"]["churn"] == 8
 
 
+def test_run_detail_endpoint_includes_an_empty_blackboard_when_nothing_was_posted():
+    res = client.post(
+        "/api/modules/automation/fetch_raw_metrics/run",
+        json={"inputs": {"signups": 5, "churn": 1, "revenue": 1}, "force_refresh": True},
+    )
+    with client.stream("GET", f"/api/stream/{res.json()['stream_id']}") as response:
+        for line in response.iter_lines():
+            if line.startswith("data: ") and '"run_completed"' in line:
+                break
+
+    run_id = client.get("/api/runs?limit=1").json()[0]["id"]
+    detail = client.get(f"/api/runs/{run_id}").json()
+    assert detail["blackboard"] == []
+
+
 def test_rerun_replays_a_single_module_run_with_its_recorded_inputs():
     res = client.post(
         "/api/modules/automation/fetch_raw_metrics/run",

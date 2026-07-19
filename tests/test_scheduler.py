@@ -68,6 +68,52 @@ def test_next_daily_run_at_rolls_to_tomorrow_when_time_already_passed():
     assert timedelta(hours=22, minutes=58) <= delta <= timedelta(hours=23, minutes=1)
 
 
+def test_scheduler_pause_stops_all_schedules_from_firing_regardless_of_their_own_enabled_state(tmp_path):
+    store = StateStore(str(tmp_path / "paused.db"))
+    calls = []
+    scheduler = Scheduler(store, trigger=lambda s: calls.append(s["id"]), poll_interval=0.05)
+
+    store.create_schedule(
+        kind="module", name="fake", interval_seconds=0.05,
+        next_run_at=datetime.now(timezone.utc).isoformat(), tier="automation", inputs={},
+    )
+    assert scheduler.paused is False
+
+    scheduler.pause()
+    assert scheduler.paused is True
+
+    scheduler.start()
+    time.sleep(0.3)
+    scheduler.stop()
+
+    assert calls == []  # the schedule is enabled and due, but the master pause wins
+    store.close()
+
+
+def test_scheduler_resume_lets_schedules_fire_again(tmp_path):
+    store = StateStore(str(tmp_path / "resumed.db"))
+    calls = []
+    scheduler = Scheduler(store, trigger=lambda s: calls.append(s["id"]), poll_interval=0.05)
+
+    store.create_schedule(
+        kind="module", name="fake", interval_seconds=0.05,
+        next_run_at=datetime.now(timezone.utc).isoformat(), tier="automation", inputs={},
+    )
+
+    scheduler.pause()
+    scheduler.start()
+    time.sleep(0.15)
+    assert calls == []
+
+    scheduler.resume()
+    assert scheduler.paused is False
+    time.sleep(0.3)
+    scheduler.stop()
+
+    assert len(calls) >= 1
+    store.close()
+
+
 def test_scheduler_reschedules_daily_schedule_about_24h_out(tmp_path):
     store = StateStore(str(tmp_path / "daily.db"))
     calls = []

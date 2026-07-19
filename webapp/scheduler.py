@@ -40,6 +40,19 @@ class Scheduler:
         self.poll_interval = poll_interval
         self._stop = threading.Event()
         self._thread: threading.Thread | None = None
+        # A master pause, distinct from any individual schedule's own
+        # `enabled` flag — for a maintenance window where nothing should
+        # fire regardless of what each schedule is otherwise set to, without
+        # touching (and having to remember to restore) every schedule's own
+        # enabled state. In-memory only, like `poll_interval` — resets to
+        # unpaused on a server restart.
+        self.paused = False
+
+    def pause(self) -> None:
+        self.paused = True
+
+    def resume(self) -> None:
+        self.paused = False
 
     def start(self) -> None:
         if self._thread is not None:
@@ -56,6 +69,8 @@ class Scheduler:
             self._stop.wait(self.poll_interval)
 
     def _tick(self) -> None:
+        if self.paused:
+            return
         now = datetime.now(timezone.utc)
         for schedule in self.state_store.due_schedules(now.isoformat()):
             try:

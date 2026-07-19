@@ -54,6 +54,7 @@
       <span>Up <strong id="perf-uptime">–</strong></span>
     </div>
   </div>
+  <div id="resource-warning-banner" class="resource-warning-banner hidden"></div>
 
   <main id="app">
     <section class="builder-section">
@@ -93,6 +94,7 @@
         </p>
         <button id="builder-add-step" class="btn btn-run" type="button">+ Add Step</button>
         <button id="builder-add-group" class="btn btn-run" type="button" title="Add a slot whose branches run concurrently">+ Add Parallel Group</button>
+        <button id="builder-undo" class="btn btn-secondary" type="button" title="Undo the last add/remove/reorder/module-swap (Ctrl/Cmd+Z)" disabled>↶ Undo</button>
 
         <p id="builder-error" class="builder-error hidden"></p>
 
@@ -115,9 +117,9 @@
       </div>
       <div class="ingestion-panel">
         <div id="dropzone" class="dropzone">
-          <p>Drag &amp; drop a CSV, PDF, or JSON file here, or</p>
+          <p>Drag &amp; drop a CSV, PDF, JSON, or XLSX file here, or</p>
           <label class="btn btn-secondary btn-small" for="file-input">Choose file</label>
-          <input type="file" id="file-input" accept=".csv,.pdf,.json" hidden />
+          <input type="file" id="file-input" accept=".csv,.pdf,.json,.xlsx" hidden />
         </div>
         <div id="ingestion-result" class="log-tabs-wrap hidden"></div>
 
@@ -138,7 +140,7 @@
         <div class="artifacts-row">
           <h4>Folder Watcher</h4>
           <p class="card-desc watcher-hint">
-            Drop a .csv, .pdf, or .json file into <code id="watch-dir-path">watched_input/</code> — it's ingested automatically, no click needed.
+            Drop a .csv, .pdf, .json, or .xlsx file into <code id="watch-dir-path">watched_input/</code> — it's ingested automatically, no click needed.
           </p>
         </div>
         <div id="watcher-feed" class="runs-empty">No files auto-processed yet.</div>
@@ -172,9 +174,13 @@
         <span class="bar"></span>
         <h2>Schedules</h2>
         <div class="tier-heading-actions">
+          <button id="scheduler-pause-toggle" class="btn btn-secondary btn-small" type="button">⏸ Pause all</button>
           <button id="schedule-add-toggle" class="btn btn-secondary btn-small" type="button">+ Add Schedule</button>
           <button class="collapse-toggle" type="button" data-collapse-key="schedules">▾</button>
         </div>
+      </div>
+      <div id="scheduler-paused-banner" class="scheduler-paused-banner hidden">
+        ⏸ Scheduler paused globally — no schedule will fire until resumed, regardless of its own status.
       </div>
       <div id="schedule-form" class="schedule-form hidden">
         <div class="form-fields">
