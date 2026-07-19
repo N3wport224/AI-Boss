@@ -1118,6 +1118,70 @@ def test_saving_a_third_time_keeps_both_older_versions():
     assert saved_signups == [2, 1]
 
 
+def test_prune_pipeline_versions_keeps_only_the_latest_n():
+    for signups in (1, 2, 3, 4):
+        client.post(
+            "/api/pipelines",
+            json={
+                "name": "Prune Me",
+                "steps": [{"tier": "automation", "name": "fetch_raw_metrics", "inputs": {"signups": signups, "churn": 1, "revenue": 1}}],
+            },
+        )
+    versions_before = client.get("/api/pipelines/prune_me/versions").json()
+    assert len(versions_before) == 3  # saves 1-3 archived, save 4 is current
+
+    res = client.post("/api/pipelines/prune_me/versions/prune", params={"keep": 1})
+    assert res.status_code == 200
+    assert res.json()["deleted"] == 2
+
+    versions_after = client.get("/api/pipelines/prune_me/versions").json()
+    assert len(versions_after) == 1
+    assert versions_after[0]["version_id"] == versions_before[0]["version_id"]  # kept the newest
+
+
+def test_prune_pipeline_versions_defaults_to_keeping_five():
+    for signups in range(1, 8):
+        client.post(
+            "/api/pipelines",
+            json={
+                "name": "Prune Default",
+                "steps": [{"tier": "automation", "name": "fetch_raw_metrics", "inputs": {"signups": signups, "churn": 1, "revenue": 1}}],
+            },
+        )
+    versions_before = client.get("/api/pipelines/prune_default/versions").json()
+    assert len(versions_before) == 6
+
+    res = client.post("/api/pipelines/prune_default/versions/prune")
+    assert res.status_code == 200
+    assert res.json()["deleted"] == 1
+
+    assert len(client.get("/api/pipelines/prune_default/versions").json()) == 5
+
+
+def test_prune_pipeline_versions_is_a_no_op_when_under_the_keep_count():
+    client.post(
+        "/api/pipelines",
+        json={"name": "Prune Sparse", "steps": [{"tier": "automation", "name": "fetch_raw_metrics"}]},
+    )
+    res = client.post("/api/pipelines/prune_sparse/versions/prune", params={"keep": 5})
+    assert res.status_code == 200
+    assert res.json()["deleted"] == 0
+
+
+def test_prune_pipeline_versions_rejects_a_negative_keep():
+    client.post(
+        "/api/pipelines",
+        json={"name": "Prune Negative", "steps": [{"tier": "automation", "name": "fetch_raw_metrics"}]},
+    )
+    res = client.post("/api/pipelines/prune_negative/versions/prune", params={"keep": -1})
+    assert res.status_code == 400
+
+
+def test_prune_pipeline_versions_for_unknown_slug_404s():
+    res = client.post("/api/pipelines/does_not_exist/versions/prune")
+    assert res.status_code == 404
+
+
 def test_compare_two_pipeline_versions_reports_differing_steps():
     for signups in (1, 2, 3):
         client.post(

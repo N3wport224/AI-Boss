@@ -574,6 +574,47 @@ def test_rename_unknown_pipeline_404s():
     assert res.status_code == 404
 
 
+def test_bulk_tag_pipelines_adds_the_tag_to_every_selected_pipeline():
+    client.post(
+        "/api/pipelines",
+        json={"name": "Bulk Tag A", "steps": [{"tier": "automation", "name": "fetch_raw_metrics"}]},
+    )
+    client.post(
+        "/api/pipelines",
+        json={"name": "Bulk Tag B", "steps": [{"tier": "automation", "name": "fetch_raw_metrics"}]},
+    )
+    client.put("/api/pipelines/bulk_tag_a/tags", json={"tags": ["existing"]})
+
+    res = client.post("/api/pipelines/bulk-tags", json={"slugs": ["bulk_tag_a", "bulk_tag_b"], "tag": "new_tag"})
+    assert res.status_code == 200
+    body = res.json()
+    assert body["tag"] == "new_tag"
+    assert set(body["tagged"]) == {"bulk_tag_a", "bulk_tag_b"}
+
+    updated = {p["slug"]: p for p in client.get("/api/pipelines").json()}
+    assert set(updated["bulk_tag_a"]["tags"]) == {"existing", "new_tag"}
+    assert updated["bulk_tag_b"]["tags"] == ["new_tag"]
+
+
+def test_bulk_tag_pipelines_skips_unknown_slugs_without_failing():
+    client.post(
+        "/api/pipelines",
+        json={"name": "Bulk Tag C", "steps": [{"tier": "automation", "name": "fetch_raw_metrics"}]},
+    )
+
+    res = client.post(
+        "/api/pipelines/bulk-tags",
+        json={"slugs": ["bulk_tag_c", "totally_made_up_slug"], "tag": "whatever"},
+    )
+    assert res.status_code == 200
+    assert res.json()["tagged"] == ["bulk_tag_c"]
+
+
+def test_bulk_tag_pipelines_rejects_a_blank_tag():
+    res = client.post("/api/pipelines/bulk-tags", json={"slugs": [], "tag": "   "})
+    assert res.status_code == 400
+
+
 def test_bulk_untag_pipelines_removes_the_tag_but_keeps_other_tags():
     client.post(
         "/api/pipelines",

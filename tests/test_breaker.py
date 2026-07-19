@@ -142,6 +142,45 @@ def test_reset_endpoint_reopens_the_module_for_runs():
     _collect_stream(accepted.json()["stream_id"])
 
 
+def test_bulk_reset_breakers_reopens_every_selected_module():
+    for _ in range(3):
+        _fail_http_request_once()
+    store.record_module_failure("automation", "fetch_raw_metrics", 3)
+    assert store.get_module_health("automation", "http_request")["tripped"] is True
+    assert store.get_module_health("automation", "fetch_raw_metrics")["consecutive_failures"] == 1
+
+    res = client.post(
+        "/api/breakers/bulk-reset",
+        json={
+            "modules": [
+                {"tier": "automation", "name": "http_request"},
+                {"tier": "automation", "name": "fetch_raw_metrics"},
+            ]
+        },
+    )
+    assert res.status_code == 200
+    body = res.json()
+    assert len(body["reset"]) == 2
+
+    assert store.get_module_health("automation", "http_request")["tripped"] is False
+    assert store.get_module_health("automation", "fetch_raw_metrics")["consecutive_failures"] == 0
+
+
+def test_bulk_reset_breakers_skips_an_unknown_module():
+    res = client.post(
+        "/api/breakers/bulk-reset",
+        json={"modules": [{"tier": "automation", "name": "http_request"}, {"tier": "automation", "name": "does_not_exist"}]},
+    )
+    assert res.status_code == 200
+    assert res.json()["reset"] == [{"tier": "automation", "name": "http_request"}]
+
+
+def test_bulk_reset_breakers_is_a_no_op_on_an_empty_selection():
+    res = client.post("/api/breakers/bulk-reset", json={"modules": []})
+    assert res.status_code == 200
+    assert res.json() == {"reset": []}
+
+
 def test_breakers_listing_reports_failure_counts_below_threshold():
     _fail_http_request_once()
 

@@ -737,6 +737,18 @@ class StateStore:
             ).fetchall()
         return [{"id": r[0], "action": r[1], "detail": r[2], "created_at": r[3]} for r in rows]
 
+    def clear_audit_log(self) -> int:
+        """Delete every audit log entry -- a manual reset, mirroring
+        clear_read_notifications()/clear_favorites() elsewhere in this
+        store. There's no age-based or read/unread distinction for audit
+        events the way there is for notifications, so this clears
+        unconditionally rather than a filtered subset. Returns the number
+        of rows deleted."""
+        with self._lock:
+            cur = self._conn.execute("DELETE FROM audit_log")
+            self._conn.commit()
+        return cur.rowcount
+
     _SCHEDULE_COLUMNS = (
         "id", "kind", "tier", "name", "inputs", "interval_seconds",
         "enabled", "next_run_at", "last_run_at", "last_status", "created_at",

@@ -207,3 +207,21 @@ def test_search_audit_log_returns_empty_for_a_blank_query():
 def test_search_audit_log_finds_nothing_for_an_unmatched_keyword():
     res = client.get("/api/audit-log/search", params={"q": "zzz_never_used_audit_action_zzz"})
     assert res.json()["results"] == []
+
+
+def test_clear_audit_log_deletes_every_entry():
+    client.post("/api/artifacts/purge", params={"older_than_hours": 999999})
+    assert client.get("/api/audit-log").json()
+
+    res = client.post("/api/audit-log/clear")
+    assert res.status_code == 200
+    assert res.json()["deleted"] > 0
+
+    assert client.get("/api/audit-log").json() == []
+
+
+def test_clear_audit_log_is_a_no_op_when_already_empty():
+    client.post("/api/audit-log/clear")
+    res = client.post("/api/audit-log/clear")
+    assert res.status_code == 200
+    assert res.json() == {"deleted": 0}

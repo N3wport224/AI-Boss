@@ -2063,6 +2063,77 @@ only a JSON parse error or timeout falls back to an empty issue list.
      in the listing; checking the "Show only disabled / tripped" toggle
      and confirming only the just-disabled module stayed visible while
      every healthy module in every tier was hidden.
+177. **Add bulk-adding a tag to selected saved pipelines**
+     (`POST /api/pipelines/bulk-tags` -- the pipeline counterpart to
+     `POST /api/artifacts/bulk-tags`: adds one tag to every selected
+     pipeline's existing tag set via `store.all_pipeline_tags()` +
+     `set_pipeline_tags()`, same as typing into a pipeline's own '+ tag'
+     field just applied to a whole selection; an unknown slug is skipped
+     rather than failing the batch). An **Apply tag to selected** input
+     and button sit next to the existing bulk-untag controls in the
+     Saved Pipelines toolbar, completing tag parity between artifacts
+     and pipelines.
+178. **Add bulk circuit breaker resets for modules**
+     (`POST /api/breakers/bulk-reset` -- accepts a list of `{tier, name}`
+     refs and calls the same `store.reset_breaker()` used by the
+     single-module reset for each one; an unknown tier/name is skipped
+     rather than failing the whole batch. The shared `ModuleRef` Pydantic
+     model, previously defined only where bulk-enable/disable needed it,
+     was moved earlier in the file so this route -- which sits before
+     that one -- could reuse it instead of duplicating the class). A
+     **Reset breakers for selected** button sits next to **Enable
+     selected**/**Disable selected** above the Modules directory, reusing
+     the exact same `selectedModuleRefs` checkbox selection built for
+     bulk enable/disable in Batch 22 -- pairs naturally with the "show
+     only disabled/tripped" filter: spot the problem modules, then
+     bulk-select and clear them.
+179. **Add clearing the audit log**
+     (`StateStore.clear_audit_log()` -- an unconditional `DELETE FROM
+     audit_log`, mirroring `clear_read_notifications()`'s reset pattern
+     but with no read/unread or age-based filter, since the audit log has
+     no such distinction. `POST /api/audit-log/clear` doesn't log its own
+     action, the same convention `clear_read_notifications()` follows --
+     a reset control isn't itself a destructive/administrative action
+     worth recording). A **Clear** button (with a confirm prompt) sits
+     next to the existing **Export CSV**/**Refresh** buttons in the
+     Recent Actions heading.
+180. **Add pipeline version history retention/pruning**
+     (`pipeline_store.prune_pipeline_versions(slug, keep)` -- deletes a
+     single pipeline's oldest archived version files, keeping only the
+     `keep` most recent by sorting `_versions/<slug>/*.yaml` newest-first
+     and unlinking everything past that cutoff; per-pipeline and
+     count-based, unlike `StateStore.prune_runs()`'s global age-based
+     sweep, since different pipelines accumulate version history at very
+     different rates. `POST /api/pipelines/{slug}/versions/prune?keep=N`
+     -- a POST route, so unlike the run-detail `.json`-suffix case
+     elsewhere in this app, it doesn't collide with the GET
+     `.../versions/{version_id}` route at the same path depth; FastAPI
+     dispatches by method first, so literal-vs-dynamic ordering only
+     matters within one HTTP method). A "Keep latest N" number input and
+     **Prune older versions** button (with a confirm prompt) sit at the
+     top of each pipeline's History panel, right below the
+     version-compare bar.
+181. **Add tests for all of Batch 23**: bulk-tagging pipelines applies a
+     tag to every selection while preserving existing tags, and skips
+     unknown slugs; bulk-resetting breakers reopens every selected
+     module and clears its consecutive-failure count, and skips an
+     unknown module; clearing the audit log deletes every entry and is a
+     no-op when already empty; pruning pipeline versions keeps only the
+     newest N, defaults to keeping 5, is a no-op when already under the
+     keep count, rejects a negative keep, and 404s for an unknown slug.
+     528 tests total, stable across repeated clean full-suite runs.
+     Live-verified end to end with Playwright against a freshly started
+     server: checkbox-selecting a pipeline and using **Apply tag to
+     selected** confirmed the tag landed in `GET /api/pipelines`;
+     tripping the `http_request` circuit breaker with three consecutive
+     failed runs against an unreachable URL, then checkbox-selecting it
+     and clicking **Reset breakers for selected** confirmed
+     `breaker.tripped` flipped back to `false`; clicking **Clear** on the
+     audit log (confirming the dialog) emptied `GET /api/audit-log`
+     entirely; saving a pipeline four times to accumulate three archived
+     versions, then opening its History panel, setting "Keep latest" to
+     1, and clicking **Prune older versions** (confirming the dialog)
+     left exactly one version behind.
 
 ## 9. Roadmap
 

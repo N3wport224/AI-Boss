@@ -744,6 +744,11 @@ def run_pipeline(payload: RunRequest, http_request: Request):
     return {"stream_id": stream_id}
 
 
+class ModuleRef(BaseModel):
+    tier: str
+    name: str
+
+
 @app.get("/api/breakers")
 def list_breakers():
     """Every module the breaker has ever seen fail (or succeed after failing) —
@@ -757,6 +762,32 @@ def reset_module_breaker(tier: str, name: str):
     result = store.reset_breaker(tier, name)
     store.record_audit_event("circuit_breaker_reset", f"Reset circuit breaker for {tier}/{name}.")
     return result
+
+
+class BulkResetBreakers(BaseModel):
+    modules: list[ModuleRef]
+
+
+@app.post("/api/breakers/bulk-reset")
+def bulk_reset_breakers(payload: BulkResetBreakers):
+    """Reset the circuit breaker for a user-picked set of modules in one
+    action -- the finer-grained counterpart to resetting
+    POST /api/breakers/{tier}/{name}/reset one at a time, mirroring the
+    existing bulk pattern already built for schedules/artifacts/modules.
+    A ref naming a tier/name that doesn't exist is skipped rather than
+    failing the whole batch."""
+    reset = []
+    for ref in payload.modules:
+        try:
+            _manifest_by_name(ref.tier, ref.name)
+        except HTTPException:
+            continue
+        store.reset_breaker(ref.tier, ref.name)
+        reset.append({"tier": ref.tier, "name": ref.name})
+    store.record_audit_event(
+        "circuit_breaker_bulk_reset", f"Reset circuit breaker for {len(reset)} selected module(s): {reset}."
+    )
+    return {"reset": reset}
 
 
 class BreakerThresholdUpdate(BaseModel):
@@ -799,11 +830,6 @@ def set_module_enabled(tier: str, name: str, payload: ModuleEnabledUpdate):
     _manifest_by_name(tier, name)  # 404 for a module that doesn't exist
     store.set_module_enabled(tier, name, payload.enabled)
     return {"tier": tier, "name": name, "runtime_enabled": payload.enabled}
-
-
-class ModuleRef(BaseModel):
-    tier: str
-    name: str
 
 
 class BulkSetModulesEnabled(BaseModel):
@@ -1215,6 +1241,39 @@ def set_pipeline_tags(slug: str, payload: PipelineTagsUpdate):
     return {"slug": slug, "tags": store.set_pipeline_tags(slug, cleaned)}
 
 
+class PipelineBulkTag(BaseModel):
+    slugs: list[str]
+    tag: str
+
+
+@app.post("/api/pipelines/bulk-tags")
+def bulk_tag_pipelines(payload: PipelineBulkTag):
+    """Add one tag to every selected saved pipeline at once -- the pipeline
+    counterpart to POST /api/artifacts/bulk-tags: adds to whatever tags a
+    pipeline already has, same as typing into its own '+ tag' field, just
+    applied to a whole selection instead of one pipeline at a time. An
+    unknown slug is skipped rather than failing the whole batch."""
+    tag = payload.tag.strip()
+    if not tag:
+        raise HTTPException(status_code=400, detail="A tag is required.")
+
+    existing_tags = store.all_pipeline_tags()
+    tagged = []
+    for slug in payload.slugs:
+        try:
+            pipeline_store.load_pipeline(slug)
+        except FileNotFoundError:
+            continue
+        current = set(existing_tags.get(slug, []))
+        current.add(tag)
+        store.set_pipeline_tags(slug, sorted(current))
+        tagged.append(slug)
+    store.record_audit_event(
+        "pipeline_bulk_tag", f"Added tag '{tag}' to {len(tagged)} selected pipeline(s): {tagged}."
+    )
+    return {"tag": tag, "tagged": tagged}
+
+
 class PipelineBulkUntag(BaseModel):
     slugs: list[str]
     tag: str
@@ -1304,6 +1363,28 @@ def list_pipeline_versions(slug: str):
         except FileNotFoundError:
             raise HTTPException(status_code=404, detail=f"No saved pipeline named '{slug}'.")
     return versions
+
+
+@app.post("/api/pipelines/{slug}/versions/prune")
+def prune_pipeline_versions(slug: str, keep: int = 5):
+    """Delete a pipeline's oldest archived versions, keeping only the most
+    recent `keep`. A POST route, so it doesn't collide with the GET
+    .../versions/{version_id} route at the same path depth -- FastAPI
+    dispatches by method first, so a literal-vs-dynamic segment only
+    needs ordering care within the *same* HTTP method (see the
+    run-detail .json route elsewhere in this file for that case)."""
+    if keep < 0:
+        raise HTTPException(status_code=400, detail="keep must be zero or greater.")
+    try:
+        pipeline_store.load_pipeline(slug)
+    except FileNotFoundError:
+        if not pipeline_store.list_pipeline_versions(slug):
+            raise HTTPException(status_code=404, detail=f"No saved pipeline named '{slug}'.")
+    deleted = pipeline_store.prune_pipeline_versions(slug, keep)
+    store.record_audit_event(
+        "pipeline_version_prune", f"Pruned {deleted} old version(s) of pipeline '{slug}', keeping the latest {keep}."
+    )
+    return {"deleted": deleted}
 
 
 @app.get("/api/pipelines/{slug}/versions/{version_id}")
@@ -1901,6 +1982,17 @@ def list_audit_log(limit: int = 50):
 @app.get("/api/audit-log/search")
 def search_audit_log(q: str = ""):
     return {"query": q, "results": store.search_audit_events(q)}
+
+
+@app.post("/api/audit-log/clear")
+def clear_audit_log():
+    """Delete every audit log entry -- a manual reset for when the trail has
+    grown long and isn't worth keeping, mirroring the existing 'clear all
+    read notifications'/'clear all favorites' controls. Unlike those, this
+    isn't filtered to a read/unread or age-based subset since the audit
+    log has no such distinction -- it's everything or nothing."""
+    deleted = store.clear_audit_log()
+    return {"deleted": deleted}
 
 
 @app.get("/api/audit-log.csv")

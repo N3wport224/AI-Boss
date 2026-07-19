@@ -225,6 +225,25 @@ def list_pipeline_versions(slug: str) -> list[dict]:
     return versions
 
 
+def prune_pipeline_versions(slug: str, keep: int) -> int:
+    """Delete a single pipeline's oldest archived versions, keeping only the
+    `keep` most recent -- mirrors StateStore.prune_runs()'s retention
+    concept, but per-pipeline and count-based rather than global and
+    age-based, since version history for one specific pipeline is what a
+    user actually wants to trim (some pipelines get revised constantly,
+    others never). A no-op if there's no versions directory yet, or if
+    there are `keep` or fewer versions already. Returns how many were
+    deleted."""
+    versions_dir = _versions_dir(slug)
+    if not versions_dir.exists():
+        return 0
+    version_paths = sorted(versions_dir.glob("*.yaml"), reverse=True)
+    to_delete = version_paths[keep:] if keep > 0 else version_paths
+    for path in to_delete:
+        path.unlink()
+    return len(to_delete)
+
+
 def load_pipeline_version(slug: str, version_id: str) -> dict:
     version_path = _versions_dir(slug) / f"{version_id}.yaml"
     if not version_path.exists():

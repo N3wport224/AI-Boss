@@ -36,6 +36,7 @@ const selectedModuleRefs = new Set();
 const modulesSelectAllEl = document.getElementById("modules-select-all");
 const modulesBulkEnableBtn = document.getElementById("modules-bulk-enable-btn");
 const modulesBulkDisableBtn = document.getElementById("modules-bulk-disable-btn");
+const modulesBulkResetBreakerBtn = document.getElementById("modules-bulk-reset-breaker-btn");
 const modulesProblemsFilterEl = document.getElementById("modules-problems-filter");
 const pipelineResultEl = document.getElementById("pipeline-result");
 const runPipelineBtn = document.getElementById("run-pipeline-btn");
@@ -96,6 +97,8 @@ const pipelinesBulkDeleteBtn = document.getElementById("pipelines-bulk-delete-bt
 const pipelinesSelectAllEl = document.getElementById("pipelines-select-all");
 const pipelinesBulkUntagInput = document.getElementById("pipelines-bulk-untag-input");
 const pipelinesBulkUntagBtn = document.getElementById("pipelines-bulk-untag-btn");
+const pipelinesBulkTagInput = document.getElementById("pipelines-bulk-tag-input");
+const pipelinesBulkTagBtn = document.getElementById("pipelines-bulk-tag-btn");
 
 const selectedPipelineSlugs = new Set();
 
@@ -108,7 +111,38 @@ function updatePipelinesBulkDeleteBtn() {
   pipelinesBulkUntagBtn.textContent = selectedPipelineSlugs.size
     ? `Remove tag from selected (${selectedPipelineSlugs.size})`
     : "Remove tag from selected";
+  pipelinesBulkTagBtn.disabled = selectedPipelineSlugs.size === 0;
+  pipelinesBulkTagBtn.textContent = selectedPipelineSlugs.size
+    ? `Apply tag to selected (${selectedPipelineSlugs.size})`
+    : "Apply tag to selected";
 }
+
+pipelinesBulkTagBtn.addEventListener("click", async () => {
+  const tag = pipelinesBulkTagInput.value.trim();
+  if (!tag) {
+    showToast("Enter a tag first.", "error");
+    return;
+  }
+  if (!selectedPipelineSlugs.size) return;
+
+  try {
+    const res = await fetch("/api/pipelines/bulk-tags", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ slugs: [...selectedPipelineSlugs], tag }),
+    });
+    const body = await res.json();
+    if (!res.ok) {
+      showToast(body.detail || "Failed to apply tag.", "error");
+      return;
+    }
+    showToast(`Applied "${tag}" to ${body.tagged.length} pipeline(s).`, "success");
+    pipelinesBulkTagInput.value = "";
+    await loadSavedPipelines();
+  } catch (err) {
+    showToast(`Bulk tag failed: ${err}`, "error");
+  }
+});
 
 pipelinesBulkUntagBtn.addEventListener("click", async () => {
   const tag = pipelinesBulkUntagInput.value.trim();
@@ -2048,9 +2082,11 @@ function updateModulesBulkButtons() {
   const disabled = selectedModuleRefs.size === 0;
   modulesBulkEnableBtn.disabled = disabled;
   modulesBulkDisableBtn.disabled = disabled;
+  modulesBulkResetBreakerBtn.disabled = disabled;
   const suffix = selectedModuleRefs.size ? ` (${selectedModuleRefs.size})` : "";
   modulesBulkEnableBtn.textContent = `Enable selected${suffix}`;
   modulesBulkDisableBtn.textContent = `Disable selected${suffix}`;
+  modulesBulkResetBreakerBtn.textContent = `Reset breakers for selected${suffix}`;
 }
 
 function wireModuleSelectCheckboxes() {
@@ -2103,6 +2139,22 @@ async function bulkSetSelectedModulesEnabled(enabled) {
 
 modulesBulkEnableBtn.addEventListener("click", () => bulkSetSelectedModulesEnabled(true));
 modulesBulkDisableBtn.addEventListener("click", () => bulkSetSelectedModulesEnabled(false));
+
+modulesBulkResetBreakerBtn.addEventListener("click", async () => {
+  if (!selectedModuleRefs.size) return;
+  const modules = [...selectedModuleRefs].map((ref) => {
+    const [tier, name] = ref.split("::");
+    return { tier, name };
+  });
+  await fetch("/api/breakers/bulk-reset", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ modules }),
+  });
+  showToast(`Reset ${modules.length} circuit breaker(s).`, "success");
+  selectedModuleRefs.clear();
+  await loadModules();
+});
 
 function applyModulesProblemsFilter() {
   const onlyProblems = modulesProblemsFilterEl.checked;
@@ -3709,10 +3761,39 @@ function renderPipelineHistory(slug, panel, versions) {
       <button class="btn btn-secondary btn-small" id="version-compare-btn-${slug}" type="button" disabled>Compare selected</button>
     </div>
     <div class="version-compare-result" id="version-compare-result-${slug}"></div>
+    <div class="version-prune-bar">
+      <label class="schedule-row-meta" for="version-prune-keep-${slug}">Keep latest</label>
+      <input type="number" id="version-prune-keep-${slug}" min="0" step="1" value="5" style="width: 4em;" />
+      <button class="btn btn-secondary btn-small" id="version-prune-btn-${slug}" type="button" title="Delete older archived versions of this pipeline, keeping only the newest N">Prune older versions</button>
+    </div>
     <div class="version-history-list">${rows}</div>`;
 
   const compareBtn = panel.querySelector(`#version-compare-btn-${slug}`);
   const compareResultEl = panel.querySelector(`#version-compare-result-${slug}`);
+  const pruneKeepInput = panel.querySelector(`#version-prune-keep-${slug}`);
+  const pruneBtn = panel.querySelector(`#version-prune-btn-${slug}`);
+
+  pruneBtn.addEventListener("click", async () => {
+    const keep = Number(pruneKeepInput.value);
+    if (!Number.isInteger(keep) || keep < 0) {
+      showToast("Enter a whole number of versions to keep.", "error");
+      return;
+    }
+    if (!confirm(`Delete every archived version of this pipeline older than the newest ${keep}? This cannot be undone.`)) return;
+    try {
+      const res = await fetch(`/api/pipelines/${slug}/versions/prune?keep=${keep}`, { method: "POST" });
+      const body = await res.json();
+      if (!res.ok) {
+        showToast(body.detail || "Failed to prune version history.", "error");
+        return;
+      }
+      showToast(`Pruned ${body.deleted} old version(s).`, "success");
+      const refreshed = await fetch(`/api/pipelines/${slug}/versions`);
+      renderPipelineHistory(slug, panel, await refreshed.json());
+    } catch (err) {
+      showToast(`Prune failed: ${err}`, "error");
+    }
+  });
 
   panel.querySelectorAll(".version-compare-checkbox").forEach((checkbox) => {
     checkbox.addEventListener("change", () => {
@@ -5349,6 +5430,7 @@ envRefreshBtn.addEventListener("click", async () => {
 
 const auditLogListEl = document.getElementById("audit-log-list");
 const auditLogRefreshBtn = document.getElementById("audit-log-refresh-btn");
+const auditLogClearBtn = document.getElementById("audit-log-clear-btn");
 
 const AUDIT_ACTION_LABELS = {
   run_purge: "Run purge",
@@ -5413,6 +5495,14 @@ auditLogSearchInput.addEventListener("input", () => {
 auditLogRefreshBtn.addEventListener("click", async () => {
   await loadAuditLog();
   showToast("Recent actions refreshed.", "success");
+});
+
+auditLogClearBtn.addEventListener("click", async () => {
+  if (!confirm("Clear the entire Recent Actions audit log? This cannot be undone.")) return;
+  const res = await fetch("/api/audit-log/clear", { method: "POST" });
+  const body = await res.json();
+  showToast(`Cleared ${body.deleted} audit log entr${body.deleted === 1 ? "y" : "ies"}.`, "success");
+  await loadAuditLog();
 });
 
 // ---- Regex tester ----

@@ -822,6 +822,23 @@ A few things live in the header/subheader on every page load:
   Modules directory narrows every tier down to just the modules that
   need attention, pairing naturally with bulk enable/disable.
 
+## Bulk pipeline tagging, bulk breaker resets, an audit log reset, and version pruning
+
+- **Bulk-add a tag to selected saved pipelines** — the counterpart to
+  bulk-removing a tag: checkbox-select multiple saved pipelines and
+  apply one tag to all of them at once.
+- **Bulk reset circuit breakers** — checkbox-select modules across every
+  tier and reset their circuit breakers in one click, pairing with the
+  "show only disabled / tripped" filter to spot and clear problem
+  modules together.
+- **Clear the audit log** — a **Clear** button next to the Recent
+  Actions heading empties the administrative-action history in one
+  action, mirroring the existing clear-all controls for notifications
+  and favorites.
+- **Pipeline version history pruning** — a "Keep latest N" control in
+  each pipeline's History panel deletes its older archived versions,
+  keeping only the most recent ones.
+
 ## Tech stack
 
 - **Language:** Python 3.11+ — first-class async/sync support and native SDKs
