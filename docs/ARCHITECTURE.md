@@ -1443,6 +1443,90 @@ only a JSON parse error or timeout falls back to an empty issue list.
      `orchestrator.db` before every pytest invocation, not just before a
      commit) rather than any application code. 385 tests total, stable
      across repeated clean full-suite runs.
+121. **Add step duplication in the pipeline builder** (frontend-only, no
+     backend change — `duplicateBuilderStep(index)` in `webapp/static/app.js`
+     deep-clones the step or parallel group at `index` (sharing the read-only
+     `module` descriptor object by reference, deep-copying `fieldSources`/
+     `condition`/`retry`/`note` via a JSON round trip) and splices it in at
+     `index + 1`, then bumps every later mapping's `source.step` that pointed
+     past the insertion point — the mirror image of `removeBuilderStep`'s own
+     index bookkeeping. A **⧉** button added to `stepControlsHtml()` next to
+     the existing move-up/move-down/remove controls. Verified only through
+     Playwright, matching the precedent set by the builder-undo feature
+     (also pure frontend state, also never pytest-covered).
+122. **Add weekly (day-of-week + time) scheduling** (`day_of_week` column on
+     `schedules` — nullable INTEGER, 0=Monday..6=Sunday to match
+     `datetime.weekday()` — added via the same `_migrate_locked()` pattern as
+     `daily_time`; `next_weekly_run_at(day_of_week, daily_time, after)` in
+     `webapp/scheduler.py`, alongside the existing `next_daily_run_at()`,
+     reusing its own local-time-then-convert-to-UTC approach and adding a
+     `(day_of_week - candidate.weekday()) % 7` day offset before the
+     already-passed-today rollover check; `Scheduler._tick()` branches on
+     `schedule_type == "weekly"`; `POST /api/schedules` validates
+     `daily_time` and `day_of_week` (0-6) the same way the daily path
+     already validates `daily_time` alone). A third **Weekly on a day**
+     option in the scheduling form's frequency dropdown reveals a
+     day-of-week select alongside a time input.
+123. **Add an artifact tag directory** (`GET /api/artifacts/tags-summary`
+     aggregates `store.all_artifact_tags()` into `{tag, count}` entries,
+     sorted by count descending then tag name, filtering out tags on
+     artifacts that no longer exist on disk so a purge doesn't leave stale
+     counts behind). A tag-cloud row of chips above the artifacts list,
+     refreshed every time the artifact list itself reloads; clicking a chip
+     fills the existing tag-filter box and re-queries.
+124. **Add notification mute preferences** (new `notification_mutes` table —
+     `kind` primary key, `muted`, `updated_at`; `set_notification_kind_muted()`
+     / `is_notification_kind_muted()` / `all_notification_mute_state()` on
+     `StateStore`; `add_notification()` itself now checks the mute state
+     first and returns `None` — writing nothing — for a muted kind, so every
+     write path (breaker trips, schedule failures, the frontend's own
+     resource-alert POST) respects a mute without each call site needing to
+     know about it; `GET`/`PUT /api/notifications/preferences[/{kind}]`).
+     `POST /api/notifications` now reports `{created: false, kind, muted:
+     true}` instead of silently returning a fake notification when the
+     kind is muted. A toggle row per kind (breaker trips, schedule
+     failures, resource alerts) added to the bell icon's dropdown under a
+     new "Preferences" heading.
+125. **Add "export all saved pipelines" as a zip bundle**
+     (`GET /api/pipelines/export-all` builds an in-memory `zipfile.ZipFile`
+     over every saved pipeline's own YAML file, streamed back the same way
+     `GET /api/runs.xlsx` already streams a binary response — distinct from
+     both exporting one pipeline and the full state-store backup snapshot,
+     which covers run/schedule/memory history too, not just pipeline
+     definitions; 404s when there are no saved pipelines at all). A plain
+     **⬇ Export all** download link in the Saved Pipelines section header,
+     no JS needed beyond the anchor's own `download` attribute.
+126. **Add per-step author notes in the pipeline builder** (`note: str = ""`
+     on `PipelineStepSpec` in `webapp/main.py`; `_normalize_step()` /
+     `_normalize_module_step()` in `webapp/pipelines.py` strip a blank note
+     the same way they already omit an unset `condition`/`retry`, and only
+     a top-level step or parallel *group* carries one — an individual
+     branch inside a group never does, matching the granularity the
+     group's own optional `name` already uses; `build_pipeline_graph()` in
+     `webapp/graph.py` folds `note` onto each node). Purely descriptive
+     documentation of the pipeline's own design, never read by anything at
+     runtime — distinct from Batch 13's run notes, which annotate one
+     past *execution*, not the definition itself. A collapsible-by-default
+     textarea under every step/group's header in the builder, surviving a
+     module swap the same way `condition`/`retry` already do, carried
+     through duplicate-step and edit-existing-pipeline round trips; shown
+     as a native SVG `<title>` tooltip (plus a small dot marker) on its
+     node in the DAG view.
+127. **Add tests for all of Batch 14**: weekly scheduling's `next_weekly_run_at()`
+     (same-day-still-ahead, same-day-already-passed rolls a full week,
+     correct day-of-week selection) and a real `Scheduler` firing a
+     due weekly schedule end-to-end; the `/api/schedules` weekly path's
+     malformed-time/missing-time/invalid-day-of-week/missing-day-of-week
+     rejections; the tag directory's count aggregation, sort-by-count-then-
+     name ordering, and exclusion of a purged artifact's stale tag; mute
+     preferences' store-level round trip, `add_notification()` becoming a
+     genuine no-op (not just hidden) for a muted kind, and the create
+     endpoint's `{created: false}` response shape; export-all-pipelines
+     zip contents and its 404 when nothing is saved; step/group notes
+     surviving the saved-YAML round trip, blank notes never being persisted,
+     a branch never inheriting its group's note, and the graph endpoint
+     surfacing a step's note. 410 tests total, stable across repeated
+     clean full-suite runs.
 
 ## 9. Roadmap
 

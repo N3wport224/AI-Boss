@@ -93,8 +93,11 @@ const scheduleTargetEl = document.getElementById("schedule-target");
 const scheduleFrequencyEl = document.getElementById("schedule-frequency");
 const scheduleIntervalFieldEl = document.getElementById("schedule-interval-field");
 const scheduleDailyFieldEl = document.getElementById("schedule-daily-field");
+const scheduleWeeklyFieldEl = document.getElementById("schedule-weekly-field");
 const scheduleIntervalEl = document.getElementById("schedule-interval");
 const scheduleDailyTimeEl = document.getElementById("schedule-daily-time");
+const scheduleDayOfWeekEl = document.getElementById("schedule-day-of-week");
+const scheduleWeeklyTimeEl = document.getElementById("schedule-weekly-time");
 const scheduleErrorEl = document.getElementById("schedule-error");
 const scheduleCreateBtn = document.getElementById("schedule-create-btn");
 const schedulesListEl = document.getElementById("schedules-list");
@@ -282,7 +285,24 @@ async function refreshUnreadNotificationCount() {
   }
 }
 
+let notificationPreferences = {};
+const NOTIFICATION_KIND_LABELS = {
+  breaker_tripped: "Circuit breaker trips",
+  schedule_failed: "Scheduled run failures",
+  resource_alert: "Resource usage alerts",
+};
+
 function renderNotificationsPanel() {
+  const preferencesHtml = Object.keys(NOTIFICATION_KIND_LABELS)
+    .map(
+      (kind) => `
+      <label class="notification-pref-row">
+        <input type="checkbox" class="notification-mute-toggle" data-kind="${kind}" ${notificationPreferences[kind] ? "" : "checked"} />
+        ${NOTIFICATION_KIND_LABELS[kind]}
+      </label>`
+    )
+    .join("");
+
   const alertsHtml = persistentNotifications.length
     ? persistentNotifications
         .map(
@@ -317,7 +337,27 @@ function renderNotificationsPanel() {
     <h4>Alerts</h4>
     ${alertsHtml}
     <h4>Recent activity</h4>
-    ${activityHtml}`;
+    ${activityHtml}
+    <h4>Preferences</h4>
+    ${preferencesHtml}`;
+
+  notificationsPanel.querySelectorAll(".notification-mute-toggle").forEach((toggle) => {
+    toggle.addEventListener("click", async (e) => {
+      e.stopPropagation();
+      const kind = toggle.dataset.kind;
+      const muted = !toggle.checked;
+      notificationPreferences[kind] = muted;
+      try {
+        await fetch(`/api/notifications/preferences/${kind}`, {
+          method: "PUT",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ muted }),
+        });
+      } catch (err) {
+        showToast(`Could not save notification preference: ${err}`, "error");
+      }
+    });
+  });
 }
 
 function showToast(message, type = "success") {
@@ -344,8 +384,12 @@ notificationsBtn.addEventListener("click", async () => {
   selfTestPanel.classList.add("hidden");
   if (opening) {
     try {
-      const res = await fetch("/api/notifications");
-      persistentNotifications = await res.json();
+      const [notifRes, prefRes] = await Promise.all([
+        fetch("/api/notifications"),
+        fetch("/api/notifications/preferences"),
+      ]);
+      persistentNotifications = await notifRes.json();
+      notificationPreferences = await prefRes.json();
       renderNotificationsPanel();
     } catch (err) {
       // best-effort — the panel just keeps whatever it last rendered
@@ -1903,7 +1947,7 @@ runPipelineBtn.addEventListener("click", runFullPipeline);
 // ---- No-code visual pipeline builder ----
 
 function blankBuilderStep() {
-  return { tier: "", name: "", module: null, fieldSources: {}, condition: null, retry: null };
+  return { tier: "", name: "", module: null, fieldSources: {}, condition: null, retry: null, note: "" };
 }
 
 function blankBuilderBranch() {
@@ -1913,7 +1957,7 @@ function blankBuilderBranch() {
 function blankBuilderGroup() {
   // Two empty branches: the backend refuses a group with fewer than two, and
   // an empty group would be pointless anyway.
-  return { parallel: true, name: "", branches: [blankBuilderBranch(), blankBuilderBranch()] };
+  return { parallel: true, name: "", note: "", branches: [blankBuilderBranch(), blankBuilderBranch()] };
 }
 
 // Resolve a builder step key — "2" for a top-level step, "2:1" for branch 1
@@ -2008,6 +2052,51 @@ function removeBuilderStep(index) {
   renderBuilder();
 }
 
+// Inserting a copy right after `index` shifts every later step down one
+// position, so any mapping referencing one of those needs to shift up by
+// one to keep pointing at the same step -- the mirror image of
+// removeBuilderStep's own index bookkeeping. A mapping referencing `index`
+// itself needs no change: it still means the original step, not the copy.
+function duplicateBuilderStep(index) {
+  const original = builderSteps[index];
+
+  snapshotBuilderUndo();
+  for (const sources of allBuilderFieldSources()) {
+    for (const source of Object.values(sources)) {
+      if (source.type === "mapping" && source.step > index) {
+        source.step += 1;
+      }
+    }
+  }
+
+  const cloneFieldSources = (fs) => JSON.parse(JSON.stringify(fs || {}));
+  const duplicate = original.parallel
+    ? {
+        parallel: true,
+        name: original.name,
+        note: original.note || "",
+        branches: original.branches.map((b) => ({
+          tier: b.tier,
+          name: b.name,
+          module: b.module,
+          fieldSources: cloneFieldSources(b.fieldSources),
+          retry: b.retry ? { ...b.retry } : null,
+        })),
+      }
+    : {
+        tier: original.tier,
+        name: original.name,
+        module: original.module,
+        fieldSources: cloneFieldSources(original.fieldSources),
+        condition: original.condition ? { ...original.condition } : null,
+        retry: original.retry ? { ...original.retry } : null,
+        note: original.note || "",
+      };
+
+  builderSteps.splice(index + 1, 0, duplicate);
+  renderBuilder();
+}
+
 function renderBuilderField(stepKey, field, source, priorOutputs) {
   const idKey = String(stepKey).replace(":", "-"); // ids stay selector-safe; data-step keeps the raw key
   const controlId = `bfield__${idKey}__${field.name}`;
@@ -2077,6 +2166,7 @@ function stepControlsHtml(index) {
   return `
     <button class="move-step-btn" data-index="${index}" data-dir="up" type="button" title="Move step up" ${canMoveUp ? "" : "disabled"}>▲</button>
     <button class="move-step-btn" data-index="${index}" data-dir="down" type="button" title="Move step down" ${canMoveDown ? "" : "disabled"}>▼</button>
+    <button class="duplicate-step-btn" data-index="${index}" type="button" title="Duplicate this step">⧉</button>
     ${canRemove ? `<button class="remove-step-btn" data-index="${index}" type="button" title="Remove step">×</button>` : ""}`;
 }
 
@@ -2111,6 +2201,7 @@ function renderBuilderGroup(index, step) {
         <input type="text" class="group-name-input" data-index="${index}" placeholder="group name (optional)" value="${step.name || ""}" />
         ${stepControlsHtml(index)}
       </div>
+      ${renderBuilderNote(index, step.note)}
       <p class="card-desc group-hint">Branches run at the same time and must not depend on each other — each may map fields from steps <em>above</em> this group only.</p>
       <div class="builder-branches">${branchesHtml}</div>
       <button class="btn btn-secondary btn-small add-branch-btn" data-index="${index}" type="button">+ Add branch</button>
@@ -2132,6 +2223,7 @@ function renderBuilderStep(index, step) {
         <select class="module-select" data-index="${index}">${moduleOptionsHtml(step.tier, step.name)}</select>
         ${stepControlsHtml(index)}
       </div>
+      ${renderBuilderNote(index, step.note)}
       ${step.module ? renderBuilderCondition(index, step) : ""}
       ${step.module ? renderBuilderRetry(index, step.retry) : ""}
       <div class="builder-step-fields">${fieldsHtml}</div>
@@ -2170,6 +2262,11 @@ function renderBuilderCondition(index, step) {
 
 // The optional retry-on-failure row for one step or branch. Backoff doubles
 // each attempt (attempt N waits backoff_seconds * 2**N), same as the engine.
+function renderBuilderNote(index, note) {
+  return `
+    <textarea class="builder-step-note" data-index="${index}" placeholder="Add a note for anyone reading this pipeline later (optional)…" rows="1">${escapeHtml(note || "")}</textarea>`;
+}
+
 function renderBuilderRetry(key, retry) {
   const enabled = retry !== null && retry !== undefined;
   const maxRetries = retry?.max_retries ?? 2;
@@ -2258,12 +2355,14 @@ function attachBuilderStepListeners() {
       } else if (!module) {
         builderSteps[slot] = blankBuilderStep();
       } else {
-        // A condition/retry policy references context keys or failure
-        // behavior, not the module itself, so both survive swapping which
+        // A condition/retry policy (or an author's note) references context
+        // keys, failure behavior, or just documentation -- none of it is
+        // about the module itself, so all three survive swapping which
         // module the step runs.
         const condition = builderSteps[slot]?.condition ?? null;
         const retry = builderSteps[slot]?.retry ?? null;
-        builderSteps[slot] = { tier, name, module, fieldSources: defaultFieldSources(module), condition, retry };
+        const note = builderSteps[slot]?.note ?? "";
+        builderSteps[slot] = { tier, name, module, fieldSources: defaultFieldSources(module), condition, retry, note };
       }
 
       resetMappingsAfterSlot(slot);
@@ -2274,6 +2373,12 @@ function attachBuilderStepListeners() {
   builderStepsEl.querySelectorAll(".remove-step-btn").forEach((btn) => {
     btn.addEventListener("click", (e) => {
       removeBuilderStep(Number(e.currentTarget.dataset.index));
+    });
+  });
+
+  builderStepsEl.querySelectorAll(".duplicate-step-btn").forEach((btn) => {
+    btn.addEventListener("click", (e) => {
+      duplicateBuilderStep(Number(e.currentTarget.dataset.index));
     });
   });
 
@@ -2300,6 +2405,12 @@ function attachBuilderStepListeners() {
   builderStepsEl.querySelectorAll(".group-name-input").forEach((input) => {
     input.addEventListener("input", (e) => {
       builderSteps[Number(e.target.dataset.index)].name = e.target.value;
+    });
+  });
+
+  builderStepsEl.querySelectorAll(".builder-step-note").forEach((textarea) => {
+    textarea.addEventListener("input", (e) => {
+      builderSteps[Number(e.target.dataset.index)].note = e.target.value;
     });
   });
 
@@ -2452,13 +2563,19 @@ function moduleStepToBuilderStep(step) {
     fieldSources,
     condition: step.condition || null,
     retry: step.retry || null,
+    note: step.note || "",
   };
 }
 
 function definitionToBuilderSteps(definition) {
   return (definition.steps || []).map((step) =>
     step.type === "parallel"
-      ? { parallel: true, name: step.name || "", branches: (step.branches || []).map(moduleStepToBuilderStep) }
+      ? {
+          parallel: true,
+          name: step.name || "",
+          note: step.note || "",
+          branches: (step.branches || []).map(moduleStepToBuilderStep),
+        }
       : moduleStepToBuilderStep(step)
   );
 }
@@ -2615,12 +2732,13 @@ function collectBuilderPipelinePayload() {
     const spec = { tier: step.tier, name: step.name, inputs, mappings };
     if (step.condition) spec.condition = step.condition;
     if (step.retry) spec.retry = step.retry;
+    if (step.note) spec.note = step.note;
     return spec;
   };
 
   const steps = builderSteps.map((step) =>
     step.parallel
-      ? { type: "parallel", name: step.name.trim(), branches: step.branches.map(moduleStepPayload) }
+      ? { type: "parallel", name: step.name.trim(), note: step.note || "", branches: step.branches.map(moduleStepPayload) }
       : moduleStepPayload(step)
   );
 
@@ -2946,14 +3064,17 @@ function renderDagSvg(graph) {
     .map((n) => {
       const x = gapX + n.index * (nodeWidth + gapX);
       const color = TIER_NODE_COLOR[n.tier] || "#94a3b8";
+      const tooltip = n.note ? `${n.name}\n\n${n.note}` : n.name;
       return `
         <g>
+          <title>${escapeHtml(tooltip)}</title>
           <rect x="${x}" y="${nodeY}" width="${nodeWidth}" height="${nodeHeight}" rx="8"
                 fill="rgba(255,255,255,0.03)" stroke="${color}" stroke-width="1.5"></rect>
           <text x="${x + nodeWidth / 2}" y="${nodeY + 17}" text-anchor="middle" font-size="10"
                 fill="${color}" font-family="monospace">${escapeHtml(n.tier)}</text>
           <text x="${x + nodeWidth / 2}" y="${nodeY + 31}" text-anchor="middle" font-size="12"
                 fill="var(--text, #e2e8f0)" font-family="monospace">${escapeHtml(n.name)}</text>
+          ${n.note ? `<circle cx="${x + nodeWidth - 10}" cy="${nodeY + 10}" r="4" fill="${color}" opacity="0.7"></circle>` : ""}
         </g>`;
     })
     .join("");
@@ -3334,6 +3455,7 @@ const purgeBtn = document.getElementById("purge-btn");
 const artifactSearchInput = document.getElementById("artifact-search");
 const artifactSearchResultsEl = document.getElementById("artifact-search-results");
 const artifactTagFilterInput = document.getElementById("artifact-tag-filter");
+const artifactTagDirectoryEl = document.getElementById("artifact-tag-directory");
 const artifactBulkTagInput = document.getElementById("artifact-bulk-tag-input");
 const artifactBulkTagBtn = document.getElementById("artifact-bulk-tag-btn");
 
@@ -3361,11 +3483,38 @@ function updateArtifactBulkTagBtn() {
     : "Apply tag to selected";
 }
 
+async function loadArtifactTagDirectory() {
+  const res = await fetch("/api/artifacts/tags-summary");
+  const summary = await res.json();
+
+  if (!summary.length) {
+    artifactTagDirectoryEl.classList.add("hidden");
+    artifactTagDirectoryEl.innerHTML = "";
+    return;
+  }
+
+  artifactTagDirectoryEl.classList.remove("hidden");
+  artifactTagDirectoryEl.innerHTML = summary
+    .map(
+      (entry) =>
+        `<button type="button" class="tag-directory-chip" data-tag="${escapeHtml(entry.tag)}">${escapeHtml(entry.tag)} <span class="tag-directory-count">${entry.count}</span></button>`
+    )
+    .join("");
+
+  artifactTagDirectoryEl.querySelectorAll(".tag-directory-chip").forEach((chip) => {
+    chip.addEventListener("click", () => {
+      artifactTagFilterInput.value = chip.dataset.tag;
+      loadArtifacts();
+    });
+  });
+}
+
 async function loadArtifacts() {
   const tagFilter = artifactTagFilterInput.value.trim();
   const url = tagFilter ? `/api/artifacts?tag=${encodeURIComponent(tagFilter)}` : "/api/artifacts";
   const res = await fetch(url);
   const files = await res.json();
+  loadArtifactTagDirectory();
 
   const liveNames = new Set(files.map((f) => f.name));
   [...selectedArtifactNames].forEach((name) => {
@@ -3938,7 +4087,13 @@ async function loadSchedules() {
       const status = s.last_status
         ? `last: ${escapeHtml(s.last_status)}${s.last_run_at ? ` @ ${new Date(s.last_run_at).toLocaleTimeString()}` : ""}`
         : "never run yet";
-      const cadence = s.schedule_type === "daily" ? `daily at ${escapeHtml(s.daily_time)}` : `every ${formatInterval(s.interval_seconds)}`;
+      const WEEKDAY_NAMES = ["Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday", "Sunday"];
+      const cadence =
+        s.schedule_type === "daily"
+          ? `daily at ${escapeHtml(s.daily_time)}`
+          : s.schedule_type === "weekly"
+            ? `weekly on ${WEEKDAY_NAMES[s.day_of_week]} at ${escapeHtml(s.daily_time)}`
+            : `every ${formatInterval(s.interval_seconds)}`;
       return `
         <div class="schedule-row">
           <div class="schedule-row-main">
@@ -3985,9 +4140,10 @@ scheduleAddToggleBtn.addEventListener("click", () => {
 scheduleKindEl.addEventListener("change", populateScheduleTargets);
 
 scheduleFrequencyEl.addEventListener("change", () => {
-  const isDaily = scheduleFrequencyEl.value === "daily";
-  scheduleIntervalFieldEl.classList.toggle("hidden", isDaily);
-  scheduleDailyFieldEl.classList.toggle("hidden", !isDaily);
+  const frequency = scheduleFrequencyEl.value;
+  scheduleIntervalFieldEl.classList.toggle("hidden", frequency !== "interval");
+  scheduleDailyFieldEl.classList.toggle("hidden", frequency !== "daily");
+  scheduleWeeklyFieldEl.classList.toggle("hidden", frequency !== "weekly");
 });
 
 scheduleCreateBtn.addEventListener("click", async () => {
@@ -4005,6 +4161,9 @@ scheduleCreateBtn.addEventListener("click", async () => {
   const payload = { kind, schedule_type: scheduleType, inputs: {} };
   if (scheduleType === "daily") {
     payload.daily_time = scheduleDailyTimeEl.value;
+  } else if (scheduleType === "weekly") {
+    payload.daily_time = scheduleWeeklyTimeEl.value;
+    payload.day_of_week = Number(scheduleDayOfWeekEl.value);
   } else {
     payload.interval_seconds = Number(scheduleIntervalEl.value);
   }

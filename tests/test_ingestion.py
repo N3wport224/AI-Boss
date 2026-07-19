@@ -515,3 +515,55 @@ def test_json_sidecar_artifact_content_includes_a_schema_summary():
     assert body["schema"]["row_count"] == 1
     by_name = {c["name"]: c["type"] for c in body["schema"]["columns"]}
     assert by_name == {"a": "int", "b": "int"}
+
+
+# ---- Batch 14: artifact tag directory with counts ----
+
+def test_tags_summary_counts_tagged_artifacts():
+    client.post("/api/ingest/csv", files={"file": ("tagdir_a.csv", b"x,y\n961,962\n", "text/csv")})
+    client.post("/api/ingest/csv", files={"file": ("tagdir_b.csv", b"x,y\n963,964\n", "text/csv")})
+    a_name = next(f["name"] for f in client.get("/api/artifacts").json() if f["name"].endswith("tagdir_a.csv"))
+    b_name = next(f["name"] for f in client.get("/api/artifacts").json() if f["name"].endswith("tagdir_b.csv"))
+
+    client.put(f"/api/artifacts/{a_name}/tags", json={"tags": ["reviewed", "q1"]})
+    client.put(f"/api/artifacts/{b_name}/tags", json={"tags": ["reviewed"]})
+
+    summary = client.get("/api/artifacts/tags-summary").json()
+    by_tag = {entry["tag"]: entry["count"] for entry in summary}
+    assert by_tag["reviewed"] == 2
+    assert by_tag["q1"] == 1
+
+
+def test_tags_summary_is_sorted_by_count_descending():
+    client.post("/api/ingest/csv", files={"file": ("tagdir_c.csv", b"x,y\n965,966\n", "text/csv")})
+    client.post("/api/ingest/csv", files={"file": ("tagdir_d.csv", b"x,y\n967,968\n", "text/csv")})
+    c_name = next(f["name"] for f in client.get("/api/artifacts").json() if f["name"].endswith("tagdir_c.csv"))
+    d_name = next(f["name"] for f in client.get("/api/artifacts").json() if f["name"].endswith("tagdir_d.csv"))
+
+    client.put(f"/api/artifacts/{c_name}/tags", json={"tags": ["common", "rare"]})
+    client.put(f"/api/artifacts/{d_name}/tags", json={"tags": ["common"]})
+
+    summary = client.get("/api/artifacts/tags-summary").json()
+    tags_in_order = [entry["tag"] for entry in summary]
+    assert tags_in_order.index("common") < tags_in_order.index("rare")
+
+
+def test_tags_summary_excludes_tags_on_purged_artifacts():
+    client.post("/api/ingest/csv", files={"file": ("tagdir_e.csv", b"x,y\n969,970\n", "text/csv")})
+    e_name = next(f["name"] for f in client.get("/api/artifacts").json() if f["name"].endswith("tagdir_e.csv"))
+    client.put(f"/api/artifacts/{e_name}/tags", json={"tags": ["soon_purged"]})
+
+    client.post("/api/artifacts/purge", params={"older_than_hours": 0})
+
+    summary = client.get("/api/artifacts/tags-summary").json()
+    assert not any(entry["tag"] == "soon_purged" for entry in summary)
+
+
+def test_tags_summary_is_empty_when_nothing_is_tagged():
+    # No assumption that the artifacts dir is empty (other tests may have
+    # left untagged files) -- just confirm the shape and that an untagged
+    # fresh upload contributes nothing.
+    client.post("/api/ingest/csv", files={"file": ("tagdir_untagged.csv", b"x,y\n971,972\n", "text/csv")})
+    summary = client.get("/api/artifacts/tags-summary").json()
+    assert isinstance(summary, list)
+    assert not any(entry["count"] == 0 for entry in summary)

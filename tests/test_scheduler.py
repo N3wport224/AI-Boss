@@ -2,7 +2,7 @@ import time
 from datetime import datetime, timedelta, timezone
 
 from engine.state_store import StateStore
-from webapp.scheduler import Scheduler, next_daily_run_at
+from webapp.scheduler import Scheduler, next_daily_run_at, next_weekly_run_at
 
 
 def test_scheduler_fires_due_schedules_and_reschedules_next_run(tmp_path):
@@ -114,6 +114,70 @@ def test_next_daily_run_at_rolls_to_tomorrow_when_time_already_passed():
 
     delta = result - after
     assert timedelta(hours=22, minutes=58) <= delta <= timedelta(hours=23, minutes=1)
+
+
+def test_next_weekly_run_at_stays_this_week_when_day_and_time_are_still_ahead():
+    after = datetime.now(timezone.utc)
+    local_after = after.astimezone()
+    # Same weekday, two hours from now -- should fire later today, not roll a week.
+    target_time = (local_after + timedelta(hours=2)).strftime("%H:%M")
+    target_day = local_after.weekday()
+
+    result = next_weekly_run_at(target_day, target_time, after)
+
+    delta = result - after
+    assert timedelta(hours=1, minutes=58) <= delta <= timedelta(hours=2, minutes=1)
+
+
+def test_next_weekly_run_at_rolls_to_next_week_when_same_day_but_time_already_passed():
+    after = datetime.now(timezone.utc)
+    local_after = after.astimezone()
+    target_time = (local_after - timedelta(hours=1)).strftime("%H:%M")
+    target_day = local_after.weekday()
+
+    result = next_weekly_run_at(target_day, target_time, after)
+
+    delta = result - after
+    assert timedelta(days=6, hours=22) <= delta <= timedelta(days=7, hours=1)
+
+
+def test_next_weekly_run_at_picks_the_correct_day_of_week():
+    after = datetime.now(timezone.utc)
+    local_after = after.astimezone()
+    target_day = (local_after.weekday() + 3) % 7  # three days from now
+    target_time = local_after.strftime("%H:%M")
+
+    result = next_weekly_run_at(target_day, target_time, after)
+
+    assert result.astimezone().weekday() == target_day
+    delta = result - after
+    assert timedelta(days=2, hours=23) <= delta <= timedelta(days=3, hours=1)
+
+
+def test_scheduler_fires_a_weekly_schedule_whose_day_and_time_are_already_due(tmp_path):
+    store = StateStore(str(tmp_path / "weekly_due.db"))
+    calls = []
+    scheduler = Scheduler(store, trigger=lambda schedule: calls.append(schedule["id"]), poll_interval=0.05)
+
+    now = datetime.now(timezone.utc)
+    store.create_schedule(
+        kind="module", name="fake_weekly", interval_seconds=None,
+        next_run_at=now.isoformat(), tier="automation", inputs={},
+        schedule_type="weekly", daily_time="09:00", day_of_week=now.astimezone().weekday(),
+    )
+
+    scheduler.start()
+    time.sleep(0.2)
+    scheduler.stop()
+
+    assert calls
+    updated = store.list_schedules()[0]
+    assert updated["last_status"] == "triggered"
+    assert updated["schedule_type"] == "weekly"
+    # Rescheduled a full week out since it just fired.
+    next_run = datetime.fromisoformat(updated["next_run_at"])
+    assert timedelta(days=6) <= (next_run - now) <= timedelta(days=7, hours=1)
+    store.close()
 
 
 def test_scheduler_pause_stops_all_schedules_from_firing_regardless_of_their_own_enabled_state(tmp_path):

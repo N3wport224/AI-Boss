@@ -17,6 +17,7 @@ import json
 import re
 import threading
 import time
+import zipfile
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Callable, Optional
@@ -44,7 +45,7 @@ from . import cache, graph, health, ingestion, linting, perf, pipelines as pipel
 from .templates import PIPELINE_TEMPLATES
 from .events import RunEventBus
 from .ratelimit import RateLimiter
-from .scheduler import Scheduler, next_daily_run_at
+from .scheduler import Scheduler, next_daily_run_at, next_weekly_run_at
 from .watcher import FilesystemWatcher, WATCH_DIR, ensure_watch_dir
 
 ROOT = Path(__file__).resolve().parent.parent
@@ -178,6 +179,7 @@ class PipelineStepSpec(BaseModel):
     retry: Optional[RetrySpec] = None
     type: Optional[str] = None
     branches: Optional[list["PipelineStepSpec"]] = None
+    note: str = ""  # optional author-time documentation, purely descriptive -- never used at runtime
 
 
 PipelineStepSpec.model_rebuild()
@@ -199,9 +201,10 @@ class ScheduleCreate(BaseModel):
     tier: Optional[str] = None  # required when kind == "module"
     name: str  # module name, or saved pipeline slug
     inputs: dict[str, Any] = {}  # only used when kind == "module"
-    schedule_type: str = "interval"  # "interval" or "daily"
+    schedule_type: str = "interval"  # "interval", "daily", or "weekly"
     interval_seconds: Optional[float] = None  # required when schedule_type == "interval"
-    daily_time: Optional[str] = None  # "HH:MM" (local time), required when schedule_type == "daily"
+    daily_time: Optional[str] = None  # "HH:MM" (local time), required when schedule_type in ("daily", "weekly")
+    day_of_week: Optional[int] = None  # 0=Monday..6=Sunday, required when schedule_type == "weekly"
 
 
 class ScheduleUpdate(BaseModel):
@@ -909,6 +912,34 @@ async def trigger_pipeline_webhook(slug: str, http_request: Request):
     return {"stream_id": stream_id}
 
 
+@app.get("/api/pipelines/export-all")
+def export_all_pipelines():
+    """Every saved pipeline's own YAML file bundled into a single zip --
+    distinct from exporting one pipeline (GET /api/pipelines/{slug}/export)
+    and from the full state-store backup snapshot (GET /api/backup/export,
+    which covers runs/schedules/memory/ingested-file records too, not just
+    pipeline definitions). Useful for backing up or sharing the whole
+    pipeline library in one download."""
+    pipelines = pipeline_store.list_pipelines()
+    if not pipelines:
+        raise HTTPException(status_code=404, detail="No saved pipelines to export.")
+
+    buffer = io.BytesIO()
+    with zipfile.ZipFile(buffer, "w", zipfile.ZIP_DEFLATED) as zf:
+        for definition in pipelines:
+            slug = definition.get("slug", "")
+            path = pipeline_store.PIPELINES_DIR / f"{slug}.yaml"
+            if path.exists():
+                zf.write(path, arcname=f"{slug}.yaml")
+    buffer.seek(0)
+
+    return StreamingResponse(
+        buffer,
+        media_type="application/zip",
+        headers={"Content-Disposition": "attachment; filename=pipelines_export.zip"},
+    )
+
+
 @app.get("/api/pipelines/{slug}/export")
 def export_pipeline(slug: str):
     """The pipeline's own saved YAML file, as a standalone download — for
@@ -1104,8 +1135,8 @@ def list_schedules():
 def create_schedule(payload: ScheduleCreate):
     if payload.kind not in ("module", "pipeline"):
         raise HTTPException(status_code=400, detail="kind must be 'module' or 'pipeline'")
-    if payload.schedule_type not in ("interval", "daily"):
-        raise HTTPException(status_code=400, detail="schedule_type must be 'interval' or 'daily'")
+    if payload.schedule_type not in ("interval", "daily", "weekly"):
+        raise HTTPException(status_code=400, detail="schedule_type must be 'interval', 'daily', or 'weekly'")
 
     now = datetime.now(timezone.utc)
     if payload.schedule_type == "interval":
@@ -1115,10 +1146,16 @@ def create_schedule(payload: ScheduleCreate):
                 detail=f"interval_seconds must be at least {MIN_SCHEDULE_INTERVAL_SECONDS}",
             )
         next_run_at = now.isoformat()
-    else:
+    elif payload.schedule_type == "daily":
         if not payload.daily_time or not DAILY_TIME_RE.match(payload.daily_time):
             raise HTTPException(status_code=400, detail="daily_time must be in 'HH:MM' 24-hour format")
         next_run_at = next_daily_run_at(payload.daily_time, now).isoformat()
+    else:
+        if not payload.daily_time or not DAILY_TIME_RE.match(payload.daily_time):
+            raise HTTPException(status_code=400, detail="daily_time must be in 'HH:MM' 24-hour format")
+        if payload.day_of_week is None or not (0 <= payload.day_of_week <= 6):
+            raise HTTPException(status_code=400, detail="day_of_week must be an integer from 0 (Monday) to 6 (Sunday)")
+        next_run_at = next_weekly_run_at(payload.day_of_week, payload.daily_time, now).isoformat()
 
     if payload.kind == "module":
         if not payload.tier:
@@ -1139,6 +1176,7 @@ def create_schedule(payload: ScheduleCreate):
         inputs=payload.inputs,
         schedule_type=payload.schedule_type,
         daily_time=payload.daily_time,
+        day_of_week=payload.day_of_week,
     )
     return schedule
 
@@ -1556,10 +1594,16 @@ class NotificationCreate(BaseModel):
 def create_notification(payload: NotificationCreate):
     """Lets the frontend record a notification for something only it can see
     happening in real time -- specifically the resource-usage alert banner's
-    own CPU/memory thresholds, computed client-side from the perf ticker."""
+    own CPU/memory thresholds, computed client-side from the perf ticker.
+    Silently accepted-but-not-stored (created: false) if this kind is muted,
+    same as every other write path into notifications."""
     if not payload.message.strip():
         raise HTTPException(status_code=400, detail="A message is required.")
-    return store.add_notification(payload.kind.strip() or "info", payload.message.strip())
+    kind = payload.kind.strip() or "info"
+    notification = store.add_notification(kind, payload.message.strip())
+    if notification is None:
+        return {"created": False, "kind": kind, "muted": True}
+    return {"created": True, **notification}
 
 
 @app.post("/api/notifications/{notification_id}/read")
@@ -1573,6 +1617,29 @@ def mark_notification_read(notification_id: int):
 @app.post("/api/notifications/mark-all-read")
 def mark_all_notifications_read():
     return {"marked": store.mark_all_notifications_read()}
+
+
+NOTIFICATION_KINDS = ("breaker_tripped", "schedule_failed", "resource_alert")
+
+
+@app.get("/api/notifications/preferences")
+def get_notification_preferences():
+    """Mute state for every notification kind this app ever writes -- a kind
+    absent from the dict (never toggled) reads as unmuted."""
+    mute_state = store.all_notification_mute_state()
+    return {kind: mute_state.get(kind, False) for kind in NOTIFICATION_KINDS}
+
+
+class NotificationPreferenceUpdate(BaseModel):
+    muted: bool
+
+
+@app.put("/api/notifications/preferences/{kind}")
+def set_notification_preference(kind: str, payload: NotificationPreferenceUpdate):
+    if kind not in NOTIFICATION_KINDS:
+        raise HTTPException(status_code=400, detail=f"Unknown notification kind '{kind}'.")
+    store.set_notification_kind_muted(kind, payload.muted)
+    return {"kind": kind, "muted": payload.muted}
 
 
 @app.get("/api/memory")
@@ -1713,6 +1780,25 @@ def list_artifacts(tag: Optional[str] = None):
         tag_lower = tag.strip().lower()
         files = [f for f in files if tag_lower in (t.lower() for t in f["tags"])]
     return files
+
+
+@app.get("/api/artifacts/tags-summary")
+def artifact_tags_summary():
+    """Every tag currently in use across ingested artifacts and how many
+    files carry it -- a directory view for the tag filter box, letting a
+    user browse by tag rather than having to already know one to type in.
+    Only counts files that still exist on disk (a purged artifact's stale
+    tag row, if any, doesn't inflate the count)."""
+    existing_names = {f["name"] for f in ingestion.list_artifacts()}
+    counts: dict[str, int] = {}
+    for filename, tags in store.all_artifact_tags().items():
+        if filename not in existing_names:
+            continue
+        for tag in tags:
+            counts[tag] = counts.get(tag, 0) + 1
+    summary = [{"tag": tag, "count": count} for tag, count in counts.items()]
+    summary.sort(key=lambda entry: (-entry["count"], entry["tag"].lower()))
+    return summary
 
 
 @app.post("/api/artifacts/purge")

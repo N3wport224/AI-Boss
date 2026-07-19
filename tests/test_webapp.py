@@ -260,6 +260,74 @@ def test_daily_schedule_requires_daily_time():
     assert res.status_code == 400
 
 
+def test_weekly_schedule_create_and_shows_next_run_in_the_future():
+    res = client.post(
+        "/api/schedules",
+        json={
+            "kind": "module",
+            "tier": "automation",
+            "name": "fetch_raw_metrics",
+            "inputs": {"signups": 1, "churn": 1, "revenue": 1},
+            "schedule_type": "weekly",
+            "daily_time": "09:30",
+            "day_of_week": 2,
+        },
+    )
+    assert res.status_code == 200
+    schedule = res.json()
+    assert schedule["schedule_type"] == "weekly"
+    assert schedule["daily_time"] == "09:30"
+    assert schedule["day_of_week"] == 2
+    assert datetime.fromisoformat(schedule["next_run_at"]) > datetime.now(timezone.utc)
+
+    listed = client.get("/api/schedules").json()
+    assert any(s["id"] == schedule["id"] and s["day_of_week"] == 2 for s in listed)
+
+    client.delete(f"/api/schedules/{schedule['id']}")
+
+
+def test_weekly_schedule_rejects_malformed_time():
+    res = client.post(
+        "/api/schedules",
+        json={
+            "kind": "module", "tier": "automation", "name": "fetch_raw_metrics", "inputs": {},
+            "schedule_type": "weekly", "daily_time": "25:99", "day_of_week": 1,
+        },
+    )
+    assert res.status_code == 400
+
+
+def test_weekly_schedule_requires_daily_time():
+    res = client.post(
+        "/api/schedules",
+        json={
+            "kind": "module", "tier": "automation", "name": "fetch_raw_metrics", "inputs": {},
+            "schedule_type": "weekly", "day_of_week": 1,
+        },
+    )
+    assert res.status_code == 400
+
+
+def test_weekly_schedule_requires_a_valid_day_of_week():
+    res = client.post(
+        "/api/schedules",
+        json={
+            "kind": "module", "tier": "automation", "name": "fetch_raw_metrics", "inputs": {},
+            "schedule_type": "weekly", "daily_time": "09:00", "day_of_week": 7,
+        },
+    )
+    assert res.status_code == 400
+
+    res_missing = client.post(
+        "/api/schedules",
+        json={
+            "kind": "module", "tier": "automation", "name": "fetch_raw_metrics", "inputs": {},
+            "schedule_type": "weekly", "daily_time": "09:00",
+        },
+    )
+    assert res_missing.status_code == 400
+
+
 def test_schedule_rejects_unknown_schedule_type():
     res = client.post(
         "/api/schedules",

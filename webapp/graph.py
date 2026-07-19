@@ -23,10 +23,11 @@ def build_pipeline_graph(definition: dict) -> dict:
                     "tier": "parallel",
                     "name": f"{label} ⫲ [{branch_names}]",
                     "branches": [{"tier": b["tier"], "name": b["name"]} for b in branches],
+                    "note": step.get("note", ""),
                 }
             )
         else:
-            nodes.append({"index": index, "tier": step["tier"], "name": step["name"]})
+            nodes.append({"index": index, "tier": step["tier"], "name": step["name"], "note": step.get("note", "")})
 
     edges = []
     for index, step in enumerate(steps):

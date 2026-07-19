@@ -202,6 +202,22 @@ def test_pipeline_graph_reports_nodes_sequence_and_mapping_edges():
     assert mapping_edges == [{"from": 1, "to": 2, "kind": "mapping", "field": "notify_slack", "output": "insight"}]
 
 
+def test_pipeline_graph_includes_a_steps_note():
+    res = client.post(
+        "/api/pipelines",
+        json={
+            "name": "Graph Note Test",
+            "steps": [
+                {"tier": "automation", "name": "fetch_raw_metrics", "note": "Documented for the graph tooltip."},
+            ],
+        },
+    )
+    _collect_stream(res.json()["stream_id"])
+
+    graph = client.get("/api/pipelines/graph_note_test/graph").json()
+    assert graph["nodes"][0]["note"] == "Documented for the graph tooltip."
+
+
 def test_pipeline_graph_404s_for_unknown_slug():
     assert client.get("/api/pipelines/does-not-exist/graph").status_code == 404
 
@@ -380,6 +396,72 @@ def test_condition_survives_the_saved_yaml_round_trip():
     }
     # Steps without a condition don't carry a `condition: null` key in the YAML.
     assert "condition" not in saved["steps"][0]
+
+
+def test_step_note_survives_the_saved_yaml_round_trip():
+    res = client.post(
+        "/api/pipelines",
+        json={
+            "name": "Step Note Persisted",
+            "steps": [
+                {
+                    "tier": "automation",
+                    "name": "fetch_raw_metrics",
+                    "note": "  Retry policy tuned for a flaky upstream API.  ",
+                },
+                {"tier": "automation", "name": "http_request", "inputs": {"url": "https://example.com", "method": "GET"}},
+            ],
+        },
+    )
+    assert res.status_code == 200
+    _collect_stream(res.json()["stream_id"])
+
+    saved = pipeline_store.load_pipeline("step_note_persisted")
+    assert saved["steps"][0]["note"] == "Retry policy tuned for a flaky upstream API."
+    # A step without a note doesn't carry a `note: ''` key in the YAML.
+    assert "note" not in saved["steps"][1]
+
+
+def test_blank_step_note_is_not_saved():
+    res = client.post(
+        "/api/pipelines",
+        json={
+            "name": "Blank Step Note",
+            "steps": [{"tier": "automation", "name": "fetch_raw_metrics", "note": "   "}],
+        },
+    )
+    assert res.status_code == 200
+    _collect_stream(res.json()["stream_id"])
+
+    saved = pipeline_store.load_pipeline("blank_step_note")
+    assert "note" not in saved["steps"][0]
+
+
+def test_parallel_group_note_survives_the_saved_yaml_round_trip():
+    res = client.post(
+        "/api/pipelines",
+        json={
+            "name": "Group Note Persisted",
+            "steps": [
+                {
+                    "type": "parallel",
+                    "name": "",
+                    "note": "Both branches hit the same flaky vendor -- run concurrently to save time.",
+                    "branches": [
+                        {"tier": "automation", "name": "fetch_raw_metrics"},
+                        {"tier": "automation", "name": "http_request", "inputs": {"url": "https://example.com", "method": "GET"}},
+                    ],
+                }
+            ],
+        },
+    )
+    assert res.status_code == 200
+    _collect_stream(res.json()["stream_id"])
+
+    saved = pipeline_store.load_pipeline("group_note_persisted")
+    assert saved["steps"][0]["note"] == "Both branches hit the same flaky vendor -- run concurrently to save time."
+    # A branch itself never carries its own note -- only the group slot does.
+    assert "note" not in saved["steps"][0]["branches"][0]
 
 
 def test_condition_with_unknown_operator_is_rejected():
@@ -772,6 +854,39 @@ def test_export_pipeline_returns_its_own_yaml_file():
 
 def test_export_missing_pipeline_is_a_404():
     res = client.get("/api/pipelines/totally_missing/export")
+    assert res.status_code == 404
+
+
+def test_export_all_pipelines_returns_a_zip_with_every_saved_pipeline():
+    import io
+    import zipfile
+
+    client.post(
+        "/api/pipelines",
+        json={"name": "Export All A", "steps": [{"tier": "automation", "name": "fetch_raw_metrics"}]},
+    )
+    client.post(
+        "/api/pipelines",
+        json={"name": "Export All B", "steps": [{"tier": "automation", "name": "fetch_raw_metrics"}]},
+    )
+
+    res = client.get("/api/pipelines/export-all")
+    assert res.status_code == 200
+    assert res.headers["content-type"] == "application/zip"
+
+    zf = zipfile.ZipFile(io.BytesIO(res.content))
+    names = zf.namelist()
+    assert "export_all_a.yaml" in names
+    assert "export_all_b.yaml" in names
+
+    import yaml
+
+    exported_a = yaml.safe_load(zf.read("export_all_a.yaml"))
+    assert exported_a["name"] == "Export All A"
+
+
+def test_export_all_pipelines_404s_when_there_are_none():
+    res = client.get("/api/pipelines/export-all")
     assert res.status_code == 404
 
 

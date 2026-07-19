@@ -214,6 +214,16 @@ h1 {
   background: var(--bg-elevated);
 }
 
+.notification-pref-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 6px 4px;
+  font-size: 0.8rem;
+  color: var(--text-dim);
+  cursor: pointer;
+}
+
 .health-check-row .dot,
 .notification-row .dot {
   margin-top: 4px;
@@ -1361,6 +1371,24 @@ body.density-compact .tier-section {
   margin: 0 0 12px 36px;
 }
 
+.builder-step-note {
+  width: 100%;
+  box-sizing: border-box;
+  background: var(--bg-elevated);
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  padding: 6px 9px;
+  margin: 0 0 10px;
+  color: var(--text-dim);
+  font-size: 0.78rem;
+  font-family: inherit;
+  resize: vertical;
+}
+
+.builder-step-note:focus {
+  color: var(--text);
+}
+
 .builder-retry.active {
   padding: 8px 10px;
   margin-left: 36px;
@@ -2291,6 +2319,35 @@ body.density-compact .tier-section {
   flex-wrap: wrap;
   align-items: center;
   gap: 6px;
+}
+
+.tag-directory {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  padding: 8px 0;
+}
+
+.tag-directory-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  background: var(--bg-elevated);
+  border: 1px solid var(--border);
+  border-radius: 999px;
+  padding: 4px 10px;
+  font-size: 0.78rem;
+  color: var(--text);
+  cursor: pointer;
+}
+
+.tag-directory-chip:hover {
+  border-color: var(--accent-automation);
+}
+
+.tag-directory-count {
+  color: var(--text-dim);
+  font-size: 0.7rem;
 }
 
 .tag-chip-list {

@@ -55,7 +55,8 @@ CREATE TABLE IF NOT EXISTS schedules (
     last_status TEXT,
     created_at TEXT NOT NULL,
     schedule_type TEXT NOT NULL DEFAULT 'interval',
-    daily_time TEXT
+    daily_time TEXT,
+    day_of_week INTEGER
 );
 
 CREATE TABLE IF NOT EXISTS memory (
@@ -130,6 +131,12 @@ CREATE TABLE IF NOT EXISTS notifications (
     created_at TEXT NOT NULL,
     read INTEGER NOT NULL DEFAULT 0
 );
+
+CREATE TABLE IF NOT EXISTS notification_mutes (
+    kind TEXT PRIMARY KEY,
+    muted INTEGER NOT NULL,
+    updated_at TEXT NOT NULL
+);
 """
 
 
@@ -165,6 +172,8 @@ class StateStore:
             self._conn.execute("ALTER TABLE schedules ADD COLUMN schedule_type TEXT NOT NULL DEFAULT 'interval'")
         if "daily_time" not in schedule_columns:
             self._conn.execute("ALTER TABLE schedules ADD COLUMN daily_time TEXT")
+        if "day_of_week" not in schedule_columns:
+            self._conn.execute("ALTER TABLE schedules ADD COLUMN day_of_week INTEGER")
 
         run_columns = {row[1] for row in self._conn.execute("PRAGMA table_info(runs)").fetchall()}
         if "blackboard" not in run_columns:
@@ -679,7 +688,7 @@ class StateStore:
     _SCHEDULE_COLUMNS = (
         "id", "kind", "tier", "name", "inputs", "interval_seconds",
         "enabled", "next_run_at", "last_run_at", "last_status", "created_at",
-        "schedule_type", "daily_time",
+        "schedule_type", "daily_time", "day_of_week",
     )
 
     def _schedule_row_to_dict(self, row) -> dict:
@@ -692,14 +701,16 @@ class StateStore:
         self, kind: str, name: str, interval_seconds: Optional[float], next_run_at: str,
         tier: Optional[str] = None, inputs: Optional[dict] = None,
         schedule_type: str = "interval", daily_time: Optional[str] = None,
+        day_of_week: Optional[int] = None,
     ) -> dict:
         with self._lock:
             cur = self._conn.execute(
                 "INSERT INTO schedules (kind, tier, name, inputs, interval_seconds, enabled, "
-                "next_run_at, created_at, schedule_type, daily_time) VALUES (?, ?, ?, ?, ?, 1, ?, ?, ?, ?)",
+                "next_run_at, created_at, schedule_type, daily_time, day_of_week) "
+                "VALUES (?, ?, ?, ?, ?, 1, ?, ?, ?, ?, ?)",
                 (
                     kind, tier, name, json.dumps(inputs or {}), interval_seconds or 0.0,
-                    next_run_at, datetime.now(timezone.utc).isoformat(), schedule_type, daily_time,
+                    next_run_at, datetime.now(timezone.utc).isoformat(), schedule_type, daily_time, day_of_week,
                 ),
             )
             self._conn.commit()
@@ -842,11 +853,14 @@ class StateStore:
             rows = self._conn.execute("SELECT run_id, note FROM run_notes").fetchall()
         return {run_id: note for run_id, note in rows}
 
-    def add_notification(self, kind: str, message: str) -> dict:
+    def add_notification(self, kind: str, message: str) -> Optional[dict]:
         """Record a durable notification -- unlike a toast (which vanishes on
         reload) or the audit log (a record of user-initiated actions), this
         is for events the app itself decides are worth surfacing: a circuit
-        breaker tripping, a schedule failing, a resource-usage alert firing."""
+        breaker tripping, a schedule failing, a resource-usage alert firing.
+        Returns None (and writes nothing) if this kind is currently muted."""
+        if self.is_notification_kind_muted(kind):
+            return None
         now = datetime.now(timezone.utc).isoformat()
         with self._lock:
             cur = self._conn.execute(
@@ -856,6 +870,27 @@ class StateStore:
             self._conn.commit()
             notification_id = cur.lastrowid
         return {"id": notification_id, "kind": kind, "message": message, "created_at": now, "read": False}
+
+    def set_notification_kind_muted(self, kind: str, muted: bool) -> None:
+        with self._lock:
+            self._conn.execute(
+                "INSERT INTO notification_mutes (kind, muted, updated_at) VALUES (?, ?, ?) "
+                "ON CONFLICT(kind) DO UPDATE SET muted = excluded.muted, updated_at = excluded.updated_at",
+                (kind, int(muted), datetime.now(timezone.utc).isoformat()),
+            )
+            self._conn.commit()
+
+    def is_notification_kind_muted(self, kind: str) -> bool:
+        with self._lock:
+            row = self._conn.execute(
+                "SELECT muted FROM notification_mutes WHERE kind = ?", (kind,)
+            ).fetchone()
+        return bool(row[0]) if row else False
+
+    def all_notification_mute_state(self) -> dict[str, bool]:
+        with self._lock:
+            rows = self._conn.execute("SELECT kind, muted FROM notification_mutes").fetchall()
+        return {kind: bool(muted) for kind, muted in rows}
 
     def list_notifications(self, unread_only: bool = False, limit: int = 200) -> list[dict]:
         query = "SELECT id, kind, message, created_at, read FROM notifications"
@@ -970,13 +1005,14 @@ class StateStore:
             for schedule in snapshot.get("schedules", []):
                 cur = self._conn.execute(
                     "INSERT OR IGNORE INTO schedules (id, kind, tier, name, inputs, interval_seconds, enabled, "
-                    "next_run_at, last_run_at, last_status, created_at, schedule_type, daily_time) "
-                    "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                    "next_run_at, last_run_at, last_status, created_at, schedule_type, daily_time, day_of_week) "
+                    "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
                     (
                         schedule["id"], schedule["kind"], schedule.get("tier"), schedule["name"],
                         json.dumps(schedule["inputs"]), schedule["interval_seconds"], int(schedule["enabled"]),
                         schedule["next_run_at"], schedule.get("last_run_at"), schedule.get("last_status"),
                         schedule["created_at"], schedule.get("schedule_type", "interval"), schedule.get("daily_time"),
+                        schedule.get("day_of_week"),
                     ),
                 )
                 if cur.rowcount > 0:

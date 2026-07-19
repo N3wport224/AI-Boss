@@ -196,3 +196,84 @@ def test_scheduler_on_error_hook_is_wired_to_the_apps_own_scheduler():
     from webapp.main import _notify_schedule_error, _scheduler
 
     assert _scheduler.on_error is _notify_schedule_error
+
+
+# ---- Batch 14: notification mute preferences ----
+
+@pytest.fixture(autouse=True)
+def reset_notification_mutes():
+    for kind in ("breaker_tripped", "schedule_failed", "resource_alert"):
+        store.set_notification_kind_muted(kind, False)
+    yield
+    for kind in ("breaker_tripped", "schedule_failed", "resource_alert"):
+        store.set_notification_kind_muted(kind, False)
+
+
+def test_store_level_mute_round_trip(tmp_path):
+    s = StateStore(str(tmp_path / "mute.db"))
+    assert s.is_notification_kind_muted("resource_alert") is False
+
+    s.set_notification_kind_muted("resource_alert", True)
+    assert s.is_notification_kind_muted("resource_alert") is True
+    assert s.all_notification_mute_state() == {"resource_alert": True}
+
+    s.set_notification_kind_muted("resource_alert", False)
+    assert s.is_notification_kind_muted("resource_alert") is False
+    s.close()
+
+
+def test_add_notification_is_a_no_op_when_its_kind_is_muted(tmp_path):
+    s = StateStore(str(tmp_path / "mute_add.db"))
+    s.set_notification_kind_muted("resource_alert", True)
+
+    result = s.add_notification("resource_alert", "should not be stored")
+    assert result is None
+    assert s.list_notifications() == []
+
+    # An unmuted kind is unaffected.
+    other = s.add_notification("breaker_tripped", "should be stored")
+    assert other is not None
+    assert len(s.list_notifications()) == 1
+    s.close()
+
+
+def test_get_notification_preferences_defaults_to_all_unmuted():
+    prefs = client.get("/api/notifications/preferences").json()
+    assert prefs == {"breaker_tripped": False, "schedule_failed": False, "resource_alert": False}
+
+
+def test_set_and_read_a_notification_preference_via_the_api():
+    res = client.put("/api/notifications/preferences/resource_alert", json={"muted": True})
+    assert res.status_code == 200
+    assert res.json() == {"kind": "resource_alert", "muted": True}
+
+    prefs = client.get("/api/notifications/preferences").json()
+    assert prefs["resource_alert"] is True
+    assert prefs["breaker_tripped"] is False
+
+
+def test_set_preference_for_an_unknown_kind_400s():
+    res = client.put("/api/notifications/preferences/not_a_real_kind", json={"muted": True})
+    assert res.status_code == 400
+
+
+def test_create_notification_endpoint_reports_muted_instead_of_creating():
+    client.put("/api/notifications/preferences/resource_alert", json={"muted": True})
+
+    res = client.post("/api/notifications", json={"kind": "resource_alert", "message": "muted alert"})
+    assert res.status_code == 200
+    assert res.json() == {"created": False, "kind": "resource_alert", "muted": True}
+
+    notifications = client.get("/api/notifications").json()
+    assert not any(n["message"] == "muted alert" for n in notifications)
+
+
+def test_create_notification_endpoint_still_creates_when_unmuted():
+    res = client.post("/api/notifications", json={"kind": "breaker_tripped", "message": "unmuted alert"})
+    assert res.status_code == 200
+    body = res.json()
+    assert body["created"] is True
+    assert body["kind"] == "breaker_tripped"
+
+    notifications = client.get("/api/notifications").json()
+    assert any(n["message"] == "unmuted alert" for n in notifications)

@@ -150,6 +150,7 @@
           <input type="text" id="artifact-bulk-tag-input" class="artifact-search-input" placeholder="Tag to apply to selected…" />
           <button id="artifact-bulk-tag-btn" class="btn btn-secondary btn-small" type="button" disabled>Apply tag to selected</button>
         </div>
+        <div id="artifact-tag-directory" class="tag-directory hidden"></div>
         <div id="artifact-search-results" class="hidden"></div>
         <div id="artifacts-list" class="runs-table"></div>
 
@@ -191,6 +192,7 @@
         <span class="bar"></span>
         <h2>Saved Pipelines</h2>
         <div class="tier-heading-actions">
+          <a id="pipelines-export-all-btn" class="btn btn-secondary btn-small" href="/api/pipelines/export-all" download="pipelines_export.zip" title="Download every saved pipeline as a single zip">⬇ Export all</a>
           <button class="collapse-toggle" type="button" data-collapse-key="saved-pipelines">▾</button>
         </div>
       </div>
@@ -241,6 +243,7 @@
             <select id="schedule-frequency">
               <option value="interval">Every N seconds</option>
               <option value="daily">Daily at a time</option>
+              <option value="weekly">Weekly on a day</option>
             </select>
           </div>
           <div class="field" id="schedule-interval-field">
@@ -250,6 +253,20 @@
           <div class="field hidden" id="schedule-daily-field">
             <label for="schedule-daily-time">Daily at (local time)</label>
             <input type="time" id="schedule-daily-time" value="09:00" />
+          </div>
+          <div class="field hidden" id="schedule-weekly-field">
+            <label for="schedule-day-of-week">Day of week</label>
+            <select id="schedule-day-of-week">
+              <option value="0">Monday</option>
+              <option value="1">Tuesday</option>
+              <option value="2">Wednesday</option>
+              <option value="3">Thursday</option>
+              <option value="4">Friday</option>
+              <option value="5">Saturday</option>
+              <option value="6">Sunday</option>
+            </select>
+            <label for="schedule-weekly-time">At (local time)</label>
+            <input type="time" id="schedule-weekly-time" value="09:00" />
           </div>
         </div>
         <p id="schedule-error" class="builder-error hidden"></p>

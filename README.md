@@ -658,6 +658,29 @@ A few things live in the header/subheader on every page load:
   a page refresh: circuit breaker trips, scheduled-run failures, and
   resource-usage warnings, with an unread badge.
 
+## Step duplication, weekly scheduling, tag directory, notification muting, bulk pipeline export, and step notes
+
+- **Duplicate a pipeline builder step** — a **⧉** button next to a step's
+  move/remove controls clones it (or a whole parallel group) with the same
+  module, inputs, and mappings, inserted right after the original.
+- **Weekly scheduling** — beyond "every N seconds" and "daily at a time,"
+  schedule a module or pipeline for a specific day of the week plus time of
+  day (e.g. "every Monday at 09:00").
+- **Artifact tag directory** — a tag cloud above the artifacts list shows
+  every tag currently in use and how many files carry it; click one to
+  filter by it instead of typing a tag you already have to know.
+- **Mute notification kinds** — turn off circuit-breaker-trip,
+  scheduled-run-failure, or resource-usage-alert notifications individually
+  from the bell icon's panel; a muted kind is never stored, not just hidden.
+- **Export all saved pipelines** — download every saved pipeline's YAML in
+  one zip from the Saved Pipelines section, distinct from exporting a
+  single pipeline or the full state-store backup snapshot.
+- **Per-step author notes** — attach optional free-text documentation to a
+  pipeline step (or parallel group) right in the builder — purely
+  descriptive, saved with the pipeline, and shown as a tooltip in the DAG
+  view. Distinct from a run's own after-the-fact note: this documents the
+  pipeline's *design*, not one particular execution of it.
+
 ## Tech stack
 
 - **Language:** Python 3.11+ — first-class async/sync support and native SDKs

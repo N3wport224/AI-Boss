@@ -120,8 +120,13 @@ def _normalize_step(step: dict) -> dict:
         normalized = {"type": "parallel", "branches": [_normalize_module_step(b) for b in step.get("branches") or []]}
         if (step.get("name") or "").strip():
             normalized["name"] = step["name"].strip()
+        if (step.get("note") or "").strip():
+            normalized["note"] = step["note"].strip()
         return normalized
-    return _normalize_module_step(step)
+    normalized = _normalize_module_step(step)
+    if (step.get("note") or "").strip():
+        normalized["note"] = step["note"].strip()
+    return normalized
 
 
 def validate_pipeline(definition: dict, tier_dirs: dict) -> dict:

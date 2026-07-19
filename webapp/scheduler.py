@@ -33,6 +33,23 @@ def next_daily_run_at(daily_time: str, after: datetime) -> datetime:
     return candidate.astimezone(timezone.utc)
 
 
+def next_weekly_run_at(day_of_week: int, daily_time: str, after: datetime) -> datetime:
+    """Next UTC instant a weekly schedule (a single day of the week, 0=Monday
+    ... 6=Sunday to match datetime.weekday(), plus an "HH:MM" time of day)
+    should fire, strictly after `after`. Same local-time interpretation as
+    next_daily_run_at() -- a user picking "Monday 09:00" means their own
+    machine's local Monday 9am, converted back to UTC to compare against
+    next_run_at like every other schedule kind."""
+    hour, minute = (int(part) for part in daily_time.split(":"))
+    local_after = after.astimezone()
+    candidate = local_after.replace(hour=hour, minute=minute, second=0, microsecond=0)
+    days_ahead = (day_of_week - candidate.weekday()) % 7
+    candidate += timedelta(days=days_ahead)
+    if candidate <= local_after:
+        candidate += timedelta(days=7)
+    return candidate.astimezone(timezone.utc)
+
+
 class Scheduler:
     def __init__(
         self,
@@ -94,6 +111,8 @@ class Scheduler:
                     self.on_error(schedule, str(exc))
             if schedule.get("schedule_type") == "daily":
                 next_run_at = next_daily_run_at(schedule["daily_time"], now)
+            elif schedule.get("schedule_type") == "weekly":
+                next_run_at = next_weekly_run_at(schedule["day_of_week"], schedule["daily_time"], now)
             else:
                 next_run_at = now + timedelta(seconds=schedule["interval_seconds"])
             self.state_store.record_schedule_run(schedule["id"], next_run_at.isoformat(), status)
