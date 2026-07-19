@@ -631,6 +631,25 @@ def module_stats():
     return store.module_stats()
 
 
+@app.get("/api/modules/stats.csv")
+def module_stats_csv():
+    """Same per-module run statistics as GET /api/modules/stats, as a
+    downloadable CSV -- mirrors every other CSV export in this app."""
+    buffer = io.StringIO()
+    writer = csv.DictWriter(
+        buffer, fieldnames=["tier", "name", "total_runs", "success_count", "success_rate", "avg_duration_seconds"]
+    )
+    writer.writeheader()
+    for row in store.module_stats():
+        writer.writerow(row)
+
+    return StreamingResponse(
+        iter([buffer.getvalue()]),
+        media_type="text/csv",
+        headers={"Content-Disposition": "attachment; filename=module_stats.csv"},
+    )
+
+
 @app.post("/api/self-test")
 def run_self_test():
     """Actually run every enabled module once with its own manifest's default
@@ -2140,6 +2159,25 @@ def purge_artifacts(older_than_hours: float = 24):
     removed = ingestion.purge_old_artifacts(older_than_hours)
     store.record_audit_event("artifact_purge", f"Purged {len(removed)} artifact(s) older than {older_than_hours}h.")
     return {"removed_count": len(removed), "removed": removed}
+
+
+class BulkDeleteArtifacts(BaseModel):
+    filenames: list[str]
+
+
+@app.post("/api/artifacts/bulk-delete")
+def bulk_delete_artifacts(payload: BulkDeleteArtifacts):
+    """Delete a user-picked set of specific artifacts regardless of age --
+    the finer-grained counterpart to /api/artifacts/purge's age-based
+    sweep, for a checkbox multi-select in the UI. An unknown filename is
+    skipped rather than failing the whole batch, same as bulk-tagging."""
+    deleted = []
+    for filename in payload.filenames:
+        safe_name = Path(filename).name
+        if ingestion.delete_artifact(safe_name):
+            deleted.append(safe_name)
+    store.record_audit_event("artifact_bulk_delete", f"Deleted {len(deleted)} selected artifact(s): {deleted}.")
+    return {"deleted": deleted}
 
 
 @app.get("/api/artifacts/search")

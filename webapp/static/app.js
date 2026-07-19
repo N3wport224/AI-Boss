@@ -124,8 +124,11 @@ const schedulesBulkPauseBtn = document.getElementById("schedules-bulk-pause-btn"
 const schedulesBulkResumeBtn = document.getElementById("schedules-bulk-resume-btn");
 const schedulesBulkDeleteBtn = document.getElementById("schedules-bulk-delete-btn");
 const schedulesSelectAllEl = document.getElementById("schedules-select-all");
+const scheduleFilterInput = document.getElementById("schedule-filter");
 
 const selectedScheduleIds = new Set();
+
+scheduleFilterInput.addEventListener("input", () => renderSchedulesList());
 
 function updateSchedulesBulkButtons() {
   const disabled = selectedScheduleIds.size === 0;
@@ -347,6 +350,19 @@ function wireNotificationBulkControls(container) {
   wireNotificationCheckboxes(container);
   const markReadBtn = container.querySelector("#notifications-bulk-mark-read-btn");
   const deleteBtn = container.querySelector("#notifications-bulk-delete-selected-btn");
+  const selectAllEl = container.querySelector("#notifications-select-all");
+
+  selectAllEl?.addEventListener("click", (e) => e.stopPropagation());
+  selectAllEl?.addEventListener("change", () => {
+    const checkboxes = container.querySelectorAll(".notification-select-checkbox");
+    checkboxes.forEach((checkbox) => {
+      checkbox.checked = selectAllEl.checked;
+      const id = Number(checkbox.dataset.notificationId);
+      if (selectAllEl.checked) selectedNotificationIds.add(id);
+      else selectedNotificationIds.delete(id);
+    });
+    updateNotificationBulkBtns();
+  });
 
   markReadBtn?.addEventListener("click", async (e) => {
     e.stopPropagation();
@@ -446,6 +462,10 @@ function renderNotificationsPanel() {
     </div>
     <input type="search" id="notifications-search-input" class="artifact-search-input" placeholder="Search alerts…" />
     <div class="notification-section-actions" style="padding: 4px 0;">
+      <label class="schedule-select-all-label">
+        <input type="checkbox" id="notifications-select-all" ${persistentNotifications.length && persistentNotifications.every((n) => selectedNotificationIds.has(n.id)) ? "checked" : ""} />
+        Select all
+      </label>
       <button class="btn btn-secondary btn-small" id="notifications-bulk-mark-read-btn" type="button" disabled>Mark selected read</button>
       <button class="btn btn-secondary btn-small" id="notifications-bulk-delete-selected-btn" type="button" disabled>Delete selected</button>
     </div>
@@ -3755,8 +3775,30 @@ pipelineDeepSearchInput.addEventListener("input", () => {
 
 // ---- Pipeline starter templates ----
 
+let cachedPipelineTemplates = [];
+const pipelineTemplateFilterInput = document.getElementById("pipeline-template-filter");
+
 function renderPipelineTemplates(templatesList) {
-  pipelineTemplatesGrid.innerHTML = templatesList
+  cachedPipelineTemplates = templatesList;
+  applyPipelineTemplateFilter();
+}
+
+function applyPipelineTemplateFilter() {
+  const query = pipelineTemplateFilterInput.value.trim().toLowerCase();
+  const filtered = query
+    ? cachedPipelineTemplates.filter((t) => {
+        const chainText = t.steps.map((s) => `${s.tier} ${s.name}`).join(" ");
+        const haystack = `${t.name} ${t.description} ${chainText}`.toLowerCase();
+        return haystack.includes(query);
+      })
+    : cachedPipelineTemplates;
+
+  if (!filtered.length) {
+    pipelineTemplatesGrid.innerHTML = `<p class="card-desc">No templates match your filter.</p>`;
+    return;
+  }
+
+  pipelineTemplatesGrid.innerHTML = filtered
     .map((t) => {
       const chain = t.steps.map((s) => `[${s.tier}] ${s.name}`).join(" → ");
       return `
@@ -3784,6 +3826,8 @@ async function loadPipelineTemplates() {
   renderPipelineTemplates(templatesList);
   return templatesList;
 }
+
+pipelineTemplateFilterInput.addEventListener("input", () => applyPipelineTemplateFilter());
 
 async function cloneTemplate(templateId, btn) {
   btn.disabled = true;
@@ -3906,6 +3950,7 @@ const artifactBulkUntagBtn = document.getElementById("artifact-bulk-untag-btn");
 const artifactCompareBtn = document.getElementById("artifact-compare-btn");
 const artifactCompareResultEl = document.getElementById("artifact-compare-result");
 const artifactBulkFavoriteBtn = document.getElementById("artifact-bulk-favorite-btn");
+const artifactBulkDeleteBtn = document.getElementById("artifact-bulk-delete-btn");
 
 const selectedArtifactNames = new Set();
 
@@ -3938,6 +3983,10 @@ function updateArtifactBulkTagBtn() {
   artifactBulkFavoriteBtn.textContent = selectedArtifactNames.size
     ? `★ Favorite selected (${selectedArtifactNames.size})`
     : "★ Favorite selected";
+  artifactBulkDeleteBtn.disabled = selectedArtifactNames.size === 0;
+  artifactBulkDeleteBtn.textContent = selectedArtifactNames.size
+    ? `Delete selected (${selectedArtifactNames.size})`
+    : "Delete selected";
 }
 
 async function loadArtifactTagDirectory() {
@@ -4473,6 +4522,29 @@ artifactBulkFavoriteBtn.addEventListener("click", () => {
   loadArtifacts();
 });
 
+artifactBulkDeleteBtn.addEventListener("click", async () => {
+  if (!selectedArtifactNames.size) return;
+  if (!confirm(`Delete ${selectedArtifactNames.size} selected artifact(s)? This cannot be undone.`)) return;
+
+  try {
+    const res = await fetch("/api/artifacts/bulk-delete", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ filenames: [...selectedArtifactNames] }),
+    });
+    const body = await res.json();
+    if (!res.ok) {
+      showToast(body.detail || "Bulk delete failed.", "error");
+      return;
+    }
+    selectedArtifactNames.clear();
+    showToast(`Deleted ${body.deleted.length} artifact(s).`, "success");
+    await loadArtifacts();
+  } catch (err) {
+    showToast(`Bulk delete failed: ${err}`, "error");
+  }
+});
+
 const runsPurgeHoursInput = document.getElementById("runs-purge-hours");
 const runsPurgeBtn = document.getElementById("runs-purge-btn");
 
@@ -4693,9 +4765,16 @@ function timeUntil(isoString) {
   return `in ${formatInterval(Math.round(diffMs / 1000))}`;
 }
 
+let cachedSchedules = [];
+
 async function loadSchedules() {
   const res = await fetch("/api/schedules");
-  const schedules = await res.json();
+  cachedSchedules = await res.json();
+  renderSchedulesList();
+}
+
+function renderSchedulesList() {
+  const schedules = cachedSchedules;
 
   if (!schedules.length) {
     schedulesListEl.className = "runs-empty";
@@ -4710,8 +4789,22 @@ async function loadSchedules() {
     if (!liveIds.has(id)) selectedScheduleIds.delete(id);
   });
 
+  const filterQuery = scheduleFilterInput.value.trim().toLowerCase();
+  const filtered = filterQuery
+    ? schedules.filter((s) => {
+        const haystack = `${s.kind} ${s.tier || ""} ${s.name}`.toLowerCase();
+        return haystack.includes(filterQuery);
+      })
+    : schedules;
+
+  if (!filtered.length) {
+    schedulesListEl.className = "runs-empty";
+    schedulesListEl.textContent = "No schedules match your filter.";
+    return;
+  }
+
   schedulesListEl.className = "runs-table";
-  schedulesListEl.innerHTML = schedules
+  schedulesListEl.innerHTML = filtered
     .map((s) => {
       const label = s.kind === "module" ? `[${s.tier}] ${s.name}` : `pipeline: ${s.name}`;
       const status = s.last_status
@@ -4751,16 +4844,16 @@ async function loadSchedules() {
       if (checkbox.checked) selectedScheduleIds.add(id);
       else selectedScheduleIds.delete(id);
       updateSchedulesBulkButtons();
-      schedulesSelectAllEl.checked = schedules.every((s) => selectedScheduleIds.has(s.id));
+      schedulesSelectAllEl.checked = filtered.every((s) => selectedScheduleIds.has(s.id));
     });
   });
 
-  schedulesSelectAllEl.checked = schedules.every((s) => selectedScheduleIds.has(s.id));
+  schedulesSelectAllEl.checked = filtered.every((s) => selectedScheduleIds.has(s.id));
   updateSchedulesBulkButtons();
 
   schedulesListEl.querySelectorAll("[data-schedule-duplicate]").forEach((btn) => {
     btn.addEventListener("click", () => {
-      const schedule = schedules.find((s) => String(s.id) === btn.dataset.scheduleDuplicate);
+      const schedule = cachedSchedules.find((s) => String(s.id) === btn.dataset.scheduleDuplicate);
       if (schedule) fillScheduleFormFrom(schedule);
     });
   });
@@ -5020,6 +5113,40 @@ memoryClearBtn.addEventListener("click", async () => {
 });
 
 setInterval(loadMemory, 5000);
+
+// ---- Per-module performance stats ----
+
+const moduleStatsListEl = document.getElementById("module-stats-list");
+
+async function loadModuleStats() {
+  const res = await fetch("/api/modules/stats");
+  const stats = await res.json();
+  const withRuns = stats.filter((s) => s.total_runs > 0);
+
+  if (!withRuns.length) {
+    moduleStatsListEl.className = "runs-empty";
+    moduleStatsListEl.textContent = "No runs recorded yet.";
+    return;
+  }
+
+  moduleStatsListEl.className = "runs-table";
+  moduleStatsListEl.innerHTML = withRuns
+    .map(
+      (s) => `
+      <div class="schedule-row">
+        <div class="schedule-row-main">
+          <strong>[${escapeHtml(s.tier)}] ${escapeHtml(s.name)}</strong>
+          <span class="schedule-row-meta">
+            ${s.total_runs} run(s) · ${(s.success_rate * 100).toFixed(0)}% success
+            ${s.avg_duration_seconds !== null ? ` · avg ${s.avg_duration_seconds.toFixed(2)}s` : ""}
+          </span>
+        </div>
+      </div>`
+    )
+    .join("");
+}
+
+setInterval(loadModuleStats, 5000);
 
 // ---- Environment & config viewer ----
 
@@ -5453,5 +5580,6 @@ pollWatcherStatus();
 renderNotificationsPanel();
 loadSchedules();
 loadMemory();
+loadModuleStats();
 loadEnvironment();
 loadAuditLog();

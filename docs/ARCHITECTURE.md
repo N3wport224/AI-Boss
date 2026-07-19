@@ -1926,6 +1926,65 @@ only a JSON parse error or timeout falls back to an empty issue list.
      (the one bundled module that writes to memory) rather than stubbing
      it out — searching for its `last_risk_level` key and confirming the
      Agent Memory panel's search box filters down to it.
+165. **Add a select-all checkbox for notification alerts**
+     (`#notifications-select-all` in the bell icon's Alerts panel --
+     the same `.schedule-select-all-label` pattern reused across
+     schedules/pipelines/notifications: checking it selects every alert
+     currently in `persistentNotifications`, wired inside
+     `wireNotificationBulkControls()` alongside the individual
+     per-row checkboxes so both stay in sync).
+166. **Add bulk delete for selected artifacts**
+     (`ingestion.delete_artifact(filename)` -- deletes one named file
+     regardless of age, the finer-grained counterpart to
+     `purge_old_artifacts()`'s age-based sweep; `POST
+     /api/artifacts/bulk-delete` accepts a filename list, sanitizes each
+     through `Path(filename).name` against traversal, and skips unknown
+     names rather than failing the whole batch, same convention as
+     bulk-tagging). A **Delete selected** button next to the existing
+     **Favorite selected** button in the artifacts bulk-action row, with
+     a confirm prompt before deleting.
+167. **Add exporting per-module performance stats to CSV**
+     (`GET /api/modules/stats.csv` -- the same rows as `GET
+     /api/modules/stats`, streamed as a downloadable CSV; a 2-segment
+     literal route, so no conflict with the 3-segment
+     `/api/modules/{tier}/{name}/...` dynamic routes). A new "Module
+     Performance Stats" panel in the Tools section lists every module
+     with recorded runs (run count, success rate, average duration) next
+     to an **Export CSV** download link.
+168. **Add search/filter for schedules by keyword**
+     (a client-side filter box above the Schedules list -- the full
+     schedule list is already loaded into the page via `loadSchedules()`,
+     so filtering by target name/tier/kind is a pure in-memory
+     `Array.filter()` over a newly cached `cachedSchedules`, re-rendered
+     through a `renderSchedulesList()` split out from the original fetch
+     so the filter box can re-render without a network round trip; the
+     select-all checkbox and its "every row checked" state now operate
+     on the filtered/visible set rather than the full list, matching how
+     a header checkbox should behave against what's actually on screen).
+169. **Add search across the pipeline template gallery**
+     (the same client-side cache-and-filter approach as schedules: a
+     `cachedPipelineTemplates` array plus an `applyPipelineTemplateFilter()`
+     that matches a filter box's query against each template's name,
+     description, and module chain, since the whole gallery is static
+     built-in content already loaded in one shot).
+170. **Add tests for all of Batch 21**: bulk-deleting artifacts removes
+     every selected file, skips unknown filenames without failing the
+     batch, is a no-op on an empty selection, and rejects path traversal
+     in a filename; the module-stats CSV export has a header row and one
+     row per module with recorded runs. 502 tests total, stable across
+     repeated clean full-suite runs. Live-verified end to end with
+     Playwright against a freshly started server: checking the
+     notifications select-all checkbox selects every seeded alert and
+     enables the bulk-delete button; checkbox-selecting an uploaded
+     artifact and clicking **Delete selected** (confirming the dialog)
+     actually removes it from `GET /api/artifacts`; downloading
+     `/api/modules/stats.csv` returns a real header plus a row for a
+     module with runs, matching what the new Module Performance Stats
+     panel renders; typing into the schedule filter box narrows the
+     Schedules list to a real match and shows "No schedules match your
+     filter" for a nonsense query, restoring the full list when cleared;
+     the same filter/clear round trip confirmed against the Pipeline
+     Templates gallery.
 
 ## 9. Roadmap
 

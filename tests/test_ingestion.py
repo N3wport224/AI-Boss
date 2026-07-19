@@ -801,3 +801,45 @@ def test_download_unknown_artifact_404s():
 def test_download_artifact_rejects_path_traversal_in_filename():
     res = client.get("/api/artifacts/..%2F..%2Fetc%2Fpasswd/download")
     assert res.status_code == 404
+
+
+# ---- Batch 21: bulk delete selected artifacts ----
+
+def test_bulk_delete_artifacts_removes_every_selected_file():
+    client.post("/api/ingest/csv", files={"file": ("bulkdel_a.csv", b"x,y\n9101,9102\n", "text/csv")})
+    client.post("/api/ingest/csv", files={"file": ("bulkdel_b.csv", b"x,y\n9103,9104\n", "text/csv")})
+    client.post("/api/ingest/csv", files={"file": ("bulkdel_keep.csv", b"x,y\n9105,9106\n", "text/csv")})
+    files = client.get("/api/artifacts").json()
+    a_name = next(f["name"] for f in files if f["name"].endswith("bulkdel_a.csv"))
+    b_name = next(f["name"] for f in files if f["name"].endswith("bulkdel_b.csv"))
+    keep_name = next(f["name"] for f in files if f["name"].endswith("bulkdel_keep.csv"))
+
+    res = client.post("/api/artifacts/bulk-delete", json={"filenames": [a_name, b_name]})
+    assert res.status_code == 200
+    assert set(res.json()["deleted"]) == {a_name, b_name}
+
+    remaining = {f["name"] for f in client.get("/api/artifacts").json()}
+    assert a_name not in remaining
+    assert b_name not in remaining
+    assert keep_name in remaining
+
+
+def test_bulk_delete_artifacts_skips_unknown_filenames():
+    client.post("/api/ingest/csv", files={"file": ("bulkdel_solo.csv", b"x,y\n9107,9108\n", "text/csv")})
+    solo_name = next(f["name"] for f in client.get("/api/artifacts").json() if f["name"].endswith("bulkdel_solo.csv"))
+
+    res = client.post("/api/artifacts/bulk-delete", json={"filenames": [solo_name, "does-not-exist.csv"]})
+    assert res.status_code == 200
+    assert res.json()["deleted"] == [solo_name]
+
+
+def test_bulk_delete_artifacts_is_a_no_op_on_an_empty_selection():
+    res = client.post("/api/artifacts/bulk-delete", json={"filenames": []})
+    assert res.status_code == 200
+    assert res.json()["deleted"] == []
+
+
+def test_bulk_delete_artifacts_rejects_path_traversal_in_filenames():
+    res = client.post("/api/artifacts/bulk-delete", json={"filenames": ["../../etc/passwd"]})
+    assert res.status_code == 200
+    assert res.json()["deleted"] == []

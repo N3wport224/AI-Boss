@@ -486,3 +486,15 @@ def purge_old_artifacts(older_than_hours: float) -> list[str]:
             path.unlink()
             removed.append(path.name)
     return removed
+
+
+def delete_artifact(filename: str) -> bool:
+    """Delete one specific artifact by name, regardless of age -- the
+    finer-grained counterpart to purge_old_artifacts()'s age-based sweep,
+    for a checkbox multi-select in the UI. Returns False (a no-op) if the
+    file doesn't exist rather than raising."""
+    path = ARTIFACTS_DIR / filename
+    if not path.is_file():
+        return False
+    path.unlink()
+    return True

@@ -155,6 +155,7 @@
           <button id="artifact-bulk-untag-btn" class="btn btn-secondary btn-small" type="button" disabled title="Remove this tag from every selected file">Remove tag from selected</button>
           <button id="artifact-compare-btn" class="btn btn-secondary btn-small" type="button" disabled title="Select exactly two table-shaped files to compare their schemas">Compare schemas</button>
           <button id="artifact-bulk-favorite-btn" class="btn btn-secondary btn-small" type="button" disabled>★ Favorite selected</button>
+          <button id="artifact-bulk-delete-btn" class="btn btn-danger btn-small" type="button" disabled>Delete selected</button>
         </div>
         <div id="artifact-tag-directory" class="tag-directory hidden"></div>
         <div id="artifact-compare-result" class="hidden"></div>
@@ -204,6 +205,9 @@
         </div>
       </div>
       <p class="card-desc">Ready-made starting points using the bundled modules — clone one into your own saved pipelines, then customize.</p>
+      <div class="pipeline-filter-row">
+        <input type="text" id="pipeline-template-filter" placeholder="Filter templates by name, description, or module…" class="artifact-search-input" />
+      </div>
       <div class="card-grid" id="pipeline-templates-grid"></div>
     </section>
 
@@ -302,6 +306,9 @@
         <p id="schedule-error" class="builder-error hidden"></p>
         <button id="schedule-create-btn" class="btn btn-primary btn-small" type="button">Create Schedule</button>
       </div>
+      <div class="pipeline-filter-row">
+        <input type="text" id="schedule-filter" placeholder="Filter by target, tier, or kind…" class="artifact-search-input" />
+      </div>
       <div class="artifacts-bulk-tag-row">
         <label class="schedule-select-all-label">
           <input type="checkbox" id="schedules-select-all" />
@@ -363,6 +370,13 @@
         </div>
         <button id="scaffold-create-btn" class="btn btn-primary btn-small" type="button">Scaffold module</button>
         <p id="scaffold-result" class="card-desc hidden"></p>
+      </div>
+      <div class="tools-panel">
+        <div class="notification-section-head">
+          <h4>Module Performance Stats</h4>
+          <a class="btn btn-secondary btn-small" href="/api/modules/stats.csv" download>Export CSV</a>
+        </div>
+        <div id="module-stats-list" class="runs-empty">No runs recorded yet.</div>
       </div>
     </section>
 

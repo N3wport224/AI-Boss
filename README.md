@@ -786,6 +786,23 @@ A few things live in the header/subheader on every page load:
 - **Search agent memory** — a search box in the Agent Memory panel
   filters remembered key/value pairs by keyword.
 
+## Notification select-all, artifact bulk delete, module stats CSV export, and schedule/template filters
+
+- **Select-all for notification alerts** — a header checkbox in the bell
+  icon's Alerts section selects (or clears) every alert at once before a
+  bulk mark-read/delete.
+- **Bulk delete selected artifacts** — checkbox-select multiple
+  artifacts and remove them all in one click, the finer-grained
+  counterpart to the existing age-based purge.
+- **Export per-module performance stats to CSV** — a Module Performance
+  Stats panel in Tools shows each module's run count/success
+  rate/average duration, with an **Export CSV** download link.
+- **Filter schedules by keyword** — a filter box above the Schedules
+  list narrows visible rows by target name, tier, or kind.
+- **Filter the pipeline template gallery** — a filter box above the
+  Pipeline Templates gallery narrows visible cards by name,
+  description, or module chain.
+
 ## Tech stack
 
 - **Language:** Python 3.11+ — first-class async/sync support and native SDKs

@@ -726,3 +726,20 @@ def test_module_with_no_runs_reports_zero_stats_not_an_error():
             if module["stats"]["total_runs"] == 0:
                 assert module["stats"]["success_rate"] is None
                 assert module["stats"]["avg_duration_seconds"] is None
+
+
+# ---- Batch 21: export per-module performance stats to CSV ----
+
+def test_module_stats_csv_export_has_a_header_and_a_row_for_a_run_module():
+    client.post(
+        "/api/modules/automation/fetch_raw_metrics/run",
+        json={"inputs": {"signups": 3, "churn": 1, "revenue": 30}, "force_refresh": True},
+    )
+    res = client.get("/api/modules/stats.csv")
+    assert res.status_code == 200
+    assert res.headers["content-type"].startswith("text/csv")
+    assert "attachment; filename=module_stats.csv" in res.headers["content-disposition"]
+
+    lines = res.text.strip().splitlines()
+    assert lines[0] == "tier,name,total_runs,success_count,success_rate,avg_duration_seconds"
+    assert any("fetch_raw_metrics" in line for line in lines[1:])
