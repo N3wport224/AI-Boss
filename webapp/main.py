@@ -216,7 +216,8 @@ class ScheduleCreate(BaseModel):
 
 
 class ScheduleUpdate(BaseModel):
-    enabled: bool
+    enabled: Optional[bool] = None
+    label: Optional[str] = None
 
 
 def _manifest_by_name(tier: str, name: str) -> dict:
@@ -1595,7 +1596,7 @@ def schedules_csv():
     with /api/schedules/{schedule_id}."""
     buffer = io.StringIO()
     fieldnames = [
-        "id", "kind", "tier", "name", "schedule_type", "interval_seconds",
+        "id", "kind", "tier", "name", "label", "schedule_type", "interval_seconds",
         "daily_time", "day_of_week", "enabled", "next_run_at", "last_run_at", "last_status",
     ]
     writer = csv.DictWriter(buffer, fieldnames=fieldnames, extrasaction="ignore")
@@ -1672,9 +1673,17 @@ def create_schedule(payload: ScheduleCreate):
 
 @app.patch("/api/schedules/{schedule_id}")
 def update_schedule(schedule_id: int, payload: ScheduleUpdate):
-    schedule = store.set_schedule_enabled(schedule_id, payload.enabled)
-    if schedule is None:
-        raise HTTPException(status_code=404, detail=f"No schedule with id {schedule_id}.")
+    if payload.enabled is None and payload.label is None:
+        raise HTTPException(status_code=400, detail="Provide 'enabled' and/or 'label' to update.")
+    schedule = None
+    if payload.enabled is not None:
+        schedule = store.set_schedule_enabled(schedule_id, payload.enabled)
+        if schedule is None:
+            raise HTTPException(status_code=404, detail=f"No schedule with id {schedule_id}.")
+    if payload.label is not None:
+        schedule = store.set_schedule_label(schedule_id, payload.label)
+        if schedule is None:
+            raise HTTPException(status_code=404, detail=f"No schedule with id {schedule_id}.")
     return schedule
 
 

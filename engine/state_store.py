@@ -181,6 +181,8 @@ class StateStore:
             self._conn.execute("ALTER TABLE schedules ADD COLUMN daily_time TEXT")
         if "day_of_week" not in schedule_columns:
             self._conn.execute("ALTER TABLE schedules ADD COLUMN day_of_week INTEGER")
+        if "label" not in schedule_columns:
+            self._conn.execute("ALTER TABLE schedules ADD COLUMN label TEXT NOT NULL DEFAULT ''")
 
         run_columns = {row[1] for row in self._conn.execute("PRAGMA table_info(runs)").fetchall()}
         if "blackboard" not in run_columns:
@@ -801,7 +803,7 @@ class StateStore:
     _SCHEDULE_COLUMNS = (
         "id", "kind", "tier", "name", "inputs", "interval_seconds",
         "enabled", "next_run_at", "last_run_at", "last_status", "created_at",
-        "schedule_type", "daily_time", "day_of_week",
+        "schedule_type", "daily_time", "day_of_week", "label",
     )
 
     def _schedule_row_to_dict(self, row) -> dict:
@@ -814,16 +816,16 @@ class StateStore:
         self, kind: str, name: str, interval_seconds: Optional[float], next_run_at: str,
         tier: Optional[str] = None, inputs: Optional[dict] = None,
         schedule_type: str = "interval", daily_time: Optional[str] = None,
-        day_of_week: Optional[int] = None,
+        day_of_week: Optional[int] = None, label: str = "",
     ) -> dict:
         with self._lock:
             cur = self._conn.execute(
                 "INSERT INTO schedules (kind, tier, name, inputs, interval_seconds, enabled, "
-                "next_run_at, created_at, schedule_type, daily_time, day_of_week) "
-                "VALUES (?, ?, ?, ?, ?, 1, ?, ?, ?, ?, ?)",
+                "next_run_at, created_at, schedule_type, daily_time, day_of_week, label) "
+                "VALUES (?, ?, ?, ?, ?, 1, ?, ?, ?, ?, ?, ?)",
                 (
                     kind, tier, name, json.dumps(inputs or {}), interval_seconds or 0.0,
-                    next_run_at, datetime.now(timezone.utc).isoformat(), schedule_type, daily_time, day_of_week,
+                    next_run_at, datetime.now(timezone.utc).isoformat(), schedule_type, daily_time, day_of_week, label,
                 ),
             )
             self._conn.commit()
@@ -832,6 +834,20 @@ class StateStore:
                 f"SELECT {', '.join(self._SCHEDULE_COLUMNS)} FROM schedules WHERE id = ?", (schedule_id,)
             ).fetchone()
         return self._schedule_row_to_dict(row)
+
+    def set_schedule_label(self, schedule_id: int, label: str) -> Optional[dict]:
+        """A free-text label a user can set per schedule, independent of its
+        target -- so several schedules against the same module/pipeline
+        (different cadences, different purposes) can be told apart at a
+        glance instead of only by cadence text. Blank clears it back to
+        unlabeled."""
+        with self._lock:
+            self._conn.execute("UPDATE schedules SET label = ? WHERE id = ?", (label, schedule_id))
+            self._conn.commit()
+            row = self._conn.execute(
+                f"SELECT {', '.join(self._SCHEDULE_COLUMNS)} FROM schedules WHERE id = ?", (schedule_id,)
+            ).fetchone()
+        return self._schedule_row_to_dict(row) if row else None
 
     def list_schedules(self) -> list[dict]:
         with self._lock:

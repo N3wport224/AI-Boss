@@ -913,6 +913,16 @@ body.density-compact .tier-section {
   color: var(--text-dim);
 }
 
+.schedule-row-label {
+  display: inline-block;
+  font-size: 0.75rem;
+  padding: 0.05rem 0.45rem;
+  border-radius: 999px;
+  border: 1px solid var(--accent-pipeline);
+  color: var(--accent-pipeline);
+  width: fit-content;
+}
+
 .schedule-row-actions {
   display: flex;
   gap: 8px;
@@ -1647,6 +1657,32 @@ body.density-compact .tier-section {
   display: none;
 }
 
+.status-filter-chips {
+  display: flex;
+  gap: 6px;
+  margin-bottom: 8px;
+}
+
+.status-filter-chip {
+  border: 1px solid var(--border);
+  background: var(--bg-elevated);
+  color: var(--text-dim);
+  border-radius: 999px;
+  padding: 3px 12px;
+  font-size: 0.78rem;
+  cursor: pointer;
+}
+
+.status-filter-chip.active {
+  border-color: var(--accent-pipeline);
+  color: var(--accent-pipeline);
+}
+
+.history-row.status-filter-hidden,
+.history-row.status-filter-hidden + .run-detail-row {
+  display: none;
+}
+
 /* Recent runs table */
 
 .runs-table {
@@ -2061,6 +2097,12 @@ body.density-compact .tier-section {
 
 .dag-scroll {
   overflow-x: auto;
+}
+
+.dag-toolbar {
+  display: flex;
+  justify-content: flex-end;
+  margin-bottom: 8px;
 }
 
 .artifact-content-row td {

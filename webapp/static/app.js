@@ -881,7 +881,7 @@ async function loadRecentRuns() {
           : "–";
       const checked = selectedRunIds.has(r.id) ? "checked" : "";
       return `
-        <tr class="history-row" data-run-id="${r.id}">
+        <tr class="history-row" data-run-id="${r.id}" data-status="${r.status}">
           <td class="run-select-cell"><input type="checkbox" class="run-select-checkbox" data-run-id="${r.id}" ${checked} /></td>
           <td><span class="run-expand-chevron">▸</span> #${r.id} <span class="run-note-indicator" title="This run has a note">${r.note ? "📝" : ""}</span></td>
           <td class="status-${r.status}">${r.status}</td>
@@ -935,7 +935,26 @@ async function loadRecentRuns() {
 
   populateCompareSelects(runs);
   renderRunsTrend(runs);
+  applyRunStatusFilter();
 }
+
+// ---- Quick status-filter chips for Recent Runs ----
+let currentRunStatusFilter = "all";
+
+function applyRunStatusFilter() {
+  recentRunsTableEl.querySelectorAll(".history-row").forEach((row) => {
+    const matches = currentRunStatusFilter === "all" || row.dataset.status === currentRunStatusFilter;
+    row.classList.toggle("status-filter-hidden", !matches);
+  });
+}
+
+document.querySelectorAll("[data-run-status-filter]").forEach((chip) => {
+  chip.addEventListener("click", () => {
+    currentRunStatusFilter = chip.dataset.runStatusFilter;
+    document.querySelectorAll("[data-run-status-filter]").forEach((c) => c.classList.toggle("active", c === chip));
+    applyRunStatusFilter();
+  });
+});
 
 // ---- Run history trend sparkline ----
 // One bar per run (oldest -> newest, left to right): height encodes duration,
@@ -1448,6 +1467,21 @@ function renderFavoritesSection() {
       const slug = key.slice("pipeline::".length);
       const pipeline = currentPipelines.find((p) => p.slug === slug);
       if (pipeline) entries.push({ key, label: pipeline.name, description: pipeline.description, action: "run" });
+    } else if (key.startsWith("schedule::")) {
+      const id = Number(key.slice("schedule::".length));
+      const schedule = cachedSchedules.find((s) => s.id === id);
+      if (schedule) {
+        const label = schedule.kind === "module" ? `[${schedule.tier}] ${schedule.name}` : `pipeline: ${schedule.name}`;
+        const cadenceDesc =
+          schedule.schedule_type === "daily"
+            ? `daily at ${schedule.daily_time}`
+            : schedule.schedule_type === "weekly"
+              ? `weekly at ${schedule.daily_time}`
+              : schedule.schedule_type === "once"
+                ? "one-time schedule"
+                : `every ${formatInterval(schedule.interval_seconds)}`;
+        entries.push({ key, label, description: cadenceDesc, action: "view" });
+      }
     } else if (key.startsWith("artifact::")) {
       const filename = key.slice("artifact::".length);
       const artifact = currentArtifacts.find((f) => f.name === filename);
@@ -1486,6 +1520,14 @@ function runFavorite(key) {
     const slug = key.slice("pipeline::".length);
     const pipeline = currentPipelines.find((p) => p.slug === slug);
     if (pipeline) runSavedPipeline(slug, pipeline.name, currentPipelines);
+  } else if (key.startsWith("schedule::")) {
+    const id = key.slice("schedule::".length);
+    const row = document.getElementById(`schedule-row__${id}`);
+    if (row) {
+      row.scrollIntoView({ behavior: "smooth", block: "center" });
+      row.classList.add("jump-highlight");
+      setTimeout(() => row.classList.remove("jump-highlight"), 1500);
+    }
   } else if (key.startsWith("artifact::")) {
     const filename = key.slice("artifact::".length);
     artifactsListEl.scrollIntoView({ behavior: "smooth", block: "center" });
@@ -3752,10 +3794,31 @@ async function togglePipelineGraph(slug) {
   try {
     const res = await fetch(`/api/pipelines/${slug}/graph`);
     const graph = await res.json();
-    panel.innerHTML = `<div class="dag-scroll">${renderDagSvg(graph)}</div>`;
+    panel.innerHTML = `
+      <div class="dag-toolbar">
+        <button class="btn btn-secondary btn-small" data-dag-download-btn>Download SVG</button>
+      </div>
+      <div class="dag-scroll">${renderDagSvg(graph)}</div>`;
+    panel.querySelector("[data-dag-download-btn]").addEventListener("click", () => downloadPipelineDagSvg(slug, panel));
   } catch (err) {
     panel.innerHTML = `<p class="card-desc">Could not load graph: ${err}</p>`;
   }
+}
+
+function downloadPipelineDagSvg(slug, panel) {
+  const svgEl = panel.querySelector("svg");
+  if (!svgEl) return;
+  const serialized = new XMLSerializer().serializeToString(svgEl);
+  const svgContent = `<?xml version="1.0" encoding="UTF-8"?>\n${serialized}`;
+  const blob = new Blob([svgContent], { type: "image/svg+xml" });
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement("a");
+  a.href = url;
+  a.download = `${slug}_dag.svg`;
+  document.body.appendChild(a);
+  a.click();
+  a.remove();
+  URL.revokeObjectURL(url);
 }
 
 async function togglePipelineHistory(slug) {
@@ -5140,6 +5203,7 @@ async function loadSchedules() {
   const res = await fetch("/api/schedules");
   cachedSchedules = await res.json();
   renderSchedulesList();
+  renderFavoritesSection();
 }
 
 function renderSchedulesList() {
@@ -5175,7 +5239,7 @@ function renderSchedulesList() {
   schedulesListEl.className = "runs-table";
   schedulesListEl.innerHTML = filtered
     .map((s) => {
-      const label = s.kind === "module" ? `[${s.tier}] ${s.name}` : `pipeline: ${s.name}`;
+      const targetLabel = s.kind === "module" ? `[${s.tier}] ${s.name}` : `pipeline: ${s.name}`;
       const status = s.last_status
         ? `last: ${escapeHtml(s.last_status)}${s.last_run_at ? ` @ ${new Date(s.last_run_at).toLocaleTimeString()}` : ""}`
         : "never run yet";
@@ -5189,14 +5253,20 @@ function renderSchedulesList() {
               ? `once at ${new Date(s.next_run_at).toLocaleString()}`
               : `every ${formatInterval(s.interval_seconds)}`;
       const checked = selectedScheduleIds.has(s.id) ? "checked" : "";
+      const labelBadge = s.label
+        ? `<span class="schedule-row-label" data-schedule-label-text="${s.id}">${escapeHtml(s.label)}</span>`
+        : "";
       return `
-        <div class="schedule-row">
+        <div class="schedule-row" id="schedule-row__${s.id}">
           <input type="checkbox" class="schedule-select-checkbox" data-schedule-id="${s.id}" ${checked} />
           <div class="schedule-row-main">
-            <strong>${escapeHtml(label)}</strong>
+            <strong>${escapeHtml(targetLabel)}</strong>
+            ${labelBadge}
             <span class="schedule-row-meta">${cadence} · next ${s.enabled ? timeUntil(s.next_run_at) : "paused"} · ${status}</span>
           </div>
           <div class="schedule-row-actions">
+            ${favoriteButtonHtml(`schedule::${s.id}`)}
+            <button class="btn btn-secondary btn-small" data-schedule-edit-label="${s.id}">${s.label ? "Edit label" : "Add label"}</button>
             <button class="btn btn-secondary btn-small" data-schedule-toggle="${s.id}" data-enabled="${s.enabled}">
               ${s.enabled ? "Pause" : "Resume"}
             </button>
@@ -5216,6 +5286,7 @@ function renderSchedulesList() {
       schedulesSelectAllEl.checked = filtered.every((s) => selectedScheduleIds.has(s.id));
     });
   });
+  wireFavoriteToggles(schedulesListEl);
 
   schedulesSelectAllEl.checked = filtered.every((s) => selectedScheduleIds.has(s.id));
   updateSchedulesBulkButtons();
@@ -5245,6 +5316,21 @@ function renderSchedulesList() {
       await fetch(`/api/schedules/${btn.dataset.scheduleDelete}`, { method: "DELETE" });
       await loadSchedules();
       showToast("Schedule deleted.", "success");
+    });
+  });
+
+  schedulesListEl.querySelectorAll("[data-schedule-edit-label]").forEach((btn) => {
+    btn.addEventListener("click", async () => {
+      const id = btn.dataset.scheduleEditLabel;
+      const schedule = cachedSchedules.find((s) => String(s.id) === id);
+      const next = prompt("Label for this schedule (blank to clear):", schedule ? schedule.label || "" : "");
+      if (next === null) return;
+      await fetch(`/api/schedules/${id}`, {
+        method: "PATCH",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ label: next }),
+      });
+      await loadSchedules();
     });
   });
 }

@@ -2290,6 +2290,81 @@ only a JSON parse error or timeout falls back to an empty issue list.
      uploading a small JSON file through the Agent Memory panel's
      **Import…** picker landed the expected key/value pair in
      `GET /api/memory`.
+192. **Add favoriting a schedule** (frontend-only -- the existing
+     localStorage favorites system already supports arbitrary prefixed
+     keys, so a `schedule::{id}` key slots in alongside
+     `module::`/`pipeline::`/`artifact::` with no backend change. A ★
+     toggle sits in each schedule row's actions next to Pause/Resume;
+     `renderFavoritesSection()` resolves a stored `schedule::` key against
+     the already-loaded `cachedSchedules` list to build its favorites-grid
+     entry, showing the same `[tier] name` / `pipeline: name` label used
+     in the schedule list plus its cadence description. Its "view" action
+     scrolls the schedule row into view and flashes the existing
+     `.jump-highlight` CSS class rather than introducing a new one).
+193. **Add a free-text label/note per schedule**
+     (a new `label TEXT NOT NULL DEFAULT ''` column on `schedules`,
+     migrated in idempotently like every other schedule column;
+     `_SCHEDULE_COLUMNS` gained `label` at the *end* of the tuple
+     specifically so every existing positional `zip(columns, row)`
+     mapping and raw `SELECT {', '.join(_SCHEDULE_COLUMNS)}` call site
+     picks it up automatically with no other code changes needed.
+     `StateStore.set_schedule_label()` follows the same
+     update-then-re-`SELECT` pattern as `set_schedule_enabled()`. The
+     existing `PATCH /api/schedules/{id}` endpoint gained an optional
+     `label` field on `ScheduleUpdate` alongside the existing `enabled`
+     field -- both are now optional, and the handler applies whichever
+     one(s) are present, rejecting a payload with neither with a 400 --
+     rather than adding a second endpoint for what's still "update this
+     schedule." Each schedule row shows its label as a small pill next to
+     the target name when set, with an **Add label** / **Edit label**
+     button opening a `prompt()` (mirroring the existing rename-pipeline
+     pattern) that PATCHes the new field; the schedule CSV export gained
+     a `label` column). The pre-existing local variable named `label`
+     inside `renderSchedulesList()`'s row-template map callback (computing
+     the `[tier] name` / `pipeline: name` target description) was renamed
+     to `targetLabel` to avoid colliding with the new `schedule.label`
+     field from the API.
+194. **Add downloading a pipeline's DAG graph as a standalone SVG file**
+     (frontend-only -- the DAG panel already renders a raw `<svg>...</svg>`
+     string client-side via `renderDagSvg()`; a **Download SVG** button in
+     a small toolbar above the graph reads the live `<svg>` element back
+     out of the DOM with `XMLSerializer`, prepends an XML declaration, and
+     triggers a save via the same Blob + throwaway-`<a>`-element technique
+     used for the Batch 24 bulk-artifact-zip download -- no backend
+     endpoint needed since the graph is already fully client-rendered).
+195. **Add quick status-filter chips (All / Completed / Failed / Running)
+     to Recent Runs** (frontend-only -- each history row already carries
+     its run's `status` in a table cell; it now also carries it as a
+     `data-status` attribute on the row itself so a chip click can filter
+     without re-fetching. Clicking a chip toggles a `.status-filter-hidden`
+     class across non-matching rows -- and, via a `+` adjacent-sibling CSS
+     rule, hides that row's detail-expansion row too -- mirroring the
+     existing `search-hidden`/`problems-filter-hidden` class-toggle
+     pattern rather than re-rendering the table. Considered filtering by
+     module/tier instead, but `GET /api/runs` records only
+     `id`/`started_at`/`finished_at`/`status`/`note` per run -- a run can
+     span multiple steps/modules, so there's no single tier to filter by
+     -- and swapped to status, which every run genuinely has exactly one
+     of).
+196. **Add tests for all of Batch 26**: setting and clearing a schedule's
+     label round-trips through `PATCH`/`GET /api/schedules`; a `PATCH`
+     with neither `enabled` nor `label` is rejected (400) and a `PATCH`
+     against an unknown schedule id is rejected (404) whether or not a
+     valid field is supplied; the schedule CSV export's header and rows
+     include the new `label` column. 553 tests total, stable across two
+     repeated clean full-suite runs. Live-verified end to end with
+     Playwright against a freshly started server: starring a schedule's
+     row made it appear in the Favorites strip; setting a label via the
+     PATCH endpoint showed the pill on the row, and clicking **Edit
+     label** and accepting a native `prompt()` dialog changed it again;
+     opening a saved pipeline's DAG graph and clicking **Download SVG**
+     produced a real `<svg>...</svg>` file download named
+     `{slug}_dag.svg`; running one module to completion and a second
+     (`http_request` with a deliberately empty URL, which fails
+     immediately with no network call) to failure, then clicking the
+     **Failed**/**Completed**/**All** chips, showed only the
+     matching-status rows each time and the original row count again
+     under **All**.
 
 ## 9. Roadmap
 

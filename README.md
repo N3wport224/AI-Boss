@@ -871,6 +871,20 @@ A few things live in the header/subheader on every page load:
   Agent Memory panel restores or seeds `{key: value}` pairs, the restore
   counterpart to the existing memory CSV export.
 
+## Schedule favorites/labels, DAG SVG export, and run status filter chips
+
+- **Favorite a schedule** — a ★ toggle on each schedule row adds it to the
+  same Favorites strip used by modules, pipelines, and artifacts.
+- **Free-text label per schedule** — an **Add label**/**Edit label** button
+  on each schedule row attaches a short note (e.g. "Nightly metrics pull")
+  so schedules against the same target are easy to tell apart at a glance;
+  the schedule CSV export includes it too.
+- **Download a pipeline's DAG graph as an SVG file** — a **Download SVG**
+  button above the graph saves the rendered dependency diagram as a
+  standalone file.
+- **Run status filter chips** — All/Completed/Failed/Running chips above
+  Recent Runs narrow the table to one status without a page reload.
+
 ## Tech stack
 
 - **Language:** Python 3.11+ — first-class async/sync support and native SDKs

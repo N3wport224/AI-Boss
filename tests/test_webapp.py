@@ -190,6 +190,55 @@ def test_schedule_crud_and_validation():
     assert not any(s["id"] == schedule_id for s in client.get("/api/schedules").json())
 
 
+def test_schedule_label_can_be_set_and_cleared():
+    res = client.post(
+        "/api/schedules",
+        json={
+            "kind": "module",
+            "tier": "automation",
+            "name": "fetch_raw_metrics",
+            "inputs": {"signups": 1, "churn": 1, "revenue": 1},
+            "interval_seconds": 30,
+        },
+    )
+    schedule_id = res.json()["id"]
+    assert res.json()["label"] == ""
+
+    labeled = client.patch(f"/api/schedules/{schedule_id}", json={"label": "Nightly metrics pull"})
+    assert labeled.status_code == 200
+    assert labeled.json()["label"] == "Nightly metrics pull"
+
+    listed = {s["id"]: s for s in client.get("/api/schedules").json()}
+    assert listed[schedule_id]["label"] == "Nightly metrics pull"
+
+    cleared = client.patch(f"/api/schedules/{schedule_id}", json={"label": ""})
+    assert cleared.json()["label"] == ""
+
+    client.delete(f"/api/schedules/{schedule_id}")
+
+
+def test_schedule_update_rejects_empty_payload_and_unknown_id():
+    res = client.post(
+        "/api/schedules",
+        json={
+            "kind": "module",
+            "tier": "automation",
+            "name": "fetch_raw_metrics",
+            "inputs": {"signups": 1, "churn": 1, "revenue": 1},
+            "interval_seconds": 30,
+        },
+    )
+    schedule_id = res.json()["id"]
+
+    empty_res = client.patch(f"/api/schedules/{schedule_id}", json={})
+    assert empty_res.status_code == 400
+
+    missing_res = client.patch("/api/schedules/9999999", json={"label": "does not matter"})
+    assert missing_res.status_code == 404
+
+    client.delete(f"/api/schedules/{schedule_id}")
+
+
 def test_schedules_csv_export_has_a_header_and_a_row_for_a_created_schedule():
     res = client.post(
         "/api/schedules",
@@ -210,7 +259,7 @@ def test_schedules_csv_export_has_a_header_and_a_row_for_a_created_schedule():
 
     lines = csv_res.text.strip().splitlines()
     assert lines[0] == (
-        "id,kind,tier,name,schedule_type,interval_seconds,daily_time,day_of_week,"
+        "id,kind,tier,name,label,schedule_type,interval_seconds,daily_time,day_of_week,"
         "enabled,next_run_at,last_run_at,last_status"
     )
     assert any(line.startswith(f"{schedule_id},module,automation,fetch_raw_metrics,") for line in lines[1:])
