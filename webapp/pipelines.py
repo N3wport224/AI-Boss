@@ -250,6 +250,50 @@ def load_pipeline(slug: str) -> dict:
     return yaml.safe_load(path.read_text()) or {}
 
 
+def pipelines_using_module(tier: str, name: str) -> list[str]:
+    """Slugs of every saved pipeline with a step (or parallel branch) that
+    references the given tier+name -- the blast radius a user should see
+    before disabling, deleting, or duplicating a module out from under it."""
+    slugs = []
+    for definition in list_pipelines():
+        for step in definition.get("steps", []):
+            if is_parallel_step(step):
+                refs = step.get("branches") or []
+            else:
+                refs = [step]
+            if any(ref.get("tier") == tier and ref.get("name") == name for ref in refs):
+                slugs.append(definition.get("slug", ""))
+                break
+    return slugs
+
+
+def search_pipelines(query: str, max_results: int = 20) -> list[dict]:
+    """Case-insensitive keyword search across every saved pipeline's raw
+    YAML text -- not just the name/description shown by the search omnibar,
+    but also step-level details like input values, mapped fields, and
+    conditions. Returns one entry per matching pipeline with a short
+    snippet showing where the match was found, mirroring
+    ingestion.search_artifacts()'s content-search pattern."""
+    query_lower = query.lower().strip()
+    if not query_lower or not PIPELINES_DIR.exists():
+        return []
+
+    results = []
+    for path in sorted(PIPELINES_DIR.glob("*.yaml"), key=lambda p: p.stat().st_mtime, reverse=True):
+        text = path.read_text()
+        idx = text.lower().find(query_lower)
+        if idx == -1:
+            continue
+
+        start = max(0, idx - 60)
+        end = min(len(text), idx + len(query_lower) + 60)
+        snippet = " ".join(text[start:end].split())
+        results.append({"slug": path.stem, "snippet": snippet})
+        if len(results) >= max_results:
+            break
+    return results
+
+
 def delete_pipeline(slug: str) -> None:
     """Remove a saved pipeline's current definition. Its archived version
     history under `_versions/<slug>/` is deliberately left in place —

@@ -451,3 +451,67 @@ def test_bulk_tag_skips_unknown_filenames_without_failing():
 def test_bulk_tag_rejects_a_blank_tag():
     res = client.post("/api/artifacts/bulk-tags", json={"filenames": [], "tag": "   "})
     assert res.status_code == 400
+
+
+# ---- Batch 13: column schema summary on CSV/XLSX ingest ----
+
+def test_infer_schema_reports_column_names_types_and_row_count():
+    records = [
+        {"id": "1", "name": "Acme", "active": "true", "revenue": "100"},
+        {"id": "2", "name": "Beta", "active": "false", "revenue": "200.5"},
+    ]
+    schema = ingestion.infer_schema(records)
+    assert schema["row_count"] == 2
+    by_name = {c["name"]: c["type"] for c in schema["columns"]}
+    assert by_name == {"id": "int", "name": "text", "active": "bool", "revenue": "float"}
+
+
+def test_infer_schema_detects_date_like_columns():
+    records = [{"joined": "2024-01-01"}, {"joined": "2024-06-15"}]
+    schema = ingestion.infer_schema(records)
+    assert schema["columns"] == [{"name": "joined", "type": "date"}]
+
+
+def test_infer_schema_reports_mixed_when_no_type_has_a_clear_majority():
+    records = [{"col": "1"}, {"col": "not_a_number"}]
+    schema = ingestion.infer_schema(records)
+    assert schema["columns"] == [{"name": "col", "type": "mixed"}]
+
+
+def test_infer_schema_ignores_null_cells_when_choosing_a_type():
+    records = [{"col": "1"}, {"col": None}, {"col": ""}]
+    schema = ingestion.infer_schema(records)
+    assert schema["columns"] == [{"name": "col", "type": "int"}]
+
+
+def test_infer_schema_of_empty_records_has_no_columns():
+    assert ingestion.infer_schema([]) == {"columns": [], "row_count": 0}
+
+
+def test_csv_artifact_content_includes_a_schema_summary():
+    client.post(
+        "/api/ingest/csv",
+        files={"file": ("schema_view.csv", b"id,revenue\n1,100\n2,200\n", "text/csv")},
+    )
+    sidecar = next(f["name"] for f in client.get("/api/artifacts").json() if f["name"] == "schema_view.csv" or f["name"].endswith("_schema_view.csv"))
+    res = client.get(f"/api/artifacts/{sidecar}/content")
+    body = res.json()
+    assert body["schema"]["row_count"] == 2
+    by_name = {c["name"]: c["type"] for c in body["schema"]["columns"]}
+    assert by_name == {"id": "int", "revenue": "int"}
+
+
+def test_json_sidecar_artifact_content_includes_a_schema_summary():
+    client.post(
+        "/api/ingest/csv",
+        files={"file": ("schema_sidecar.csv", b"a,b\n951000,952000\n", "text/csv")},
+    )
+    json_sidecar = next(
+        f["name"] for f in client.get("/api/artifacts").json() if f["name"].endswith(".json") and "schema_sidecar" in f["name"]
+    )
+    res = client.get(f"/api/artifacts/{json_sidecar}/content")
+    body = res.json()
+    assert body["kind"] == "table"
+    assert body["schema"]["row_count"] == 1
+    by_name = {c["name"]: c["type"] for c in body["schema"]["columns"]}
+    assert by_name == {"a": "int", "b": "int"}

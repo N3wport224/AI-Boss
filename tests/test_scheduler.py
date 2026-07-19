@@ -46,6 +46,54 @@ def test_scheduler_records_trigger_errors_without_crashing(tmp_path):
     store.close()
 
 
+def test_scheduler_calls_on_error_with_the_schedule_and_error_message(tmp_path):
+    store = StateStore(str(tmp_path / "test_on_error.db"))
+
+    def boom(schedule):
+        raise RuntimeError("kaboom")
+
+    calls = []
+    scheduler = Scheduler(
+        store, trigger=boom, poll_interval=0.05,
+        on_error=lambda schedule, message: calls.append((schedule["name"], message)),
+    )
+    store.create_schedule(
+        kind="module", name="fake_on_error", interval_seconds=1.0,
+        next_run_at=datetime.now(timezone.utc).isoformat(), tier="automation", inputs={},
+    )
+    scheduler.start()
+    time.sleep(0.2)
+    scheduler.stop()
+
+    assert calls
+    name, message = calls[0]
+    assert name == "fake_on_error"
+    assert "kaboom" in message
+    store.close()
+
+
+def test_scheduler_without_on_error_never_raises_on_trigger_failure(tmp_path):
+    """on_error defaults to None -- every caller from before this feature
+    existed (including every other test in this file) must keep working."""
+    store = StateStore(str(tmp_path / "test_no_on_error.db"))
+
+    def boom(schedule):
+        raise RuntimeError("still fine")
+
+    scheduler = Scheduler(store, trigger=boom, poll_interval=0.05)
+    store.create_schedule(
+        kind="module", name="fake_no_handler", interval_seconds=1.0,
+        next_run_at=datetime.now(timezone.utc).isoformat(), tier="automation", inputs={},
+    )
+    scheduler.start()
+    time.sleep(0.2)
+    scheduler.stop()
+
+    updated = store.list_schedules()[0]
+    assert "still fine" in updated["last_status"]
+    store.close()
+
+
 def test_next_daily_run_at_stays_today_when_time_is_still_ahead():
     after = datetime.now(timezone.utc)
     local_after = after.astimezone()

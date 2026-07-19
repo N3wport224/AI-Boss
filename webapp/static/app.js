@@ -80,6 +80,9 @@ const builderCancelEditBtn = document.getElementById("builder-cancel-edit");
 
 const savedPipelinesSection = document.getElementById("saved-pipelines-section");
 const savedPipelinesGrid = document.getElementById("saved-pipelines-grid");
+const pipelineTagFilterInput = document.getElementById("pipeline-tag-filter");
+const pipelineDeepSearchInput = document.getElementById("pipeline-deep-search");
+const pipelineDeepSearchResultsEl = document.getElementById("pipeline-deep-search-results");
 
 const pipelineTemplatesGrid = document.getElementById("pipeline-templates-grid");
 
@@ -255,25 +258,50 @@ applyDensity(localStorage.getItem(DENSITY_STORAGE_KEY) || "comfortable");
 
 // ---- Toasts + notification history ----
 
+let persistentUnreadCount = 0;
+let persistentNotifications = [];
+
 function updateNotifBadge() {
-  if (unreadNotifications > 0) {
-    notifBadge.textContent = unreadNotifications > 9 ? "9+" : String(unreadNotifications);
+  const total = unreadNotifications + persistentUnreadCount;
+  if (total > 0) {
+    notifBadge.textContent = total > 9 ? "9+" : String(total);
     notifBadge.classList.remove("hidden");
   } else {
     notifBadge.classList.add("hidden");
   }
 }
 
-function renderNotificationsPanel() {
-  if (!toastHistory.length) {
-    notificationsPanel.innerHTML = `<h4>Notifications</h4><div class="dropdown-empty">Nothing yet — run something.</div>`;
-    return;
+async function refreshUnreadNotificationCount() {
+  try {
+    const res = await fetch("/api/notifications/unread-count");
+    const body = await res.json();
+    persistentUnreadCount = body.count;
+    updateNotifBadge();
+  } catch (err) {
+    // best-effort — a failed poll just leaves the badge stale until the next one
   }
-  notificationsPanel.innerHTML = `
-    <h4>Notifications</h4>
-    ${toastHistory
-      .map(
-        (n) => `
+}
+
+function renderNotificationsPanel() {
+  const alertsHtml = persistentNotifications.length
+    ? persistentNotifications
+        .map(
+          (n) => `
+        <div class="notification-row ${n.read ? "" : "notification-unread"}">
+          <i class="dot dot-${n.kind === "breaker_tripped" || n.kind === "schedule_failed" ? "error" : "running"}"></i>
+          <div>
+            <span class="notification-message">${escapeHtml(n.message)}</span>
+            <span class="notification-time">${new Date(n.created_at).toLocaleString()}</span>
+          </div>
+        </div>`
+        )
+        .join("")
+    : `<div class="dropdown-empty">No alerts yet.</div>`;
+
+  const activityHtml = toastHistory.length
+    ? toastHistory
+        .map(
+          (n) => `
       <div class="notification-row">
         <i class="dot dot-${n.type === "success" ? "ready" : "error"}"></i>
         <div>
@@ -281,8 +309,15 @@ function renderNotificationsPanel() {
           <span class="notification-time">${n.time.toLocaleTimeString()}</span>
         </div>
       </div>`
-      )
-      .join("")}`;
+        )
+        .join("")
+    : `<div class="dropdown-empty">Nothing yet — run something.</div>`;
+
+  notificationsPanel.innerHTML = `
+    <h4>Alerts</h4>
+    ${alertsHtml}
+    <h4>Recent activity</h4>
+    ${activityHtml}`;
 }
 
 function showToast(message, type = "success") {
@@ -302,16 +337,30 @@ function showToast(message, type = "success") {
   renderNotificationsPanel();
 }
 
-notificationsBtn.addEventListener("click", () => {
+notificationsBtn.addEventListener("click", async () => {
   const opening = notificationsPanel.classList.contains("hidden");
   notificationsPanel.classList.toggle("hidden");
   healthPanel.classList.add("hidden");
   selfTestPanel.classList.add("hidden");
   if (opening) {
+    try {
+      const res = await fetch("/api/notifications");
+      persistentNotifications = await res.json();
+      renderNotificationsPanel();
+    } catch (err) {
+      // best-effort — the panel just keeps whatever it last rendered
+    }
     unreadNotifications = 0;
+    if (persistentUnreadCount > 0) {
+      fetch("/api/notifications/mark-all-read", { method: "POST" }).catch(() => {});
+      persistentUnreadCount = 0;
+    }
     updateNotifBadge();
   }
 });
+
+refreshUnreadNotificationCount();
+setInterval(refreshUnreadNotificationCount, 5000);
 
 // ---- System health beacon ----
 
@@ -489,7 +538,7 @@ async function loadRecentRuns() {
       return `
         <tr class="history-row" data-run-id="${r.id}">
           <td class="run-select-cell"><input type="checkbox" class="run-select-checkbox" data-run-id="${r.id}" ${checked} /></td>
-          <td><span class="run-expand-chevron">▸</span> #${r.id}</td>
+          <td><span class="run-expand-chevron">▸</span> #${r.id} <span class="run-note-indicator" title="This run has a note">${r.note ? "📝" : ""}</span></td>
           <td class="status-${r.status}">${r.status}</td>
           <td>${new Date(r.started_at).toLocaleString()}</td>
           <td>${duration}</td>
@@ -660,7 +709,7 @@ function renderBlackboardSection(blackboard) {
     </div>`;
 }
 
-function renderRunDetailSteps(runId, steps, blackboard) {
+function renderRunDetailSteps(runId, steps, blackboard, note) {
   if (!steps.length) return `<div class="runs-empty">No recorded steps for this run.</div>`;
   const stepsHtml = steps
     .map(
@@ -680,6 +729,11 @@ function renderRunDetailSteps(runId, steps, blackboard) {
   return `
     <div class="run-detail-toolbar">
       <button class="btn btn-secondary btn-small rerun-btn" data-run-id="${runId}" type="button">↻ Re-run with these inputs</button>
+    </div>
+    <div class="run-note-row">
+      <label for="run-note__${runId}">Note</label>
+      <textarea id="run-note__${runId}" class="run-note-input" data-run-id="${runId}" placeholder="Add a note for your own future reference…" rows="2">${escapeHtml(note || "")}</textarea>
+      <button class="btn btn-secondary btn-small run-note-save-btn" data-run-id="${runId}" type="button">Save note</button>
     </div>
     ${stepsHtml}
     ${renderBlackboardSection(blackboard)}
@@ -767,14 +821,39 @@ async function toggleRunDetail(runId) {
         cell.innerHTML = `<div class="runs-empty">${escapeHtml(body.detail || "Could not load run detail.")}</div>`;
         return;
       }
-      runDetailCache[runId] = { steps: body.steps, blackboard: body.blackboard || [] };
+      runDetailCache[runId] = { steps: body.steps, blackboard: body.blackboard || [], note: body.note || "" };
     } catch (err) {
       cell.innerHTML = `<div class="runs-empty">Failed to load run detail: ${err}</div>`;
       return;
     }
   }
-  cell.innerHTML = renderRunDetailSteps(runId, runDetailCache[runId].steps, runDetailCache[runId].blackboard);
+  cell.innerHTML = renderRunDetailSteps(
+    runId,
+    runDetailCache[runId].steps,
+    runDetailCache[runId].blackboard,
+    runDetailCache[runId].note
+  );
   cell.querySelector(".rerun-btn").addEventListener("click", () => rerunHistoricalRun(runId, runDetailCache[runId].steps));
+  cell.querySelector(".run-note-save-btn").addEventListener("click", async () => {
+    const textarea = cell.querySelector(`.run-note-input[data-run-id="${runId}"]`);
+    const note = textarea.value.trim();
+    try {
+      const res = await fetch(`/api/runs/${runId}/note`, {
+        method: "PUT",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ note }),
+      });
+      const body = await res.json();
+      if (!res.ok) throw new Error(body.detail || `HTTP ${res.status}`);
+      runDetailCache[runId].note = body.note;
+      showToast(body.note ? "Note saved." : "Note cleared.", "success");
+      const mainRow = recentRunsTableEl.querySelector(`.history-row[data-run-id="${runId}"]`);
+      const indicator = mainRow?.querySelector(".run-note-indicator");
+      if (indicator) indicator.textContent = body.note ? "📝" : "";
+    } catch (err) {
+      showToast(`Could not save note: ${err}`, "error");
+    }
+  });
 }
 
 // ---- Run comparison ----
@@ -882,6 +961,13 @@ async function loadPerformance() {
 
   if (isOver && !resourceWarningActive) {
     showToast("Resource usage is unusually high — see the banner below the header.", "error");
+    fetch("/api/notifications", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ kind: "resource_alert", message: `High resource usage — ${reasons.join(", ")}.` }),
+    })
+      .then(() => refreshUnreadNotificationCount())
+      .catch(() => {});
   }
   resourceWarningActive = isOver;
 }
@@ -1363,6 +1449,13 @@ function renderCard(module) {
           ? `${module.stats.total_runs} run${module.stats.total_runs === 1 ? "" : "s"} · ${Math.round(module.stats.success_rate * 100)}% success · avg ${formatDurationSeconds(module.stats.avg_duration_seconds)}`
           : "No runs recorded yet."
       }</p>
+      ${
+        module.used_by && module.used_by.length
+          ? `<p class="card-desc module-used-by" title="Saved pipelines with a step using this module">Used by: ${module.used_by
+              .map((slug) => `<span class="used-by-chip" data-jump-slug="${escapeHtml(slug)}">${escapeHtml(slug)}</span>`)
+              .join(", ")}</p>`
+          : ""
+      }
       <div class="breaker-threshold-row" title="Consecutive failures before this module's circuit breaker trips">
         <label>Breaker trips after</label>
         <input type="number" class="breaker-threshold-input" min="1" value="${module.breaker.threshold}" data-tier="${module.tier}" data-name="${module.name}" />
@@ -1492,6 +1585,15 @@ function renderSections(modulesByTier) {
   });
   sectionsEl.querySelectorAll(".module-duplicate-btn").forEach((btn) => {
     btn.addEventListener("click", () => duplicateModule(btn.dataset.tier, btn.dataset.name));
+  });
+  sectionsEl.querySelectorAll(".used-by-chip").forEach((chip) => {
+    chip.addEventListener("click", () => {
+      const card = document.getElementById(`pipeline-card__${chip.dataset.jumpSlug}`);
+      if (card) {
+        card.scrollIntoView({ behavior: "smooth", block: "center" });
+        flashHighlight(card);
+      }
+    });
   });
   sectionsEl.querySelectorAll(".breaker-reset-btn").forEach((btn) => {
     btn.addEventListener("click", async () => {
@@ -2657,7 +2759,17 @@ function renderSavedPipelines(pipelinesList) {
       .map((p) => {
         const chain = p.steps.map((s) => `[${s.tier}] ${s.name}`).join(" → ");
         const favKey = `pipeline::${p.slug}`;
-        const searchText = `${p.name} ${p.description || ""} ${chain}`.toLowerCase();
+        const tags = p.tags || [];
+        const searchText = `${p.name} ${p.description || ""} ${chain} ${tags.join(" ")}`.toLowerCase();
+        const tagChips = tags
+          .map(
+            (t) => `
+            <span class="tag-chip">
+              <span class="tag-chip-label">${escapeHtml(t)}</span>
+              <button type="button" class="pipeline-tag-remove" data-slug="${p.slug}" data-tag="${escapeHtml(t)}" title="Remove tag">×</button>
+            </span>`
+          )
+          .join("");
         return `
           <div class="card" id="pipeline-card__${p.slug}" data-search-text="${searchText}">
             <div class="card-head">
@@ -2666,6 +2778,10 @@ function renderSavedPipelines(pipelinesList) {
             </div>
             <p class="card-desc">${p.description || "No description."}</p>
             <p class="card-desc pipeline-chain">${chain}</p>
+            <div class="pipeline-tags-row">
+              <span class="tag-chip-list">${tagChips}</span>
+              <input type="text" class="pipeline-tag-add-input" data-slug="${p.slug}" placeholder="+ tag" />
+            </div>
             <div class="webhook-row">
               <code class="webhook-url" title="POST a JSON body here to launch this pipeline — it overrides step 1's own inputs">POST /api/pipelines/${p.slug}/webhook</code>
               <button class="btn btn-secondary btn-small webhook-copy-btn" data-slug="${p.slug}" type="button">📋 Copy URL</button>
@@ -2704,6 +2820,28 @@ function renderSavedPipelines(pipelinesList) {
     });
     savedPipelinesGrid.querySelectorAll("[data-delete-slug]").forEach((btn) => {
       btn.addEventListener("click", () => deleteSavedPipeline(btn.dataset.deleteSlug, btn.dataset.deleteName));
+    });
+    savedPipelinesGrid.querySelectorAll(".pipeline-tag-remove").forEach((btn) => {
+      btn.addEventListener("click", async () => {
+        const slug = btn.dataset.slug;
+        const removeTag = btn.dataset.tag;
+        const p = pipelinesList.find((pl) => pl.slug === slug);
+        const nextTags = (p.tags || []).filter((t) => t !== removeTag);
+        await savePipelineTags(slug, nextTags);
+        await loadSavedPipelines();
+      });
+    });
+    savedPipelinesGrid.querySelectorAll(".pipeline-tag-add-input").forEach((input) => {
+      input.addEventListener("keydown", async (e) => {
+        if (e.key !== "Enter") return;
+        const slug = input.dataset.slug;
+        const newTag = input.value.trim();
+        if (!newTag) return;
+        const p = pipelinesList.find((pl) => pl.slug === slug);
+        const nextTags = Array.from(new Set([...(p.tags || []), newTag]));
+        await savePipelineTags(slug, nextTags);
+        await loadSavedPipelines();
+      });
     });
     savedPipelinesGrid.querySelectorAll(".webhook-copy-btn").forEach((btn) => {
       btn.addEventListener("click", async () => {
@@ -2989,11 +3127,67 @@ async function restorePipelineVersion(slug, versionId) {
 }
 
 async function loadSavedPipelines() {
-  const res = await fetch("/api/pipelines");
+  const tagFilter = pipelineTagFilterInput.value.trim();
+  const url = tagFilter ? `/api/pipelines?tag=${encodeURIComponent(tagFilter)}` : "/api/pipelines";
+  const res = await fetch(url);
   const pipelinesList = await res.json();
   renderSavedPipelines(pipelinesList);
   return pipelinesList;
 }
+
+async function savePipelineTags(slug, tags) {
+  const res = await fetch(`/api/pipelines/${encodeURIComponent(slug)}/tags`, {
+    method: "PUT",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ tags }),
+  });
+  return res.json();
+}
+
+let pipelineTagFilterDebounce = null;
+pipelineTagFilterInput.addEventListener("input", () => {
+  clearTimeout(pipelineTagFilterDebounce);
+  pipelineTagFilterDebounce = setTimeout(() => loadSavedPipelines(), 250);
+});
+
+let pipelineDeepSearchDebounce = null;
+
+async function runPipelineDeepSearch(query) {
+  if (!query.trim()) {
+    pipelineDeepSearchResultsEl.classList.add("hidden");
+    savedPipelinesGrid.classList.remove("hidden");
+    return;
+  }
+
+  const res = await fetch(`/api/pipelines/search?q=${encodeURIComponent(query)}`);
+  const body = await res.json();
+
+  savedPipelinesGrid.classList.add("hidden");
+  pipelineDeepSearchResultsEl.classList.remove("hidden");
+
+  if (!body.results.length) {
+    pipelineDeepSearchResultsEl.innerHTML = `<div class="runs-empty">No saved pipeline matches "${escapeHtml(query)}".</div>`;
+    return;
+  }
+
+  pipelineDeepSearchResultsEl.innerHTML = body.results
+    .map(
+      (r) => `
+      <div class="schedule-row">
+        <div class="schedule-row-main">
+          <strong>${escapeHtml(r.slug)}</strong>
+          <span class="schedule-row-meta">…${escapeHtml(r.snippet)}…</span>
+        </div>
+      </div>`
+    )
+    .join("");
+}
+
+pipelineDeepSearchInput.addEventListener("input", () => {
+  clearTimeout(pipelineDeepSearchDebounce);
+  const query = pipelineDeepSearchInput.value;
+  pipelineDeepSearchDebounce = setTimeout(() => runPipelineDeepSearch(query), 250);
+});
 
 // ---- Pipeline starter templates ----
 
@@ -3285,7 +3479,16 @@ function renderArtifactContent(body) {
     const bodyRows = body.content
       .map((row) => `<tr>${columns.map((c) => `<td>${escapeHtml(row[c] ?? "")}</td>`).join("")}</tr>`)
       .join("");
+    const schemaHtml = body.schema
+      ? `<div class="artifact-schema-summary">
+           <strong>Schema:</strong> ${body.schema.row_count} row${body.schema.row_count === 1 ? "" : "s"} ·
+           ${body.schema.columns
+             .map((c) => `<span class="schema-column-chip">${escapeHtml(c.name)}: ${escapeHtml(c.type)}</span>`)
+             .join(" ")}
+         </div>`
+      : "";
     return `
+      ${schemaHtml}
       <div class="artifact-content-table-wrap">
         <table><thead><tr>${headerRow}</tr></thead><tbody>${bodyRows}</tbody></table>
       </div>

@@ -293,6 +293,10 @@ def _record_breaker_event(event: dict) -> None:
         health = store.record_module_failure(tier, name, _breaker_threshold(tier, name))
         if health["tripped"] and health["consecutive_failures"] == _breaker_threshold(tier, name):
             print(f"[breaker] circuit opened for {tier}/{name} after {health['consecutive_failures']} consecutive failures")
+            store.add_notification(
+                "breaker_tripped",
+                f"Circuit breaker opened for [{tier}] {name} after {health['consecutive_failures']} consecutive failures.",
+            )
 
 
 def _module_refs_from_steps(steps: list[dict]) -> list[tuple[str, str]]:
@@ -525,7 +529,12 @@ def _trigger_schedule(schedule: dict) -> None:
         _run_scheduled([step], inputs)
 
 
-_scheduler = Scheduler(store, _trigger_schedule)
+def _notify_schedule_error(schedule: dict, error_message: str) -> None:
+    label = schedule["name"] if schedule.get("kind") == "pipeline" else f"[{schedule['tier']}] {schedule['name']}"
+    store.add_notification("schedule_failed", f"Scheduled run of {label} failed: {error_message}")
+
+
+_scheduler = Scheduler(store, _trigger_schedule, on_error=_notify_schedule_error)
 _scheduler.start()
 
 
@@ -561,6 +570,7 @@ def list_modules():
                         "success_rate": stats["success_rate"] if stats else None,
                         "avg_duration_seconds": stats["avg_duration_seconds"] if stats else None,
                     },
+                    "used_by": pipeline_store.pipelines_using_module(tier, manifest["name"]),
                 }
             )
         result[tier] = modules
@@ -795,8 +805,20 @@ def delete_input_preset(tier: str, name: str, preset_name: str):
 
 
 @app.get("/api/pipelines")
-def list_saved_pipelines():
-    return pipeline_store.list_pipelines()
+def list_saved_pipelines(tag: Optional[str] = None):
+    pipelines = pipeline_store.list_pipelines()
+    tags_by_slug = store.all_pipeline_tags()
+    for p in pipelines:
+        p["tags"] = tags_by_slug.get(p.get("slug", ""), [])
+    if tag and tag.strip():
+        tag_lower = tag.strip().lower()
+        pipelines = [p for p in pipelines if tag_lower in (t.lower() for t in p["tags"])]
+    return pipelines
+
+
+@app.get("/api/pipelines/search")
+def search_saved_pipelines(q: str = ""):
+    return {"query": q, "results": pipeline_store.search_pipelines(q)}
 
 
 @app.post("/api/pipelines/validate")
@@ -972,7 +994,22 @@ def delete_saved_pipeline(slug: str):
         pipeline_store.delete_pipeline(slug)
     except FileNotFoundError:
         raise HTTPException(status_code=404, detail=f"No saved pipeline named '{slug}'.")
+    store.delete_pipeline_tags(slug)
     return {"deleted": slug}
+
+
+class PipelineTagsUpdate(BaseModel):
+    tags: list[str]
+
+
+@app.put("/api/pipelines/{slug}/tags")
+def set_pipeline_tags(slug: str, payload: PipelineTagsUpdate):
+    try:
+        pipeline_store.load_pipeline(slug)
+    except FileNotFoundError:
+        raise HTTPException(status_code=404, detail=f"No saved pipeline named '{slug}'.")
+    cleaned = sorted({t.strip() for t in payload.tags if t.strip()})
+    return {"slug": slug, "tags": store.set_pipeline_tags(slug, cleaned)}
 
 
 @app.get("/api/pipelines/compare")
@@ -1159,7 +1196,11 @@ def stream_events(stream_id: int, request: Request):
 
 @app.get("/api/runs")
 def recent_runs(limit: int = 10):
-    return store.recent_runs(limit)
+    runs = store.recent_runs(limit)
+    notes_by_run = store.all_run_notes()
+    for run in runs:
+        run["note"] = notes_by_run.get(run["id"], "")
+    return runs
 
 
 @app.get("/api/runs.csv")
@@ -1310,7 +1351,28 @@ def run_detail(run_id: int):
     steps = _parsed_steps_for_run(run_id)
     if not steps:
         raise HTTPException(status_code=404, detail=f"No recorded steps for run {run_id}.")
-    return {"run_id": run_id, "steps": steps, "blackboard": store.get_run_blackboard(run_id)}
+    return {
+        "run_id": run_id,
+        "steps": steps,
+        "blackboard": store.get_run_blackboard(run_id),
+        "note": store.get_run_note(run_id) or "",
+    }
+
+
+class RunNoteUpdate(BaseModel):
+    note: str = ""
+
+
+@app.put("/api/runs/{run_id}/note")
+def set_run_note(run_id: int, payload: RunNoteUpdate):
+    """Attach (or overwrite) a free-text note on a past run -- purely for the
+    user's own future reference (e.g. "this failure was expected, ignore").
+    An empty string clears it. Unlike most run endpoints this doesn't require
+    the run to have any recorded steps -- notes are keyed by run_id alone,
+    so this 404s only when the run itself never existed."""
+    if not store.run_exists(run_id):
+        raise HTTPException(status_code=404, detail=f"No run with id {run_id}.")
+    return {"run_id": run_id, "note": store.set_run_note(run_id, payload.note.strip())}
 
 
 @app.post("/api/runs/{run_id}/rerun")
@@ -1469,6 +1531,48 @@ def audit_log_csv(limit: int = 1000):
         media_type="text/csv",
         headers={"Content-Disposition": "attachment; filename=audit_log.csv"},
     )
+
+
+@app.get("/api/notifications")
+def list_notifications(unread_only: bool = False, limit: int = 200):
+    """Durable notifications -- unlike a toast (gone on reload), these
+    survive: circuit breaker trips, schedule failures, and (from the
+    frontend, when the resource ticker's own thresholds are crossed)
+    resource-usage alerts."""
+    return store.list_notifications(unread_only=unread_only, limit=limit)
+
+
+@app.get("/api/notifications/unread-count")
+def notifications_unread_count():
+    return {"count": store.unread_notification_count()}
+
+
+class NotificationCreate(BaseModel):
+    kind: str
+    message: str
+
+
+@app.post("/api/notifications")
+def create_notification(payload: NotificationCreate):
+    """Lets the frontend record a notification for something only it can see
+    happening in real time -- specifically the resource-usage alert banner's
+    own CPU/memory thresholds, computed client-side from the perf ticker."""
+    if not payload.message.strip():
+        raise HTTPException(status_code=400, detail="A message is required.")
+    return store.add_notification(payload.kind.strip() or "info", payload.message.strip())
+
+
+@app.post("/api/notifications/{notification_id}/read")
+def mark_notification_read(notification_id: int):
+    marked = store.mark_notification_read(notification_id)
+    if not marked:
+        raise HTTPException(status_code=404, detail=f"No notification with id {notification_id}.")
+    return {"id": notification_id, "read": True}
+
+
+@app.post("/api/notifications/mark-all-read")
+def mark_all_notifications_read():
+    return {"marked": store.mark_all_notifications_read()}
 
 
 @app.get("/api/memory")

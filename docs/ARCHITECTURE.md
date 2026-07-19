@@ -1339,6 +1339,110 @@ only a JSON parse error or timeout falls back to an empty issue list.
      surfaced on a full-suite run (`bulk_a.csv`'s placeholder `1,2` content
      collided with an existing `a.csv` fixture earlier in the same file).
      348 tests total, stable across repeated clean full-suite runs.
+114. **Add pipeline tagging + tag filter** (new `pipeline_tags` table —
+     `slug` primary key, `tags` JSON, `updated_at`; `set_pipeline_tags()` /
+     `get_pipeline_tags()` / `all_pipeline_tags()` / `delete_pipeline_tags()`
+     on `StateStore`, kept as its own table rather than folded into
+     `artifact_tags` since the two are keyed by different identity concepts
+     (filename vs. slug); `PUT /api/pipelines/{slug}/tags`, `GET
+     /api/pipelines?tag=` for filtering, and `DELETE /api/pipelines/{slug}`
+     now also calls `delete_pipeline_tags()` so a deleted pipeline's tags
+     don't orphan). Tag chips + a `+ tag` input on every saved-pipeline
+     card, mirroring the artifact-tagging UI exactly, plus a **Filter by
+     tag…** box above the Saved Pipelines grid.
+115. **Add a "used by" reverse lookup for modules** (`pipelines_using_module(tier,
+     name)` in `webapp/pipelines.py` scans every saved pipeline's steps —
+     including parallel-group branches — for a reference to the given
+     module; folded into `GET /api/modules`'s existing per-module payload
+     as `used_by: [slug, ...]`). A module card shows "Used by: a, b" only
+     when non-empty; clicking a pipeline name scrolls to and flashes its
+     card, reusing the command palette's own `flashHighlight()` jump
+     behavior. Lets a user see the blast radius before disabling, deleting,
+     or duplicating a module out from under something that depends on it.
+116. **Add free-text notes on past runs** (new `run_notes` table — `run_id`
+     primary key referencing `runs(id)`, `note`, `updated_at`;
+     `set_run_note()` (empty string deletes the row instead of storing
+     blank), `get_run_note()`, `all_run_notes()`, `run_exists()` on
+     `StateStore`; both `prune_runs()` and `delete_runs()` now also delete
+     from `run_notes` so a purged run's note doesn't orphan;
+     `PUT /api/runs/{run_id}/note`, and `note` folded into both
+     `GET /api/runs` and `GET /api/runs/{run_id}`'s payloads). An editable
+     textarea + **Save note** button in the run detail drill-down, and a
+     small 📝 indicator next to any run in Recent Runs that has one —
+     updated in place after a save rather than re-rendering (and
+     collapsing) the whole table.
+117. **Add full-text search across saved pipeline definitions**
+     (`search_pipelines()` in `webapp/pipelines.py` — a case-insensitive
+     keyword search across every saved pipeline's raw YAML text, not just
+     the name/description the header search omnibar already matches on,
+     mirroring `ingestion.search_artifacts()`'s content-search pattern
+     exactly, snippet included; `GET /api/pipelines/search?q=`). A dedicated
+     search box above the Saved Pipelines grid — distinct from the global
+     omnibar — for finding a pipeline by something inside a step's input
+     values, mapped fields, or conditions.
+118. **Add a column schema summary on CSV/XLSX ingest** (`infer_schema()` in
+     `webapp/ingestion.py` — column names in first-seen order, a majority-
+     vote inferred type per column (int/float/bool/date/text, with `int`
+     folded into `float` when a column mixes both, and `mixed` only when no
+     type clears a 90% majority), plus row count; folded into
+     `read_artifact_content()`'s `"table"`-kind response for both a raw
+     `.csv` upload and a CSV/XLSX `.json` sidecar as a `schema` key).
+     Deliberately not used by `cleanse_records()`, which stays type-agnostic
+     on purpose — this is a read-only display summary, never used to coerce
+     ingested values. Shown as a row of chips ("column: type") above the
+     table in the artifact content viewer.
+119. **Add a persistent alert/notification center** (new `notifications`
+     table — `id`, `kind`, `message`, `created_at`, `read`; `add_notification()`
+     / `list_notifications(unread_only=)` / `unread_notification_count()` /
+     `mark_notification_read()` / `mark_all_notifications_read()` on
+     `StateStore`; `GET /api/notifications`, `GET
+     /api/notifications/unread-count`, `POST /api/notifications`, `POST
+     /api/notifications/{id}/read`, `POST /api/notifications/mark-all-read`).
+     Unlike a toast (gone on reload) or the audit log (a record of
+     user-*initiated* actions), this is a durable feed of events the app
+     itself decides are worth surfacing. Three write paths: a circuit
+     breaker trip (hooked into `_record_breaker_event`'s existing
+     "just tripped" check in `webapp/main.py`); a scheduled run's trigger
+     raising (`Scheduler` gained an optional `on_error(schedule,
+     error_message)` callback, defaulting to `None` so every prior caller
+     and test keeps working unchanged, wired to a new
+     `_notify_schedule_error` in `webapp/main.py`); and the frontend's own
+     resource-usage alert banner, which POSTs a notification on its
+     false→true threshold transition (never on every poll tick) via the new
+     endpoint. The existing bell-icon dropdown (previously only ephemeral
+     toast history) now has two sections — "Alerts" (persistent, fetched on
+     open, marked read on open) and "Recent activity" (the original
+     in-memory toast log) — with the unread badge summing both counts and
+     polling `/api/notifications/unread-count` every 5s so it stays current
+     even without opening the panel.
+120. **Add tests for all of Batch 13**: pipeline tag set/read/case-insensitive
+     filter/blank-tag-stripping and tags clearing on delete; the "used by"
+     lookup for both a plain step and a parallel-group branch, and staying
+     empty for an unreferenced module; run notes' set/clear/default-empty
+     round trip and a 404 for an unknown run id; deep pipeline search
+     matching a keyword inside step inputs and returning empty for a blank
+     or unmatched query; `infer_schema()`'s type inference (int/float/bool/
+     date/text, mixed-majority, int+float folding to float, null cells
+     ignored, empty-input edge case) plus the artifact-content endpoint
+     surfacing a `schema` key for both a raw CSV and a JSON sidecar;
+     notifications' store-level add/list-newest-first/unread-count/mark-one/
+     mark-all/unread-only-filter, a real circuit breaker trip (via the
+     existing `http_request`-against-an-unreachable-URL pattern with the
+     threshold overridden to 1) actually producing a `breaker_tripped`
+     notification, the `Scheduler.on_error` hook itself (fires with the
+     schedule dict and error message; a scheduler built without one never
+     raises), and confirming the app's own shared `_scheduler` is
+     constructed with `on_error=_notify_schedule_error` rather than left at
+     the `None` default. Also caught (mid-batch, before it shipped) a stale
+     `orchestrator.db` left over between separate `python -m pytest`
+     invocations in the same working directory silently satisfying the
+     result-cache and content-hash-dedup tables from a *previous* run,
+     producing spurious failures/`StopIteration`s that vanished the moment
+     `orchestrator.db` was deleted first — confirmed not a code bug by
+     reproducing it in isolation, then fixing the *procedure* (delete
+     `orchestrator.db` before every pytest invocation, not just before a
+     commit) rather than any application code. 385 tests total, stable
+     across repeated clean full-suite runs.
 
 ## 9. Roadmap
 

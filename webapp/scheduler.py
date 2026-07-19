@@ -34,10 +34,22 @@ def next_daily_run_at(daily_time: str, after: datetime) -> datetime:
 
 
 class Scheduler:
-    def __init__(self, state_store: StateStore, trigger: Callable[[dict], None], poll_interval: float = 5.0):
+    def __init__(
+        self,
+        state_store: StateStore,
+        trigger: Callable[[dict], None],
+        poll_interval: float = 5.0,
+        on_error: Callable[[dict, str], None] | None = None,
+    ):
         self.state_store = state_store
         self.trigger = trigger
         self.poll_interval = poll_interval
+        # Optional (schedule, error_message) callback fired whenever a
+        # schedule's trigger raises -- lets a caller surface a durable
+        # notification without this module needing to know what a
+        # notification even is. None by default so every existing caller
+        # (and every prior test) keeps working unchanged.
+        self.on_error = on_error
         self._stop = threading.Event()
         self._thread: threading.Thread | None = None
         # A master pause, distinct from any individual schedule's own
@@ -78,6 +90,8 @@ class Scheduler:
                 status = "triggered"
             except Exception as exc:
                 status = f"error: {exc}"
+                if self.on_error is not None:
+                    self.on_error(schedule, str(exc))
             if schedule.get("schedule_type") == "daily":
                 next_run_at = next_daily_run_at(schedule["daily_time"], now)
             else:

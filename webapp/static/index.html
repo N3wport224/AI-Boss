@@ -194,6 +194,11 @@
           <button class="collapse-toggle" type="button" data-collapse-key="saved-pipelines">▾</button>
         </div>
       </div>
+      <div class="pipeline-filter-row">
+        <input type="text" id="pipeline-tag-filter" placeholder="Filter by tag…" class="artifact-search-input" />
+        <input type="text" id="pipeline-deep-search" placeholder="Search inside pipeline definitions (inputs, conditions, descriptions)…" class="artifact-search-input" />
+      </div>
+      <div id="pipeline-deep-search-results" class="hidden"></div>
       <div class="card-grid" id="saved-pipelines-grid"></div>
       <div class="run-compare-bar hidden" id="pipeline-compare-bar">
         <label for="compare-pipeline-a">Compare</label>

@@ -8,6 +8,7 @@ import csv
 import hashlib
 import io
 import json
+import re
 import time
 from pathlib import Path
 from typing import Optional
@@ -342,6 +343,84 @@ def search_artifacts(query: str, max_results: int = 20) -> list[dict]:
 MAX_ARTIFACT_PREVIEW_CHARS = 20_000
 MAX_ARTIFACT_PREVIEW_ROWS = 200
 
+_DATE_LIKE_RE = re.compile(r"^\d{4}-\d{2}-\d{2}([T ]\d{2}:\d{2}(:\d{2})?)?$")
+
+
+def _infer_cell_type(value) -> str:
+    """The most specific type a single cell's value looks like -- CSV/JSON
+    sidecar records are always strings-or-None (csv.DictReader) or whatever
+    JSON scalar type was ingested, so this normalizes both to the same
+    vocabulary: int, float, bool, date, text, or null for a blank cell."""
+    if value is None or value == "":
+        return "null"
+    if isinstance(value, bool):
+        return "bool"
+    if isinstance(value, int):
+        return "int"
+    if isinstance(value, float):
+        return "float"
+    text = str(value).strip()
+    if text.lower() in ("true", "false"):
+        return "bool"
+    if _DATE_LIKE_RE.match(text):
+        return "date"
+    try:
+        int(text)
+        return "int"
+    except ValueError:
+        pass
+    try:
+        float(text)
+        return "float"
+    except ValueError:
+        pass
+    return "text"
+
+
+def infer_schema(records: list[dict]) -> dict:
+    """A lightweight column-by-column schema summary for a table-shaped
+    artifact -- column names in first-seen order, one inferred type per
+    column (the majority type across its non-null cells, "mixed" when no
+    type has a clear majority), and the total row count. Deliberately not
+    used by cleanse_records() (which stays type-agnostic on purpose) --
+    this is read-only, for display in the artifact viewer, never used to
+    coerce or rewrite ingested values."""
+    columns: list[str] = []
+    seen_columns = set()
+    for row in records:
+        for key in row.keys():
+            if key not in seen_columns:
+                seen_columns.add(key)
+                columns.append(key)
+
+    column_types = {}
+    for col in columns:
+        counts: dict[str, int] = {}
+        for row in records:
+            cell_type = _infer_cell_type(row.get(col))
+            if cell_type == "null":
+                continue
+            counts[cell_type] = counts.get(cell_type, 0) + 1
+        if not counts:
+            column_types[col] = "null"
+            continue
+
+        # int is a subset of float for column-typing purposes -- a column of
+        # "4" and "3.5" is a float column, not a mixed one.
+        numeric_total = counts.get("int", 0) + counts.get("float", 0)
+        total = sum(counts.values())
+        if numeric_total == total:
+            column_types[col] = "float" if counts.get("float", 0) else "int"
+            continue
+
+        best_type, best_count = max(counts.items(), key=lambda kv: kv[1])
+        column_types[col] = best_type if best_count / total >= 0.9 else "mixed"
+
+    return {
+        "columns": [{"name": col, "type": column_types[col]} for col in columns],
+        "row_count": len(records),
+    }
+
 
 def read_artifact_content(filename: str) -> dict:
     """Full (but capped) extracted content for one ingested artifact, for
@@ -367,6 +446,7 @@ def read_artifact_content(filename: str) -> dict:
                 "kind": "table",
                 "content": data[:MAX_ARTIFACT_PREVIEW_ROWS],
                 "truncated": len(data) > MAX_ARTIFACT_PREVIEW_ROWS,
+                "schema": infer_schema(data) if data and isinstance(data[0], dict) else None,
             }
         return {"kind": "json", "content": data, "truncated": False}
 
@@ -380,6 +460,7 @@ def read_artifact_content(filename: str) -> dict:
             "kind": "table",
             "content": records[:MAX_ARTIFACT_PREVIEW_ROWS],
             "truncated": len(records) > MAX_ARTIFACT_PREVIEW_ROWS,
+            "schema": infer_schema(records) if records else None,
         }
 
     return {

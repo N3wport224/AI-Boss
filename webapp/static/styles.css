@@ -210,6 +210,10 @@ h1 {
   border-bottom: none;
 }
 
+.notification-unread {
+  background: var(--bg-elevated);
+}
+
 .health-check-row .dot,
 .notification-row .dot {
   margin-top: 4px;
@@ -1696,6 +1700,32 @@ body.density-compact .tier-section {
   margin: 10px 14px;
 }
 
+.run-note-row {
+  display: flex;
+  align-items: flex-start;
+  gap: 8px;
+  padding: 10px 14px;
+  border-bottom: 1px solid var(--border);
+}
+
+.run-note-row label {
+  font-size: 0.78rem;
+  color: var(--text-dim);
+  padding-top: 6px;
+}
+
+.run-note-input {
+  flex: 1;
+  background: var(--bg-elevated);
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  padding: 6px 9px;
+  color: var(--text);
+  font-size: 0.82rem;
+  font-family: inherit;
+  resize: vertical;
+}
+
 .run-detail-step-head {
   display: flex;
   align-items: center;
@@ -2205,6 +2235,12 @@ body.density-compact .tier-section {
   font-size: 0.82rem;
 }
 
+.pipeline-filter-row {
+  display: flex;
+  gap: 8px;
+  margin: 8px 0 12px;
+}
+
 /* Template fields + variable-insertion chips */
 
 .template-input {
@@ -2302,6 +2338,62 @@ body.density-compact .tier-section {
 }
 
 .tag-add-input:focus {
+  outline: none;
+  border-style: solid;
+  border-color: var(--accent-automation);
+  width: 100px;
+}
+
+.artifact-schema-summary {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 6px;
+  padding: 8px 10px;
+  margin-bottom: 8px;
+  background: var(--bg-elevated);
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  font-size: 0.78rem;
+  color: var(--text-dim);
+}
+
+.schema-column-chip {
+  background: var(--bg);
+  border: 1px solid var(--border);
+  border-radius: 999px;
+  padding: 2px 8px;
+  font-size: 0.72rem;
+}
+
+.used-by-chip {
+  cursor: pointer;
+  text-decoration: underline dotted;
+}
+
+.used-by-chip:hover {
+  color: var(--accent-automation);
+}
+
+.pipeline-tags-row {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 6px;
+  margin: 6px 0;
+}
+
+.pipeline-tag-add-input {
+  width: 70px;
+  background: var(--bg-elevated);
+  border: 1px dashed var(--border);
+  border-radius: 999px;
+  padding: 3px 9px;
+  font-size: 0.72rem;
+  color: var(--text);
+}
+
+.pipeline-tag-add-input:focus {
   outline: none;
   border-style: solid;
   border-color: var(--accent-automation);

@@ -634,6 +634,30 @@ A few things live in the header/subheader on every page load:
 - **Bulk tag artifacts** — select multiple ingested files with checkboxes
   and apply one tag to all of them at once, instead of one at a time.
 
+## Pipeline tagging, module usage lookup, run notes, schema summaries, and a notification center
+
+- **Tag saved pipelines** — add/remove free-form tags on any saved pipeline
+  and filter the Saved Pipelines section by tag, mirroring the existing
+  artifact-tagging feature.
+- **Search inside pipeline definitions** — a dedicated search box over
+  saved pipelines matches keywords anywhere in a pipeline's YAML (input
+  values, mapped fields, conditions), not just its name/description the way
+  the header search omnibar already does.
+- **"Used by" reverse lookup** — every module card shows which saved
+  pipelines reference it, so you can see the blast radius before disabling,
+  deleting, or duplicating a module; clicking a pipeline name jumps
+  straight to its card.
+- **Free-text notes on past runs** — attach, edit, or clear a note on any
+  run in Recent Runs, for your own future reference (e.g. "expected
+  failure, ignore") — a small 📝 marks runs that have one.
+- **Column schema summary on ingest** — the artifact content viewer shows a
+  lightweight schema alongside any CSV/XLSX table: column names, an
+  inferred type per column (int/float/bool/date/text), and the row count.
+- **Persistent alert/notification center** — unlike a toast (gone on
+  reload), the bell icon's panel now also lists durable alerts that survive
+  a page refresh: circuit breaker trips, scheduled-run failures, and
+  resource-usage warnings, with an unread badge.
+
 ## Tech stack
 
 - **Language:** Python 3.11+ — first-class async/sync support and native SDKs

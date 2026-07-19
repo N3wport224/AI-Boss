@@ -110,6 +110,26 @@ CREATE TABLE IF NOT EXISTS input_presets (
     created_at TEXT NOT NULL,
     PRIMARY KEY (tier, name, preset_name)
 );
+
+CREATE TABLE IF NOT EXISTS pipeline_tags (
+    slug TEXT PRIMARY KEY,
+    tags TEXT NOT NULL,
+    updated_at TEXT NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS run_notes (
+    run_id INTEGER PRIMARY KEY REFERENCES runs(id),
+    note TEXT NOT NULL,
+    updated_at TEXT NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS notifications (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    kind TEXT NOT NULL,
+    message TEXT NOT NULL,
+    created_at TEXT NOT NULL,
+    read INTEGER NOT NULL DEFAULT 0
+);
 """
 
 
@@ -310,6 +330,7 @@ class StateStore:
             if run_ids:
                 placeholders = ",".join("?" * len(run_ids))
                 self._conn.execute(f"DELETE FROM steps WHERE run_id IN ({placeholders})", run_ids)
+                self._conn.execute(f"DELETE FROM run_notes WHERE run_id IN ({placeholders})", run_ids)
                 self._conn.execute(f"DELETE FROM runs WHERE id IN ({placeholders})", run_ids)
                 self._conn.commit()
         return len(run_ids)
@@ -331,6 +352,7 @@ class StateStore:
             if existing_ids:
                 existing_placeholders = ",".join("?" * len(existing_ids))
                 self._conn.execute(f"DELETE FROM steps WHERE run_id IN ({existing_placeholders})", existing_ids)
+                self._conn.execute(f"DELETE FROM run_notes WHERE run_id IN ({existing_placeholders})", existing_ids)
                 self._conn.execute(f"DELETE FROM runs WHERE id IN ({existing_placeholders})", existing_ids)
                 self._conn.commit()
         return len(existing_ids)
@@ -753,6 +775,118 @@ class StateStore:
         with self._lock:
             rows = self._conn.execute("SELECT filename, tags FROM artifact_tags").fetchall()
         return {filename: json.loads(tags) for filename, tags in rows}
+
+    def set_pipeline_tags(self, slug: str, tags: list[str]) -> list[str]:
+        """Replace the full tag set for a saved pipeline (keyed by its slug).
+        An empty list clears tagging entirely."""
+        with self._lock:
+            self._conn.execute(
+                "INSERT INTO pipeline_tags (slug, tags, updated_at) VALUES (?, ?, ?) "
+                "ON CONFLICT(slug) DO UPDATE SET tags = excluded.tags, updated_at = excluded.updated_at",
+                (slug, json.dumps(tags), datetime.now(timezone.utc).isoformat()),
+            )
+            self._conn.commit()
+        return tags
+
+    def get_pipeline_tags(self, slug: str) -> list[str]:
+        with self._lock:
+            row = self._conn.execute(
+                "SELECT tags FROM pipeline_tags WHERE slug = ?", (slug,)
+            ).fetchone()
+        return json.loads(row[0]) if row else []
+
+    def all_pipeline_tags(self) -> dict[str, list[str]]:
+        """Every tagged pipeline's tags in one query, for list endpoints that
+        join tags onto every pipeline without a query per row."""
+        with self._lock:
+            rows = self._conn.execute("SELECT slug, tags FROM pipeline_tags").fetchall()
+        return {slug: json.loads(tags) for slug, tags in rows}
+
+    def delete_pipeline_tags(self, slug: str) -> None:
+        """Drop any tag record for a pipeline slug, e.g. when the pipeline itself is deleted."""
+        with self._lock:
+            self._conn.execute("DELETE FROM pipeline_tags WHERE slug = ?", (slug,))
+            self._conn.commit()
+
+    def run_exists(self, run_id: int) -> bool:
+        with self._lock:
+            row = self._conn.execute("SELECT 1 FROM runs WHERE id = ?", (run_id,)).fetchone()
+        return row is not None
+
+    def set_run_note(self, run_id: int, note: str) -> str:
+        """Save (or overwrite) a free-text note on a past run, for the user's
+        own future reference. An empty string clears the note entirely."""
+        with self._lock:
+            if not note:
+                self._conn.execute("DELETE FROM run_notes WHERE run_id = ?", (run_id,))
+            else:
+                self._conn.execute(
+                    "INSERT INTO run_notes (run_id, note, updated_at) VALUES (?, ?, ?) "
+                    "ON CONFLICT(run_id) DO UPDATE SET note = excluded.note, updated_at = excluded.updated_at",
+                    (run_id, note, datetime.now(timezone.utc).isoformat()),
+                )
+            self._conn.commit()
+        return note
+
+    def get_run_note(self, run_id: int) -> Optional[str]:
+        with self._lock:
+            row = self._conn.execute(
+                "SELECT note FROM run_notes WHERE run_id = ?", (run_id,)
+            ).fetchone()
+        return row[0] if row else None
+
+    def all_run_notes(self) -> dict[int, str]:
+        """Every annotated run's note in one query, for list endpoints that
+        join notes onto every run without a query per row."""
+        with self._lock:
+            rows = self._conn.execute("SELECT run_id, note FROM run_notes").fetchall()
+        return {run_id: note for run_id, note in rows}
+
+    def add_notification(self, kind: str, message: str) -> dict:
+        """Record a durable notification -- unlike a toast (which vanishes on
+        reload) or the audit log (a record of user-initiated actions), this
+        is for events the app itself decides are worth surfacing: a circuit
+        breaker tripping, a schedule failing, a resource-usage alert firing."""
+        now = datetime.now(timezone.utc).isoformat()
+        with self._lock:
+            cur = self._conn.execute(
+                "INSERT INTO notifications (kind, message, created_at, read) VALUES (?, ?, ?, 0)",
+                (kind, message, now),
+            )
+            self._conn.commit()
+            notification_id = cur.lastrowid
+        return {"id": notification_id, "kind": kind, "message": message, "created_at": now, "read": False}
+
+    def list_notifications(self, unread_only: bool = False, limit: int = 200) -> list[dict]:
+        query = "SELECT id, kind, message, created_at, read FROM notifications"
+        if unread_only:
+            query += " WHERE read = 0"
+        query += " ORDER BY id DESC LIMIT ?"
+        with self._lock:
+            rows = self._conn.execute(query, (limit,)).fetchall()
+        return [
+            {"id": r[0], "kind": r[1], "message": r[2], "created_at": r[3], "read": bool(r[4])}
+            for r in rows
+        ]
+
+    def unread_notification_count(self) -> int:
+        with self._lock:
+            row = self._conn.execute("SELECT COUNT(*) FROM notifications WHERE read = 0").fetchone()
+        return row[0] if row else 0
+
+    def mark_notification_read(self, notification_id: int) -> bool:
+        with self._lock:
+            cur = self._conn.execute(
+                "UPDATE notifications SET read = 1 WHERE id = ?", (notification_id,)
+            )
+            self._conn.commit()
+        return cur.rowcount > 0
+
+    def mark_all_notifications_read(self) -> int:
+        with self._lock:
+            cur = self._conn.execute("UPDATE notifications SET read = 1 WHERE read = 0")
+            self._conn.commit()
+        return cur.rowcount
 
     def export_snapshot(self) -> dict:
         """A full, human-readable JSON snapshot of everything this store has

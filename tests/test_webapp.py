@@ -333,6 +333,54 @@ def test_compare_404s_when_a_run_has_no_steps():
     assert client.get("/api/runs/compare", params={"a": run_id, "b": 999999}).status_code == 404
 
 
+def test_run_note_can_be_set_and_is_returned_by_list_and_detail():
+    res = client.post(
+        "/api/modules/automation/fetch_raw_metrics/run",
+        json={"inputs": {"signups": 1, "churn": 1, "revenue": 1}, "force_refresh": True},
+    )
+    _collect_stream(res.json()["stream_id"])
+    run_id = client.get("/api/runs?limit=1").json()[0]["id"]
+
+    put_res = client.put(f"/api/runs/{run_id}/note", json={"note": "  Expected failure, ignore.  "})
+    assert put_res.status_code == 200
+    assert put_res.json() == {"run_id": run_id, "note": "Expected failure, ignore."}
+
+    detail = client.get(f"/api/runs/{run_id}")
+    assert detail.json()["note"] == "Expected failure, ignore."
+
+    listed = client.get("/api/runs?limit=1").json()
+    assert listed[0]["note"] == "Expected failure, ignore."
+
+
+def test_run_note_can_be_cleared_with_an_empty_string():
+    res = client.post(
+        "/api/modules/automation/fetch_raw_metrics/run",
+        json={"inputs": {"signups": 2, "churn": 1, "revenue": 1}, "force_refresh": True},
+    )
+    _collect_stream(res.json()["stream_id"])
+    run_id = client.get("/api/runs?limit=1").json()[0]["id"]
+
+    client.put(f"/api/runs/{run_id}/note", json={"note": "temporary"})
+    clear_res = client.put(f"/api/runs/{run_id}/note", json={"note": ""})
+    assert clear_res.json() == {"run_id": run_id, "note": ""}
+    assert client.get(f"/api/runs/{run_id}").json()["note"] == ""
+
+
+def test_run_note_defaults_to_empty_string_when_never_set():
+    res = client.post(
+        "/api/modules/automation/fetch_raw_metrics/run",
+        json={"inputs": {"signups": 3, "churn": 1, "revenue": 1}, "force_refresh": True},
+    )
+    _collect_stream(res.json()["stream_id"])
+    run_id = client.get("/api/runs?limit=1").json()[0]["id"]
+    assert client.get(f"/api/runs/{run_id}").json()["note"] == ""
+
+
+def test_run_note_404s_for_an_unknown_run():
+    res = client.put("/api/runs/999999/note", json={"note": "x"})
+    assert res.status_code == 404
+
+
 def test_run_endpoints_are_rate_limited_per_client():
     from webapp.main import _run_rate_limiter
 

@@ -1160,3 +1160,156 @@ def test_validate_does_not_launch_a_real_run():
     )
     after = len(client.get("/api/runs?limit=10000").json())
     assert after == before
+
+
+# ---- Pipeline tagging + tag filter ----
+
+def test_set_and_read_pipeline_tags():
+    client.post(
+        "/api/pipelines",
+        json={"name": "Tag Target", "steps": [{"tier": "automation", "name": "fetch_raw_metrics"}]},
+    )
+    res = client.put("/api/pipelines/tag_target/tags", json={"tags": ["nightly", "Billing"]})
+    assert res.status_code == 200
+    assert res.json() == {"slug": "tag_target", "tags": ["Billing", "nightly"]}
+
+    listed = client.get("/api/pipelines").json()
+    entry = next(p for p in listed if p["slug"] == "tag_target")
+    assert entry["tags"] == ["Billing", "nightly"]
+
+
+def test_tagging_an_unknown_pipeline_404s():
+    res = client.put("/api/pipelines/does_not_exist/tags", json={"tags": ["x"]})
+    assert res.status_code == 404
+
+
+def test_blank_tags_are_stripped_and_deduplicated_case_sensitively():
+    client.post(
+        "/api/pipelines",
+        json={"name": "Tag Cleanup", "steps": [{"tier": "automation", "name": "fetch_raw_metrics"}]},
+    )
+    res = client.put("/api/pipelines/tag_cleanup/tags", json={"tags": ["  ops  ", "", "ops", "  "]})
+    assert res.status_code == 200
+    assert res.json()["tags"] == ["ops"]
+
+
+def test_filter_saved_pipelines_by_tag():
+    client.post(
+        "/api/pipelines",
+        json={"name": "Tag Filter A", "steps": [{"tier": "automation", "name": "fetch_raw_metrics"}]},
+    )
+    client.post(
+        "/api/pipelines",
+        json={"name": "Tag Filter B", "steps": [{"tier": "automation", "name": "fetch_raw_metrics"}]},
+    )
+    client.put("/api/pipelines/tag_filter_a/tags", json={"tags": ["prod"]})
+
+    res = client.get("/api/pipelines?tag=prod")
+    assert res.status_code == 200
+    slugs = [p["slug"] for p in res.json()]
+    assert "tag_filter_a" in slugs
+    assert "tag_filter_b" not in slugs
+
+    # case-insensitive match
+    res_case = client.get("/api/pipelines?tag=PROD")
+    assert "tag_filter_a" in [p["slug"] for p in res_case.json()]
+
+
+def test_deleting_a_pipeline_clears_its_tags():
+    client.post(
+        "/api/pipelines",
+        json={"name": "Tag Then Delete", "steps": [{"tier": "automation", "name": "fetch_raw_metrics"}]},
+    )
+    client.put("/api/pipelines/tag_then_delete/tags", json={"tags": ["temp"]})
+    client.delete("/api/pipelines/tag_then_delete")
+
+    # Recreate under the same name -- it should come back with no tags.
+    client.post(
+        "/api/pipelines",
+        json={"name": "Tag Then Delete", "steps": [{"tier": "automation", "name": "fetch_raw_metrics"}]},
+    )
+    listed = client.get("/api/pipelines").json()
+    entry = next(p for p in listed if p["slug"] == "tag_then_delete")
+    assert entry["tags"] == []
+
+
+# ---- Full-text search across saved pipeline definitions ----
+
+def test_search_pipelines_matches_a_keyword_inside_step_inputs():
+    client.post(
+        "/api/pipelines",
+        json={
+            "name": "Search Target",
+            "steps": [
+                {
+                    "tier": "automation",
+                    "name": "fetch_raw_metrics",
+                    "inputs": {"signups": 1, "churn": 1, "revenue": 1},
+                }
+            ],
+        },
+    )
+    res = client.get("/api/pipelines/search?q=fetch_raw_metrics")
+    assert res.status_code == 200
+    body = res.json()
+    assert body["query"] == "fetch_raw_metrics"
+    assert any(r["slug"] == "search_target" for r in body["results"])
+    match = next(r for r in body["results"] if r["slug"] == "search_target")
+    assert "snippet" in match
+
+
+def test_search_pipelines_returns_empty_for_a_blank_query():
+    res = client.get("/api/pipelines/search?q=")
+    assert res.status_code == 200
+    assert res.json()["results"] == []
+
+
+def test_search_pipelines_finds_nothing_for_an_unmatched_keyword():
+    client.post(
+        "/api/pipelines",
+        json={"name": "Search Miss", "steps": [{"tier": "automation", "name": "fetch_raw_metrics"}]},
+    )
+    res = client.get("/api/pipelines/search?q=zzz_nonexistent_keyword_zzz")
+    assert res.json()["results"] == []
+
+
+# ---- "Used by" reverse lookup for modules ----
+
+def test_module_listing_reports_which_saved_pipelines_use_it():
+    client.post(
+        "/api/pipelines",
+        json={"name": "Uses Fetch Metrics", "steps": [{"tier": "automation", "name": "fetch_raw_metrics"}]},
+    )
+    modules = client.get("/api/modules").json()
+    fetch_metrics = next(m for m in modules["automation"] if m["name"] == "fetch_raw_metrics")
+    assert "uses_fetch_metrics" in fetch_metrics["used_by"]
+
+
+def test_module_listing_used_by_includes_parallel_group_branches():
+    client.post(
+        "/api/pipelines",
+        json={
+            "name": "Parallel Uses Fetch",
+            "steps": [
+                {
+                    "type": "parallel",
+                    "name": "",
+                    "branches": [
+                        {"tier": "automation", "name": "fetch_raw_metrics"},
+                        {"tier": "automation", "name": "http_request", "inputs": {"url": "https://example.com", "method": "GET"}},
+                    ],
+                }
+            ],
+        },
+    )
+    modules = client.get("/api/modules").json()
+    fetch_metrics = next(m for m in modules["automation"] if m["name"] == "fetch_raw_metrics")
+    assert "parallel_uses_fetch" in fetch_metrics["used_by"]
+    http_request = next(m for m in modules["automation"] if m["name"] == "http_request")
+    assert "parallel_uses_fetch" in http_request["used_by"]
+
+
+def test_module_used_by_is_empty_when_no_pipeline_references_it():
+    modules = client.get("/api/modules").json()
+    escalation_agent = next(m for m in modules["agent"] if m["name"] == "escalation_agent")
+    assert escalation_agent["used_by"] == []
