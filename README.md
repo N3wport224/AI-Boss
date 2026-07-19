@@ -803,6 +803,25 @@ A few things live in the header/subheader on every page load:
   Pipeline Templates gallery narrows visible cards by name,
   description, or module chain.
 
+## Schedule CSV export, pipeline rename, bulk module enable/disable, and a problems filter
+
+- **Export the schedule list to CSV** — an **Export CSV** link next to
+  the Schedules heading downloads every schedule's target, cadence, and
+  status.
+- **Rename a saved pipeline in place** — a **Rename** button on each
+  saved pipeline card changes its display name (and slug) without
+  cloning it, migrating its tags and repointing any schedule that
+  targets it by slug.
+- **Bulk enable/disable modules** — checkbox-select modules across every
+  tier and enable or disable them all in one click, mirroring the
+  existing bulk pause/resume for schedules.
+- **Bulk remove a tag from selected saved pipelines** — the pipeline
+  counterpart to bulk-untagging artifacts: checkbox-select multiple
+  saved pipelines and strip one tag from all of them at once.
+- **"Show only disabled / tripped" module filter** — a toggle above the
+  Modules directory narrows every tier down to just the modules that
+  need attention, pairing naturally with bulk enable/disable.
+
 ## Tech stack
 
 - **Language:** Python 3.11+ — first-class async/sync support and native SDKs

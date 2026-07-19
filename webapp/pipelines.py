@@ -350,6 +350,39 @@ def duplicate_pipeline(slug: str, tier_dirs: dict) -> dict:
     return save_pipeline(new_definition, tier_dirs)
 
 
+def rename_pipeline(old_slug: str, new_name: str) -> dict:
+    """Rename a saved pipeline in place -- distinct from duplicate_pipeline(),
+    which clones it under a new slug and leaves the original untouched. Since
+    a pipeline's slug is just its name slugified, a rename that changes the
+    slug means moving the YAML file (and any archived version history) to
+    the new slug rather than merely rewriting a field; callers are
+    responsible for migrating anything else keyed by slug (pipeline tags,
+    schedules referencing this pipeline by name) since those live in the
+    state store, not here."""
+    definition = load_pipeline(old_slug)
+    new_slug = _slugify(new_name)
+
+    if new_slug == old_slug:
+        definition["name"] = new_name
+        (PIPELINES_DIR / f"{old_slug}.yaml").write_text(yaml.safe_dump(definition, sort_keys=False))
+        return definition
+
+    new_path = PIPELINES_DIR / f"{new_slug}.yaml"
+    if new_path.exists():
+        raise PipelineValidationError(f"A pipeline named '{new_name}' already exists.")
+
+    definition["name"] = new_name
+    definition["slug"] = new_slug
+    new_path.write_text(yaml.safe_dump(definition, sort_keys=False))
+    (PIPELINES_DIR / f"{old_slug}.yaml").unlink()
+
+    old_versions_dir = _versions_dir(old_slug)
+    if old_versions_dir.exists():
+        old_versions_dir.rename(_versions_dir(new_slug))
+
+    return definition
+
+
 def save_pipeline_from_template(template: dict, tier_dirs: dict) -> dict:
     """Clone a built-in starter template (see webapp/templates.py) into the
     user's own saved pipelines. Uses the template's own name unless that

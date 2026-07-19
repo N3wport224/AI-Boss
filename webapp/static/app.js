@@ -32,6 +32,11 @@ const RECENTLY_VIEWED_STORAGE_KEY = "aiboss-recently-viewed";
 const RECENTLY_VIEWED_MAX = 8;
 
 const sectionsEl = document.getElementById("sections");
+const selectedModuleRefs = new Set();
+const modulesSelectAllEl = document.getElementById("modules-select-all");
+const modulesBulkEnableBtn = document.getElementById("modules-bulk-enable-btn");
+const modulesBulkDisableBtn = document.getElementById("modules-bulk-disable-btn");
+const modulesProblemsFilterEl = document.getElementById("modules-problems-filter");
 const pipelineResultEl = document.getElementById("pipeline-result");
 const runPipelineBtn = document.getElementById("run-pipeline-btn");
 const toastContainer = document.getElementById("toast-container");
@@ -89,6 +94,8 @@ const pipelineDeepSearchInput = document.getElementById("pipeline-deep-search");
 const pipelineDeepSearchResultsEl = document.getElementById("pipeline-deep-search-results");
 const pipelinesBulkDeleteBtn = document.getElementById("pipelines-bulk-delete-btn");
 const pipelinesSelectAllEl = document.getElementById("pipelines-select-all");
+const pipelinesBulkUntagInput = document.getElementById("pipelines-bulk-untag-input");
+const pipelinesBulkUntagBtn = document.getElementById("pipelines-bulk-untag-btn");
 
 const selectedPipelineSlugs = new Set();
 
@@ -97,7 +104,38 @@ function updatePipelinesBulkDeleteBtn() {
   pipelinesBulkDeleteBtn.textContent = selectedPipelineSlugs.size
     ? `Delete selected (${selectedPipelineSlugs.size})`
     : "Delete selected";
+  pipelinesBulkUntagBtn.disabled = selectedPipelineSlugs.size === 0;
+  pipelinesBulkUntagBtn.textContent = selectedPipelineSlugs.size
+    ? `Remove tag from selected (${selectedPipelineSlugs.size})`
+    : "Remove tag from selected";
 }
+
+pipelinesBulkUntagBtn.addEventListener("click", async () => {
+  const tag = pipelinesBulkUntagInput.value.trim();
+  if (!tag) {
+    showToast("Enter a tag first.", "error");
+    return;
+  }
+  if (!selectedPipelineSlugs.size) return;
+
+  try {
+    const res = await fetch("/api/pipelines/bulk-untag", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ slugs: [...selectedPipelineSlugs], tag }),
+    });
+    const body = await res.json();
+    if (!res.ok) {
+      showToast(body.detail || "Failed to remove tag.", "error");
+      return;
+    }
+    showToast(`Removed "${tag}" from ${body.untagged.length} pipeline(s).`, "success");
+    pipelinesBulkUntagInput.value = "";
+    await loadSavedPipelines();
+  } catch (err) {
+    showToast(`Bulk untag failed: ${err}`, "error");
+  }
+});
 
 const pipelineTemplatesGrid = document.getElementById("pipeline-templates-grid");
 
@@ -1763,8 +1801,9 @@ function renderCard(module) {
     : "";
 
   return `
-    <div class="card ${tripped ? "breaker-tripped" : ""} ${runtimeEnabled ? "" : "module-disabled"}" id="${cardId}" data-search-text="${searchText}">
+    <div class="card ${tripped ? "breaker-tripped" : ""} ${runtimeEnabled ? "" : "module-disabled"}" id="${cardId}" data-search-text="${searchText}" data-tier="${module.tier}" data-name="${module.name}">
       <div class="card-head">
+        <input type="checkbox" class="module-select-checkbox" data-tier="${module.tier}" data-name="${module.name}" ${selectedModuleRefs.has(`${module.tier}::${module.name}`) ? "checked" : ""} title="Select for bulk enable/disable" />
         <h3 class="card-title">${module.name}</h3>
         <div class="card-head-actions">
           ${favoriteButtonHtml(favKey)}
@@ -1992,8 +2031,95 @@ function renderSections(modulesByTier) {
   wireVariableChips(sectionsEl);
   applyCollapsedState(sectionsEl);
   wireCollapseToggles(sectionsEl);
+  wireModuleSelectCheckboxes();
+  applyModulesProblemsFilter();
   applySearchFilter();
 }
+
+// ---- Bulk enable/disable modules ----
+
+function moduleCheckboxes() {
+  return [...sectionsEl.querySelectorAll(".module-select-checkbox")].filter(
+    (cb) => !cb.closest(".card").classList.contains("search-hidden") && !cb.closest(".card").classList.contains("problems-filter-hidden")
+  );
+}
+
+function updateModulesBulkButtons() {
+  const disabled = selectedModuleRefs.size === 0;
+  modulesBulkEnableBtn.disabled = disabled;
+  modulesBulkDisableBtn.disabled = disabled;
+  const suffix = selectedModuleRefs.size ? ` (${selectedModuleRefs.size})` : "";
+  modulesBulkEnableBtn.textContent = `Enable selected${suffix}`;
+  modulesBulkDisableBtn.textContent = `Disable selected${suffix}`;
+}
+
+function wireModuleSelectCheckboxes() {
+  const liveRefs = new Set(
+    [...sectionsEl.querySelectorAll(".module-select-checkbox")].map((cb) => `${cb.dataset.tier}::${cb.dataset.name}`)
+  );
+  [...selectedModuleRefs].forEach((ref) => {
+    if (!liveRefs.has(ref)) selectedModuleRefs.delete(ref);
+  });
+
+  sectionsEl.querySelectorAll(".module-select-checkbox").forEach((checkbox) => {
+    checkbox.addEventListener("click", (e) => e.stopPropagation());
+    checkbox.addEventListener("change", () => {
+      const ref = `${checkbox.dataset.tier}::${checkbox.dataset.name}`;
+      if (checkbox.checked) selectedModuleRefs.add(ref);
+      else selectedModuleRefs.delete(ref);
+      updateModulesBulkButtons();
+      modulesSelectAllEl.checked =
+        moduleCheckboxes().length > 0 && moduleCheckboxes().every((cb) => cb.checked);
+    });
+  });
+  updateModulesBulkButtons();
+}
+
+modulesSelectAllEl.addEventListener("change", () => {
+  moduleCheckboxes().forEach((checkbox) => {
+    checkbox.checked = modulesSelectAllEl.checked;
+    const ref = `${checkbox.dataset.tier}::${checkbox.dataset.name}`;
+    if (modulesSelectAllEl.checked) selectedModuleRefs.add(ref);
+    else selectedModuleRefs.delete(ref);
+  });
+  updateModulesBulkButtons();
+});
+
+async function bulkSetSelectedModulesEnabled(enabled) {
+  if (!selectedModuleRefs.size) return;
+  const modules = [...selectedModuleRefs].map((ref) => {
+    const [tier, name] = ref.split("::");
+    return { tier, name };
+  });
+  await fetch("/api/modules/bulk-set-enabled", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ modules, enabled }),
+  });
+  showToast(`${enabled ? "Enabled" : "Disabled"} ${modules.length} module(s).`, "success");
+  selectedModuleRefs.clear();
+  await loadModules();
+}
+
+modulesBulkEnableBtn.addEventListener("click", () => bulkSetSelectedModulesEnabled(true));
+modulesBulkDisableBtn.addEventListener("click", () => bulkSetSelectedModulesEnabled(false));
+
+function applyModulesProblemsFilter() {
+  const onlyProblems = modulesProblemsFilterEl.checked;
+  sectionsEl.querySelectorAll(".card[data-tier][data-name]").forEach((card) => {
+    const isProblem = card.classList.contains("module-disabled") || card.classList.contains("breaker-tripped");
+    card.classList.toggle("problems-filter-hidden", onlyProblems && !isProblem);
+  });
+  sectionsEl.querySelectorAll(".tier-section").forEach((section) => {
+    const grid = section.querySelector(".card-grid");
+    if (!grid) return;
+    const cards = [...grid.querySelectorAll(".card")];
+    const anyVisible = cards.some((c) => !c.classList.contains("problems-filter-hidden"));
+    section.classList.toggle("problems-filter-no-match", onlyProblems && cards.length > 0 && !anyVisible);
+  });
+}
+
+modulesProblemsFilterEl.addEventListener("change", applyModulesProblemsFilter);
 
 // ---- Saved input presets per module ----
 
@@ -3244,6 +3370,7 @@ function renderSavedPipelines(pipelinesList) {
             <div class="pipeline-card-actions">
               <button class="btn btn-run" data-slug="${p.slug}" data-name="${p.name}">Run</button>
               <button class="btn btn-secondary btn-small" data-edit-slug="${p.slug}" type="button">Edit</button>
+              <button class="btn btn-secondary btn-small" data-rename-slug="${p.slug}" data-rename-name="${escapeHtml(p.name)}" type="button">Rename</button>
               <button class="btn btn-secondary btn-small" data-clone-slug="${p.slug}" type="button">Clone</button>
               <button class="btn btn-secondary btn-small" data-graph-slug="${p.slug}" type="button">Graph</button>
               <button class="btn btn-secondary btn-small" data-history-slug="${p.slug}" type="button">History</button>
@@ -3263,6 +3390,9 @@ function renderSavedPipelines(pipelinesList) {
     });
     savedPipelinesGrid.querySelectorAll("[data-clone-slug]").forEach((btn) => {
       btn.addEventListener("click", () => clonePipeline(btn.dataset.cloneSlug));
+    });
+    savedPipelinesGrid.querySelectorAll("[data-rename-slug]").forEach((btn) => {
+      btn.addEventListener("click", () => renamePipeline(btn.dataset.renameSlug, btn.dataset.renameName));
     });
     savedPipelinesGrid.querySelectorAll("[data-edit-slug]").forEach((btn) => {
       btn.addEventListener("click", () => openPipelineForEditing(btn.dataset.editSlug));
@@ -3879,6 +4009,27 @@ async function clonePipeline(slug) {
     await loadSavedPipelines();
   } catch (err) {
     showToast(`Clone failed: ${err}`, "error");
+  }
+}
+
+async function renamePipeline(slug, currentName) {
+  const newName = prompt(`Rename "${currentName}" to:`, currentName);
+  if (!newName || !newName.trim() || newName.trim() === currentName) return;
+  try {
+    const res = await fetch(`/api/pipelines/${slug}/rename`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ name: newName.trim() }),
+    });
+    const body = await res.json();
+    if (!res.ok) {
+      showToast(body.detail || "Failed to rename this pipeline.", "error");
+      return;
+    }
+    showToast(`Renamed to "${body.pipeline.name}".`, "success");
+    await loadSavedPipelines();
+  } catch (err) {
+    showToast(`Rename failed: ${err}`, "error");
   }
 }
 

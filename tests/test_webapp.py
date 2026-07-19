@@ -190,6 +190,34 @@ def test_schedule_crud_and_validation():
     assert not any(s["id"] == schedule_id for s in client.get("/api/schedules").json())
 
 
+def test_schedules_csv_export_has_a_header_and_a_row_for_a_created_schedule():
+    res = client.post(
+        "/api/schedules",
+        json={
+            "kind": "module",
+            "tier": "automation",
+            "name": "fetch_raw_metrics",
+            "inputs": {"signups": 1, "churn": 1, "revenue": 1},
+            "interval_seconds": 30,
+        },
+    )
+    schedule_id = res.json()["id"]
+
+    csv_res = client.get("/api/schedules.csv")
+    assert csv_res.status_code == 200
+    assert csv_res.headers["content-type"].startswith("text/csv")
+    assert "attachment; filename=schedules.csv" in csv_res.headers["content-disposition"]
+
+    lines = csv_res.text.strip().splitlines()
+    assert lines[0] == (
+        "id,kind,tier,name,schedule_type,interval_seconds,daily_time,day_of_week,"
+        "enabled,next_run_at,last_run_at,last_status"
+    )
+    assert any(line.startswith(f"{schedule_id},module,automation,fetch_raw_metrics,") for line in lines[1:])
+
+    client.delete(f"/api/schedules/{schedule_id}")
+
+
 def _create_test_schedule():
     res = client.post(
         "/api/schedules",

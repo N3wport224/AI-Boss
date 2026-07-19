@@ -19,6 +19,7 @@ def _restore_fetch_raw_metrics_enabled():
     unrelated test running later in the same session."""
     yield
     store.set_module_enabled("automation", "fetch_raw_metrics", True)
+    store.set_module_enabled("automation", "http_request", True)
 
 
 def test_module_is_enabled_by_default():
@@ -110,3 +111,65 @@ def test_state_store_override_precedes_manifest_default(tmp_path):
     isolated_store.set_module_enabled("automation", "fetch_raw_metrics", True)
     assert isolated_store.get_module_enabled_override("automation", "fetch_raw_metrics") is True
     isolated_store.close()
+
+
+def test_bulk_set_modules_enabled_disables_and_re_enables_a_selection():
+    res = client.post(
+        "/api/modules/bulk-set-enabled",
+        json={
+            "modules": [
+                {"tier": "automation", "name": "fetch_raw_metrics"},
+                {"tier": "automation", "name": "http_request"},
+            ],
+            "enabled": False,
+        },
+    )
+    assert res.status_code == 200
+    body = res.json()
+    assert body["enabled"] is False
+    assert len(body["updated"]) == 2
+
+    listed = client.get("/api/modules").json()
+    metrics = next(m for m in listed["automation"] if m["name"] == "fetch_raw_metrics")
+    http_req = next(m for m in listed["automation"] if m["name"] == "http_request")
+    assert metrics["runtime_enabled"] is False
+    assert http_req["runtime_enabled"] is False
+
+    res2 = client.post(
+        "/api/modules/bulk-set-enabled",
+        json={
+            "modules": [
+                {"tier": "automation", "name": "fetch_raw_metrics"},
+                {"tier": "automation", "name": "http_request"},
+            ],
+            "enabled": True,
+        },
+    )
+    assert res2.status_code == 200
+    listed2 = client.get("/api/modules").json()
+    metrics2 = next(m for m in listed2["automation"] if m["name"] == "fetch_raw_metrics")
+    http_req2 = next(m for m in listed2["automation"] if m["name"] == "http_request")
+    assert metrics2["runtime_enabled"] is True
+    assert http_req2["runtime_enabled"] is True
+
+
+def test_bulk_set_modules_enabled_skips_an_unknown_module():
+    res = client.post(
+        "/api/modules/bulk-set-enabled",
+        json={
+            "modules": [
+                {"tier": "automation", "name": "fetch_raw_metrics"},
+                {"tier": "automation", "name": "does_not_exist"},
+            ],
+            "enabled": False,
+        },
+    )
+    assert res.status_code == 200
+    body = res.json()
+    assert body["updated"] == [{"tier": "automation", "name": "fetch_raw_metrics"}]
+
+
+def test_bulk_set_modules_enabled_is_a_no_op_on_an_empty_selection():
+    res = client.post("/api/modules/bulk-set-enabled", json={"modules": [], "enabled": False})
+    assert res.status_code == 200
+    assert res.json() == {"updated": [], "enabled": False}

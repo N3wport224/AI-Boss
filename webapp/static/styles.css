@@ -624,6 +624,14 @@ main {
   display: none;
 }
 
+.card.problems-filter-hidden {
+  display: none;
+}
+
+.tier-section.problems-filter-no-match {
+  display: none;
+}
+
 .card-grid {
   display: grid;
   grid-template-columns: repeat(auto-fill, minmax(320px, 1fr));

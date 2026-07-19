@@ -491,6 +491,146 @@ def test_duplicate_unknown_pipeline_404s():
     assert res.status_code == 404
 
 
+def test_rename_pipeline_moves_the_slug_and_keeps_the_steps():
+    client.post(
+        "/api/pipelines",
+        json={"name": "Rename Me", "steps": [{"tier": "automation", "name": "fetch_raw_metrics"}]},
+    )
+
+    res = client.post("/api/pipelines/rename_me/rename", json={"name": "Renamed Pipeline"})
+    assert res.status_code == 200
+    renamed = res.json()["pipeline"]
+    assert renamed["slug"] == "renamed_pipeline"
+    assert renamed["name"] == "Renamed Pipeline"
+    assert renamed["steps"] == [
+        {"tier": "automation", "name": "fetch_raw_metrics", "inputs": {}, "mappings": {}}
+    ]
+
+    slugs = {p["slug"] for p in client.get("/api/pipelines").json()}
+    assert "rename_me" not in slugs
+    assert "renamed_pipeline" in slugs
+
+
+def test_rename_pipeline_to_the_same_slug_only_changes_display_name():
+    client.post(
+        "/api/pipelines",
+        json={"name": "Case Test", "steps": [{"tier": "automation", "name": "fetch_raw_metrics"}]},
+    )
+
+    res = client.post("/api/pipelines/case_test/rename", json={"name": "CASE TEST"})
+    assert res.status_code == 200
+    renamed = res.json()["pipeline"]
+    assert renamed["slug"] == "case_test"
+    assert renamed["name"] == "CASE TEST"
+
+
+def test_rename_pipeline_migrates_tags_and_repoints_schedules():
+    client.post(
+        "/api/pipelines",
+        json={"name": "Migrate Me", "steps": [{"tier": "automation", "name": "fetch_raw_metrics"}]},
+    )
+    client.put("/api/pipelines/migrate_me/tags", json={"tags": ["important"]})
+    schedule_res = client.post(
+        "/api/schedules",
+        json={"kind": "pipeline", "name": "migrate_me", "interval_seconds": 3600},
+    )
+    schedule_id = schedule_res.json()["id"]
+
+    res = client.post("/api/pipelines/migrate_me/rename", json={"name": "Migrated Pipeline"})
+    assert res.status_code == 200
+
+    assert client.get("/api/pipelines").json()
+    pipelines_by_slug = {p["slug"]: p for p in client.get("/api/pipelines").json()}
+    assert pipelines_by_slug["migrated_pipeline"]["tags"] == ["important"]
+    assert "migrate_me" not in pipelines_by_slug
+
+    schedules = client.get("/api/schedules").json()
+    schedule = next(s for s in schedules if s["id"] == schedule_id)
+    assert schedule["name"] == "migrated_pipeline"
+
+    client.delete(f"/api/schedules/{schedule_id}")
+
+
+def test_rename_pipeline_rejects_a_collision_with_an_existing_pipeline():
+    client.post(
+        "/api/pipelines",
+        json={"name": "Rename Collision A", "steps": [{"tier": "automation", "name": "fetch_raw_metrics"}]},
+    )
+    client.post(
+        "/api/pipelines",
+        json={"name": "Rename Collision B", "steps": [{"tier": "automation", "name": "fetch_raw_metrics"}]},
+    )
+
+    res = client.post("/api/pipelines/rename_collision_a/rename", json={"name": "Rename Collision B"})
+    assert res.status_code == 400
+
+    slugs = {p["slug"] for p in client.get("/api/pipelines").json()}
+    assert "rename_collision_a" in slugs
+    assert "rename_collision_b" in slugs
+
+
+def test_rename_unknown_pipeline_404s():
+    res = client.post("/api/pipelines/does_not_exist/rename", json={"name": "Whatever"})
+    assert res.status_code == 404
+
+
+def test_bulk_untag_pipelines_removes_the_tag_but_keeps_other_tags():
+    client.post(
+        "/api/pipelines",
+        json={"name": "Untag A", "steps": [{"tier": "automation", "name": "fetch_raw_metrics"}]},
+    )
+    client.post(
+        "/api/pipelines",
+        json={"name": "Untag B", "steps": [{"tier": "automation", "name": "fetch_raw_metrics"}]},
+    )
+    client.put("/api/pipelines/untag_a/tags", json={"tags": ["keep_me", "remove_me"]})
+    client.put("/api/pipelines/untag_b/tags", json={"tags": ["remove_me"]})
+
+    res = client.post("/api/pipelines/bulk-untag", json={"slugs": ["untag_a", "untag_b"], "tag": "remove_me"})
+    assert res.status_code == 200
+    body = res.json()
+    assert body["tag"] == "remove_me"
+    assert set(body["untagged"]) == {"untag_a", "untag_b"}
+
+    updated = {p["slug"]: p for p in client.get("/api/pipelines").json()}
+    assert updated["untag_a"]["tags"] == ["keep_me"]
+    assert updated["untag_b"]["tags"] == []
+
+
+def test_bulk_untag_pipelines_is_a_no_op_for_a_pipeline_that_never_had_the_tag():
+    client.post(
+        "/api/pipelines",
+        json={"name": "Untag C", "steps": [{"tier": "automation", "name": "fetch_raw_metrics"}]},
+    )
+    client.put("/api/pipelines/untag_c/tags", json={"tags": ["something_else"]})
+
+    res = client.post("/api/pipelines/bulk-untag", json={"slugs": ["untag_c"], "tag": "never_had_this"})
+    assert res.status_code == 200
+    assert res.json()["untagged"] == ["untag_c"]
+
+    updated = {p["slug"]: p for p in client.get("/api/pipelines").json()}
+    assert updated["untag_c"]["tags"] == ["something_else"]
+
+
+def test_bulk_untag_pipelines_skips_unknown_slugs_without_failing():
+    client.post(
+        "/api/pipelines",
+        json={"name": "Untag D", "steps": [{"tier": "automation", "name": "fetch_raw_metrics"}]},
+    )
+
+    res = client.post(
+        "/api/pipelines/bulk-untag",
+        json={"slugs": ["untag_d", "totally_made_up_slug"], "tag": "whatever"},
+    )
+    assert res.status_code == 200
+    assert res.json()["untagged"] == ["untag_d"]
+
+
+def test_bulk_untag_pipelines_rejects_a_blank_tag():
+    res = client.post("/api/pipelines/bulk-untag", json={"slugs": [], "tag": "   "})
+    assert res.status_code == 400
+
+
 def test_run_history_search_finds_step_outputs_and_errors():
     # Produce a step whose output contains a distinctive marker value.
     res = client.post(

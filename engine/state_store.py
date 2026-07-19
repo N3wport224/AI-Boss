@@ -812,6 +812,20 @@ class StateStore:
             self._conn.execute("DELETE FROM schedules WHERE id = ?", (schedule_id,))
             self._conn.commit()
 
+    def repoint_pipeline_schedules(self, old_slug: str, new_slug: str) -> int:
+        """Update every pipeline-kind schedule's target from old_slug to
+        new_slug -- a saved pipeline's slug is its identity for scheduling
+        purposes (the scheduler loads it by `schedule["name"]`), so renaming
+        a pipeline would otherwise silently orphan any schedule pointed at
+        its old slug. Returns the number of schedules repointed."""
+        with self._lock:
+            cur = self._conn.execute(
+                "UPDATE schedules SET name = ? WHERE kind = 'pipeline' AND name = ?",
+                (new_slug, old_slug),
+            )
+            self._conn.commit()
+        return cur.rowcount
+
     def set_artifact_tags(self, filename: str, tags: list[str]) -> list[str]:
         """Replace the full tag set for an artifact (keyed by its on-disk
         filename, which is unique per upload thanks to the timestamp prefix

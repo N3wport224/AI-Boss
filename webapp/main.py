@@ -801,6 +801,38 @@ def set_module_enabled(tier: str, name: str, payload: ModuleEnabledUpdate):
     return {"tier": tier, "name": name, "runtime_enabled": payload.enabled}
 
 
+class ModuleRef(BaseModel):
+    tier: str
+    name: str
+
+
+class BulkSetModulesEnabled(BaseModel):
+    modules: list[ModuleRef]
+    enabled: bool
+
+
+@app.post("/api/modules/bulk-set-enabled")
+def bulk_set_modules_enabled(payload: BulkSetModulesEnabled):
+    """Enable or disable a user-picked set of modules in one action --
+    the finer-grained counterpart to toggling PATCH /api/modules/{tier}/{name}
+    one at a time, mirroring the existing bulk pause/resume pattern already
+    built for Schedules. A ref naming a tier/name that doesn't exist is
+    skipped rather than failing the whole batch, same as bulk-tagging."""
+    updated = []
+    for ref in payload.modules:
+        try:
+            _manifest_by_name(ref.tier, ref.name)
+        except HTTPException:
+            continue
+        store.set_module_enabled(ref.tier, ref.name, payload.enabled)
+        updated.append({"tier": ref.tier, "name": ref.name})
+    store.record_audit_event(
+        "module_bulk_set_enabled",
+        f"{'Enabled' if payload.enabled else 'Disabled'} {len(updated)} selected module(s): {updated}.",
+    )
+    return {"updated": updated, "enabled": payload.enabled}
+
+
 class InputPresetSave(BaseModel):
     preset_name: str
     inputs: dict[str, Any] = {}
@@ -1099,6 +1131,43 @@ def duplicate_pipeline(slug: str):
     return {"pipeline": duplicated}
 
 
+class PipelineRename(BaseModel):
+    name: str
+
+
+@app.post("/api/pipelines/{slug}/rename")
+def rename_saved_pipeline(slug: str, payload: PipelineRename):
+    """Rename a saved pipeline in place -- distinct from
+    POST /api/pipelines/{slug}/duplicate, which clones it under a new slug
+    and leaves the original untouched. Migrates the pipeline's tags and
+    repoints any schedule targeting it by slug, since both are keyed by
+    slug in the state store rather than living inside the pipeline's own
+    YAML file."""
+    old_slug = slug
+    try:
+        renamed = pipeline_store.rename_pipeline(old_slug, payload.name)
+    except FileNotFoundError:
+        raise HTTPException(status_code=404, detail=f"No saved pipeline named '{old_slug}'.")
+    except pipeline_store.PipelineValidationError as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
+
+    new_slug = renamed["slug"]
+    if new_slug != old_slug:
+        tags = store.get_pipeline_tags(old_slug)
+        if tags:
+            store.set_pipeline_tags(new_slug, tags)
+            store.delete_pipeline_tags(old_slug)
+        repointed = store.repoint_pipeline_schedules(old_slug, new_slug)
+        if repointed:
+            store.record_audit_event(
+                "pipeline_rename",
+                f"Renamed pipeline '{old_slug}' to '{new_slug}' and repointed {repointed} schedule(s).",
+            )
+        else:
+            store.record_audit_event("pipeline_rename", f"Renamed pipeline '{old_slug}' to '{new_slug}'.")
+    return {"pipeline": renamed}
+
+
 @app.delete("/api/pipelines/{slug}")
 def delete_saved_pipeline(slug: str):
     try:
@@ -1144,6 +1213,39 @@ def set_pipeline_tags(slug: str, payload: PipelineTagsUpdate):
         raise HTTPException(status_code=404, detail=f"No saved pipeline named '{slug}'.")
     cleaned = sorted({t.strip() for t in payload.tags if t.strip()})
     return {"slug": slug, "tags": store.set_pipeline_tags(slug, cleaned)}
+
+
+class PipelineBulkUntag(BaseModel):
+    slugs: list[str]
+    tag: str
+
+
+@app.post("/api/pipelines/bulk-untag")
+def bulk_untag_pipelines(payload: PipelineBulkUntag):
+    """Remove one tag from every selected saved pipeline's existing tag set
+    in one action, leaving any other tags alone -- the pipeline counterpart
+    to POST /api/artifacts/bulk-untag. An unknown slug is skipped rather
+    than failing the whole batch; a pipeline that never had this tag is a
+    no-op, not skipped, since it's still a real, existing pipeline."""
+    tag = payload.tag.strip()
+    if not tag:
+        raise HTTPException(status_code=400, detail="A tag is required.")
+
+    existing_tags = store.all_pipeline_tags()
+    untagged = []
+    for slug in payload.slugs:
+        try:
+            pipeline_store.load_pipeline(slug)
+        except FileNotFoundError:
+            continue
+        current = set(existing_tags.get(slug, []))
+        current.discard(tag)
+        store.set_pipeline_tags(slug, sorted(current))
+        untagged.append(slug)
+    store.record_audit_event(
+        "pipeline_bulk_untag", f"Removed tag '{tag}' from {len(untagged)} selected pipeline(s): {untagged}."
+    )
+    return {"tag": tag, "untagged": untagged}
 
 
 @app.get("/api/pipelines/compare")
@@ -1272,6 +1374,28 @@ def branch_pipeline_version(slug: str, version_id: str, payload: PipelineVersion
 @app.get("/api/schedules")
 def list_schedules():
     return store.list_schedules()
+
+
+@app.get("/api/schedules.csv")
+def schedules_csv():
+    """Same schedule list as GET /api/schedules, as a downloadable CSV --
+    mirrors every other CSV export in this app. A literal path, not a
+    suffix on a dynamic segment, so there's no route-ordering conflict
+    with /api/schedules/{schedule_id}."""
+    buffer = io.StringIO()
+    fieldnames = [
+        "id", "kind", "tier", "name", "schedule_type", "interval_seconds",
+        "daily_time", "day_of_week", "enabled", "next_run_at", "last_run_at", "last_status",
+    ]
+    writer = csv.DictWriter(buffer, fieldnames=fieldnames, extrasaction="ignore")
+    writer.writeheader()
+    for schedule in store.list_schedules():
+        writer.writerow(schedule)
+    return StreamingResponse(
+        iter([buffer.getvalue()]),
+        media_type="text/csv",
+        headers={"Content-Disposition": "attachment; filename=schedules.csv"},
+    )
 
 
 @app.post("/api/schedules")

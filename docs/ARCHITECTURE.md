@@ -1985,6 +1985,84 @@ only a JSON parse error or timeout falls back to an empty issue list.
      filter" for a nonsense query, restoring the full list when cleared;
      the same filter/clear round trip confirmed against the Pipeline
      Templates gallery.
+171. **Add exporting the schedule list to CSV**
+     (`GET /api/schedules.csv` -- every schedule's kind/target/cadence/
+     enabled state/next-and-last-run info as a downloadable CSV, mirroring
+     every other CSV export in this app; a literal path, not a suffix on a
+     dynamic segment, so no route-ordering conflict with
+     `/api/schedules/{schedule_id}`). An **Export CSV** link sits next to
+     the existing **⏸ Pause all** / **+ Add Schedule** buttons in the
+     Schedules section heading.
+172. **Add renaming a saved pipeline in place**
+     (`pipeline_store.rename_pipeline(old_slug, new_name)` -- distinct
+     from `duplicate_pipeline()`, which clones under a new slug and
+     leaves the original alone; since a pipeline's slug is just its name
+     slugified, a rename that actually changes the slug means moving the
+     YAML file *and* its archived version-history directory to the new
+     slug rather than just rewriting a field. `POST
+     /api/pipelines/{slug}/rename` also migrates the pipeline's tags
+     (`get_pipeline_tags`/`set_pipeline_tags`/`delete_pipeline_tags`) and
+     repoints any schedule targeting it by slug via a new
+     `StateStore.repoint_pipeline_schedules(old_slug, new_slug)`, since
+     both live in the state store rather than the pipeline's own YAML.
+     A rename that doesn't change the slug (e.g. only case or whitespace)
+     just rewrites the `name` field in place, no file move needed. A
+     **Rename** button sits next to **Edit** on each saved pipeline card.
+173. **Add bulk enable/disable for modules**
+     (`POST /api/modules/bulk-set-enabled` -- accepts a list of
+     `{tier, name}` refs plus a target `enabled` state, calling the same
+     `store.set_module_enabled()` used by the single-module toggle for
+     each one; an unknown tier/name is skipped rather than failing the
+     whole batch, same convention as bulk-tagging). A checkbox on every
+     module card across all three tiers, wired through a shared
+     `selectedModuleRefs` set keyed by `tier::name`, plus a header
+     "Select all modules" checkbox and **Enable selected** / **Disable
+     selected** buttons above the Modules directory -- the same
+     select-all/bulk-action pattern used for schedules, pipelines,
+     artifacts, and notifications, just spanning three separately
+     rendered tier sections instead of one list.
+174. **Add bulk tag removal for saved pipelines**
+     (`POST /api/pipelines/bulk-untag` -- the pipeline counterpart to
+     `POST /api/artifacts/bulk-untag`: removes one tag from every
+     selected pipeline's existing tag set via `store.all_pipeline_tags()`
+     + `set_pipeline_tags()`, leaving any other tags alone; an unknown
+     slug is skipped, a pipeline that never had the tag is a no-op, not
+     skipped). A tag-removal input and **Remove tag from selected**
+     button sit next to the existing bulk-delete button in the Saved
+     Pipelines toolbar.
+175. **Add a "show only disabled/tripped" module filter toggle**
+     (a checkbox above the Modules directory that hides every module
+     card except ones already flagged `.module-disabled` or
+     `.breaker-tripped` -- both classes the card template already
+     applies, so the filter is pure class-membership checking, no new
+     state needed. Pairs with task 173: spot the problem modules, then
+     bulk-select and re-enable them. A discovery made while building this
+     task: the existing global search omnibar already filters module
+     cards by name/description live, which made a plain name-filter box
+     redundant -- this triage-oriented filter is a genuinely distinct
+     feature instead of rebuilding what search already does).
+176. **Add tests for all of Batch 22**: the schedules CSV export has a
+     header row and a matching data row for a created schedule; renaming
+     a pipeline moves its slug and keeps its steps, renaming to the same
+     slug only changes the display name, renaming migrates tags and
+     repoints a schedule pointed at the old slug, and rejects a collision
+     with an existing pipeline name; bulk-enabling/disabling a module
+     selection round-trips through the listing, skips an unknown module,
+     and is a no-op on an empty selection; bulk-untagging pipelines
+     removes the tag but keeps others, is a no-op for a pipeline that
+     never had the tag, skips unknown slugs, and rejects a blank tag.
+     515 tests total, stable across repeated clean full-suite runs.
+     Live-verified end to end with Playwright against a freshly started
+     server: downloading `/api/schedules.csv` and matching a real created
+     schedule's row; clicking **Rename** on a pipeline card (confirming
+     the browser prompt), watching its slug change in `GET /api/pipelines`
+     and its old slug disappear; checkbox-selecting a tagged pipeline and
+     using **Remove tag from selected** to confirm one tag was stripped
+     while another survived; checkbox-selecting a module and clicking
+     **Disable selected**, confirming `runtime_enabled` flips to `false`
+     in the listing; checking the "Show only disabled / tripped" toggle
+     and confirming only the just-disabled module stayed visible while
+     every healthy module in every tier was hidden.
 
 ## 9. Roadmap
 
