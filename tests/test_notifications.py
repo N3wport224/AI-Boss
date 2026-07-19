@@ -405,3 +405,35 @@ def test_schedule_once_fired_is_a_registered_notification_kind():
     from webapp.main import NOTIFICATION_KINDS
 
     assert "schedule_once_fired" in NOTIFICATION_KINDS
+
+
+# ---- Batch 19: search across notifications ----
+
+def test_search_notifications_finds_a_keyword_in_the_message():
+    unique_marker = "batch19searchmarker8081"
+    client.post("/api/notifications", json={"kind": "info", "message": f"CPU spike detected: {unique_marker}"})
+
+    res = client.get("/api/notifications/search", params={"q": unique_marker})
+    assert res.status_code == 200
+    body = res.json()
+    assert body["query"] == unique_marker
+    assert any(unique_marker in r["message"] for r in body["results"])
+
+
+def test_search_notifications_is_case_insensitive():
+    unique_marker = "Batch19CaseMarker8082"
+    client.post("/api/notifications", json={"kind": "info", "message": f"Something about {unique_marker} happened"})
+
+    res = client.get("/api/notifications/search", params={"q": unique_marker.lower()})
+    assert any(unique_marker in r["message"] for r in res.json()["results"])
+
+
+def test_search_notifications_returns_empty_for_a_blank_query():
+    res = client.get("/api/notifications/search", params={"q": ""})
+    assert res.status_code == 200
+    assert res.json()["results"] == []
+
+
+def test_search_notifications_finds_nothing_for_an_unmatched_keyword():
+    res = client.get("/api/notifications/search", params={"q": "zzz_never_used_notification_zzz"})
+    assert res.json()["results"] == []

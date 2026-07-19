@@ -757,6 +757,20 @@ A few things live in the header/subheader on every page load:
   archived versions of a saved pipeline in its History panel to diff
   them against each other, not just against the current definition.
 
+## Schedule select-all, notification search, bulk pipeline import, bulk artifact favoriting, and clearing Recently Viewed
+
+- **Select-all for schedules** — a header checkbox selects (or clears)
+  every schedule row at once before a bulk pause/resume/delete.
+- **Search across notifications** — a search box in the bell icon's
+  Alerts section filters alerts by keyword.
+- **Bulk import pipelines from a zip** — an **Import zip…** picker
+  imports every `.yaml` file inside a bundle at once, the counterpart to
+  the existing **Export all** zip download.
+- **Bulk favorite selected artifacts** — checkbox-select multiple
+  artifacts and add them all to Favorites with one click.
+- **Clear Recently Viewed** — a **Clear** button empties the Recently
+  Viewed strip in one action.
+
 ## Tech stack
 
 - **Language:** Python 3.11+ — first-class async/sync support and native SDKs

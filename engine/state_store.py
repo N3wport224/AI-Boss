@@ -937,6 +937,26 @@ class StateStore:
             for r in rows
         ]
 
+    def search_notifications(self, query: str, limit: int = 20) -> list[dict]:
+        """Case-insensitive keyword search across every notification's own
+        message -- mirrors search_run_notes()'s content-search pattern,
+        applied to the alert feed instead of run annotations. SQL LIKE with
+        escaped wildcards keeps this a literal substring search, not a glob."""
+        query_stripped = query.strip()
+        if not query_stripped:
+            return []
+        like_pattern = "%" + query_stripped.replace("%", r"\%").replace("_", r"\_") + "%"
+        with self._lock:
+            rows = self._conn.execute(
+                "SELECT id, kind, message, created_at, read FROM notifications "
+                "WHERE message LIKE ? ESCAPE '\\' ORDER BY id DESC LIMIT ?",
+                (like_pattern, limit),
+            ).fetchall()
+        return [
+            {"id": r[0], "kind": r[1], "message": r[2], "created_at": r[3], "read": bool(r[4])}
+            for r in rows
+        ]
+
     def unread_notification_count(self) -> int:
         with self._lock:
             row = self._conn.execute("SELECT COUNT(*) FROM notifications WHERE read = 0").fetchone()

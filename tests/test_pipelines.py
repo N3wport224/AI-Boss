@@ -958,6 +958,70 @@ def test_import_rejects_a_non_object_yaml_document():
     assert "single object" in res.json()["detail"]
 
 
+# ---- Batch 19: bulk import pipelines from a zip bundle ----
+
+def _build_pipelines_zip(entries):
+    import io as _io
+    import zipfile as _zipfile
+
+    buffer = _io.BytesIO()
+    with _zipfile.ZipFile(buffer, "w") as zf:
+        for filename, content in entries.items():
+            zf.writestr(filename, content)
+    return buffer.getvalue()
+
+
+def test_import_zip_imports_every_yaml_file_inside():
+    zip_bytes = _build_pipelines_zip({
+        "zip_import_a.yaml": "name: Zip Import A\nsteps:\n  - tier: automation\n    name: fetch_raw_metrics\n",
+        "zip_import_b.yaml": "name: Zip Import B\nsteps:\n  - tier: automation\n    name: fetch_raw_metrics\n",
+    })
+    res = client.post("/api/pipelines/import-zip", files={"file": ("bundle.zip", zip_bytes, "application/zip")})
+    assert res.status_code == 200
+    body = res.json()
+    assert set(body["imported"]) == {"zip_import_a", "zip_import_b"}
+    assert body["failed"] == []
+
+    listed = {p["slug"] for p in client.get("/api/pipelines").json()}
+    assert "zip_import_a" in listed
+    assert "zip_import_b" in listed
+
+
+def test_import_zip_ignores_non_yaml_members():
+    zip_bytes = _build_pipelines_zip({
+        "zip_import_c.yaml": "name: Zip Import C\nsteps:\n  - tier: automation\n    name: fetch_raw_metrics\n",
+        "readme.txt": "not a pipeline",
+    })
+    res = client.post("/api/pipelines/import-zip", files={"file": ("bundle.zip", zip_bytes, "application/zip")})
+    assert res.status_code == 200
+    assert res.json()["imported"] == ["zip_import_c"]
+
+
+def test_import_zip_reports_per_file_failures_without_blocking_the_rest():
+    zip_bytes = _build_pipelines_zip({
+        "zip_import_good.yaml": "name: Zip Import Good\nsteps:\n  - tier: automation\n    name: fetch_raw_metrics\n",
+        "zip_import_bad.yaml": "name: Zip Import Bad\nsteps:\n  - tier: automation\n    name: totally_fake_module\n",
+    })
+    res = client.post("/api/pipelines/import-zip", files={"file": ("bundle.zip", zip_bytes, "application/zip")})
+    assert res.status_code == 200
+    body = res.json()
+    assert body["imported"] == ["zip_import_good"]
+    assert len(body["failed"]) == 1
+    assert body["failed"][0]["name"] == "zip_import_bad.yaml"
+
+
+def test_import_zip_rejects_a_non_zip_file():
+    res = client.post("/api/pipelines/import-zip", files={"file": ("not_a_zip.zip", b"just some bytes", "application/zip")})
+    assert res.status_code == 400
+    assert "zip" in res.json()["detail"].lower()
+
+
+def test_import_zip_400s_when_no_yaml_files_are_present():
+    zip_bytes = _build_pipelines_zip({"readme.txt": "nothing pipeline-shaped here"})
+    res = client.post("/api/pipelines/import-zip", files={"file": ("bundle.zip", zip_bytes, "application/zip")})
+    assert res.status_code == 400
+
+
 def test_import_rejects_a_pipeline_referencing_an_unknown_module():
     yaml_text = "name: Bad Module Ref\nsteps:\n  - tier: automation\n    name: totally_fake_module\n"
     res = client.post(

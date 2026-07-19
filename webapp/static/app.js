@@ -122,6 +122,7 @@ const schedulerPausedBannerEl = document.getElementById("scheduler-paused-banner
 const schedulesBulkPauseBtn = document.getElementById("schedules-bulk-pause-btn");
 const schedulesBulkResumeBtn = document.getElementById("schedules-bulk-resume-btn");
 const schedulesBulkDeleteBtn = document.getElementById("schedules-bulk-delete-btn");
+const schedulesSelectAllEl = document.getElementById("schedules-select-all");
 
 const selectedScheduleIds = new Set();
 
@@ -297,6 +298,28 @@ applyDensity(localStorage.getItem(DENSITY_STORAGE_KEY) || "comfortable");
 let persistentUnreadCount = 0;
 let persistentNotifications = [];
 
+function renderNotificationRows(notifications, emptyMessage) {
+  if (!notifications.length) return `<div class="dropdown-empty">${emptyMessage}</div>`;
+  return notifications
+    .map(
+      (n) => `
+    <div class="notification-row ${n.read ? "" : "notification-unread"}">
+      <i class="dot dot-${
+        n.kind === "breaker_tripped" || n.kind === "schedule_failed"
+          ? "error"
+          : n.kind === "schedule_once_fired"
+          ? "ready"
+          : "running"
+      }"></i>
+      <div>
+        <span class="notification-message">${escapeHtml(n.message)}</span>
+        <span class="notification-time">${new Date(n.created_at).toLocaleString()}</span>
+      </div>
+    </div>`
+    )
+    .join("");
+}
+
 function updateNotifBadge() {
   const total = unreadNotifications + persistentUnreadCount;
   if (total > 0) {
@@ -337,26 +360,7 @@ function renderNotificationsPanel() {
     )
     .join("");
 
-  const alertsHtml = persistentNotifications.length
-    ? persistentNotifications
-        .map(
-          (n) => `
-        <div class="notification-row ${n.read ? "" : "notification-unread"}">
-          <i class="dot dot-${
-            n.kind === "breaker_tripped" || n.kind === "schedule_failed"
-              ? "error"
-              : n.kind === "schedule_once_fired"
-              ? "ready"
-              : "running"
-          }"></i>
-          <div>
-            <span class="notification-message">${escapeHtml(n.message)}</span>
-            <span class="notification-time">${new Date(n.created_at).toLocaleString()}</span>
-          </div>
-        </div>`
-        )
-        .join("")
-    : `<div class="dropdown-empty">No alerts yet.</div>`;
+  const alertsHtml = renderNotificationRows(persistentNotifications, "No alerts yet.");
 
   const activityHtml = toastHistory.length
     ? toastHistory
@@ -383,7 +387,8 @@ function renderNotificationsPanel() {
         ${hasReadAlerts ? `<button class="btn btn-secondary btn-small" id="notifications-clear-read-btn" type="button">Clear read</button>` : ""}
       </div>
     </div>
-    ${alertsHtml}
+    <input type="search" id="notifications-search-input" class="artifact-search-input" placeholder="Search alerts…" />
+    <div id="notifications-alerts-list">${alertsHtml}</div>
     <h4>Recent activity</h4>
     ${activityHtml}
     <div class="notification-section-head">
@@ -402,6 +407,27 @@ function renderNotificationsPanel() {
   notificationsPanel.querySelector("#notifications-unmute-all-btn")?.addEventListener("click", async (e) => {
     e.stopPropagation();
     await setAllNotificationPreferences(false);
+  });
+
+  let notificationSearchDebounce = null;
+  notificationsPanel.querySelector("#notifications-search-input")?.addEventListener("input", (e) => {
+    e.stopPropagation();
+    const query = e.target.value.trim();
+    const listEl = notificationsPanel.querySelector("#notifications-alerts-list");
+    clearTimeout(notificationSearchDebounce);
+    notificationSearchDebounce = setTimeout(async () => {
+      if (!query) {
+        listEl.innerHTML = renderNotificationRows(persistentNotifications, "No alerts yet.");
+        return;
+      }
+      try {
+        const res = await fetch(`/api/notifications/search?q=${encodeURIComponent(query)}`);
+        const body = await res.json();
+        listEl.innerHTML = renderNotificationRows(body.results, "No alerts match that search.");
+      } catch (err) {
+        listEl.innerHTML = `<div class="dropdown-empty">Search failed: ${err}</div>`;
+      }
+    }, 250);
   });
 
   notificationsPanel.querySelector("#notifications-clear-read-btn")?.addEventListener("click", async (e) => {
@@ -1337,6 +1363,15 @@ function renderRecentlyViewedSection() {
     btn.addEventListener("click", () => runFavorite(btn.dataset.favRun));
   });
 }
+
+const recentlyViewedClearBtn = document.getElementById("recently-viewed-clear-btn");
+recentlyViewedClearBtn.addEventListener("click", () => {
+  if (!recentlyViewedKeys.length) return;
+  recentlyViewedKeys = [];
+  saveRecentlyViewedKeys();
+  renderRecentlyViewedSection();
+  showToast("Cleared Recently Viewed.", "success");
+});
 
 // ---- Skeleton loaders ----
 
@@ -2821,6 +2856,31 @@ document.getElementById("pipeline-import-input").addEventListener("change", asyn
   e.target.value = "";
 });
 
+document.getElementById("pipeline-import-zip-input").addEventListener("change", async (e) => {
+  const file = e.target.files[0];
+  if (!file) return;
+
+  const formData = new FormData();
+  formData.append("file", file);
+  try {
+    const res = await fetch("/api/pipelines/import-zip", { method: "POST", body: formData });
+    const body = await res.json();
+    if (!res.ok) {
+      showToast(`Import failed: ${body.detail || "unknown error"}`, "error");
+      return;
+    }
+    const failedNote = body.failed.length ? `, ${body.failed.length} failed` : "";
+    showToast(`Imported ${body.imported.length} pipeline(s) from zip${failedNote}.`, body.failed.length ? "error" : "success");
+    if (body.failed.length) {
+      console.warn("Pipeline zip import failures:", body.failed);
+    }
+    await loadSavedPipelines();
+  } catch (err) {
+    showToast(`Import failed: ${err}`, "error");
+  }
+  e.target.value = "";
+});
+
 const pipelineImportUrlInput = document.getElementById("pipeline-import-url-input");
 const pipelineImportUrlBtn = document.getElementById("pipeline-import-url-btn");
 
@@ -3767,6 +3827,7 @@ const artifactBulkTagBtn = document.getElementById("artifact-bulk-tag-btn");
 const artifactBulkUntagBtn = document.getElementById("artifact-bulk-untag-btn");
 const artifactCompareBtn = document.getElementById("artifact-compare-btn");
 const artifactCompareResultEl = document.getElementById("artifact-compare-result");
+const artifactBulkFavoriteBtn = document.getElementById("artifact-bulk-favorite-btn");
 
 const selectedArtifactNames = new Set();
 
@@ -3795,6 +3856,10 @@ function updateArtifactBulkTagBtn() {
     ? `Remove tag from selected (${selectedArtifactNames.size})`
     : "Remove tag from selected";
   artifactCompareBtn.disabled = selectedArtifactNames.size !== 2;
+  artifactBulkFavoriteBtn.disabled = selectedArtifactNames.size === 0;
+  artifactBulkFavoriteBtn.textContent = selectedArtifactNames.size
+    ? `★ Favorite selected (${selectedArtifactNames.size})`
+    : "★ Favorite selected";
 }
 
 async function loadArtifactTagDirectory() {
@@ -4321,6 +4386,15 @@ artifactCompareBtn.addEventListener("click", async () => {
   }
 });
 
+artifactBulkFavoriteBtn.addEventListener("click", () => {
+  if (!selectedArtifactNames.size) return;
+  selectedArtifactNames.forEach((filename) => favoriteKeys.add(`artifact::${filename}`));
+  saveFavoriteKeys();
+  renderFavoritesSection();
+  showToast(`Favorited ${selectedArtifactNames.size} artifact(s).`, "success");
+  loadArtifacts();
+});
+
 const runsPurgeHoursInput = document.getElementById("runs-purge-hours");
 const runsPurgeBtn = document.getElementById("runs-purge-btn");
 
@@ -4599,8 +4673,11 @@ async function loadSchedules() {
       if (checkbox.checked) selectedScheduleIds.add(id);
       else selectedScheduleIds.delete(id);
       updateSchedulesBulkButtons();
+      schedulesSelectAllEl.checked = schedules.every((s) => selectedScheduleIds.has(s.id));
     });
   });
+
+  schedulesSelectAllEl.checked = schedules.every((s) => selectedScheduleIds.has(s.id));
   updateSchedulesBulkButtons();
 
   schedulesListEl.querySelectorAll("[data-schedule-duplicate]").forEach((btn) => {
@@ -4645,6 +4722,17 @@ async function bulkSetSelectedSchedulesEnabled(enabled) {
 
 schedulesBulkPauseBtn.addEventListener("click", () => bulkSetSelectedSchedulesEnabled(false));
 schedulesBulkResumeBtn.addEventListener("click", () => bulkSetSelectedSchedulesEnabled(true));
+
+schedulesSelectAllEl.addEventListener("change", () => {
+  const checkboxes = schedulesListEl.querySelectorAll(".schedule-select-checkbox");
+  checkboxes.forEach((checkbox) => {
+    checkbox.checked = schedulesSelectAllEl.checked;
+    const id = Number(checkbox.dataset.scheduleId);
+    if (schedulesSelectAllEl.checked) selectedScheduleIds.add(id);
+    else selectedScheduleIds.delete(id);
+  });
+  updateSchedulesBulkButtons();
+});
 
 schedulesBulkDeleteBtn.addEventListener("click", async () => {
   if (!selectedScheduleIds.size) return;

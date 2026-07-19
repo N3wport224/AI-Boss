@@ -996,6 +996,48 @@ async def import_pipeline(file: UploadFile = File(...)):
     return {"pipeline": saved}
 
 
+@app.post("/api/pipelines/import-zip")
+async def import_pipelines_zip(file: UploadFile = File(...)):
+    """Import every pipeline YAML file inside a zip bundle at once -- the
+    counterpart to GET /api/pipelines/export-all, for restoring or sharing
+    a whole pipeline library rather than one file at a time. Each `.yaml`
+    member goes through the exact same save_pipeline() validation as a
+    single import; one bad file doesn't block the rest of the batch --
+    its name and error are reported alongside the ones that succeeded."""
+    try:
+        data = await ingestion.read_upload_with_limit(file)
+    except ingestion.UploadTooLargeError as exc:
+        raise HTTPException(status_code=413, detail=str(exc))
+
+    try:
+        zf = zipfile.ZipFile(io.BytesIO(data))
+    except zipfile.BadZipFile:
+        raise HTTPException(status_code=400, detail="Could not read this file as a zip archive.")
+
+    imported = []
+    failed = []
+    for name in zf.namelist():
+        if not name.endswith(".yaml"):
+            continue
+        try:
+            definition = yaml.safe_load(zf.read(name))
+        except yaml.YAMLError as exc:
+            failed.append({"name": name, "error": f"Could not parse YAML: {exc}"})
+            continue
+        if not isinstance(definition, dict):
+            failed.append({"name": name, "error": "Pipeline YAML must describe a single object."})
+            continue
+        try:
+            saved = pipeline_store.save_pipeline(definition, TIER_DIRS)
+            imported.append(saved["slug"])
+        except pipeline_store.PipelineValidationError as exc:
+            failed.append({"name": name, "error": str(exc)})
+
+    if not imported and not failed:
+        raise HTTPException(status_code=400, detail="No .yaml pipeline files found in this zip.")
+    return {"imported": imported, "failed": failed}
+
+
 class ImportPipelineUrlRequest(BaseModel):
     url: str
 
@@ -1713,6 +1755,11 @@ def list_notifications(unread_only: bool = False, limit: int = 200):
     frontend, when the resource ticker's own thresholds are crossed)
     resource-usage alerts."""
     return store.list_notifications(unread_only=unread_only, limit=limit)
+
+
+@app.get("/api/notifications/search")
+def search_notifications(q: str = ""):
+    return {"query": q, "results": store.search_notifications(q)}
 
 
 @app.get("/api/notifications.csv")

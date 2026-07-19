@@ -2244,6 +2244,14 @@ body.density-compact .tier-section {
   max-width: 280px;
 }
 
+.schedule-select-all-label {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 0.82rem;
+  color: var(--text-dim);
+}
+
 .artifacts-row {
   display: flex;
   align-items: center;

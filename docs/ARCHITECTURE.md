@@ -1806,6 +1806,54 @@ only a JSON parse error or timeout falls back to an empty issue list.
      unmuting every notification kind via the bell icon's Preferences
      section, and checkbox-comparing two archived pipeline versions and
      reading the rendered diff.
+153. **Add a select-all checkbox for schedules** (frontend-only -- a
+     **Select all** checkbox above the bulk-action row mirrors the
+     existing `#artifact-select-all` pattern: checking it checks (and
+     selects) every visible schedule row in one action, unchecking it
+     clears the whole selection, and it self-updates to reflect the
+     current selection whenever an individual row's checkbox changes).
+154. **Add search across notifications**
+     (`StateStore.search_notifications(query, limit=20)` -- the same
+     `LIKE`-with-escaped-wildcards pattern as `search_run_notes()`,
+     applied to the `notifications.message` column instead of run
+     annotations; `GET /api/notifications/search?q=`). A search box in
+     the bell icon's Alerts section filters just that list (via its own
+     `#notifications-alerts-list` container, kept separate from the
+     search input itself so retyping doesn't blow away input focus on
+     every keystroke the way rebuilding the whole panel would).
+155. **Add bulk-importing pipelines from a zip bundle**
+     (`POST /api/pipelines/import-zip` -- the counterpart to the existing
+     `GET /api/pipelines/export-all` zip export: reads every `.yaml`
+     member out of an uploaded zip and imports each through the exact
+     same `save_pipeline()` validation as a single import, skipping
+     non-`.yaml` members and reporting any per-file failure (bad YAML,
+     an unknown module reference) alongside whatever succeeded rather
+     than failing the whole batch). An **Import zip…** file picker sits
+     next to the existing single-file **Import pipeline…** control.
+156. **Add bulk-favoriting selected artifacts** (frontend-only -- a
+     **★ Favorite selected** button reuses the existing artifact
+     bulk-selection checkboxes already wired for bulk-tag/untag/compare,
+     adding an `artifact::filename` key to `favoriteKeys` for every
+     selected file in one action).
+157. **Add clearing the Recently Viewed strip** (frontend-only -- a
+     **Clear** button in the Recently Viewed section heading empties
+     `recentlyViewedKeys` in one action, mirroring the **Clear all**
+     button Batch 17 already added to Favorites).
+158. **Add tests for all of Batch 19**: searching notifications finds a
+     keyword case-insensitively, returns empty for a blank query, and
+     finds nothing for an unmatched keyword; bulk zip import importing
+     every `.yaml` member, ignoring non-YAML members, reporting a
+     per-file failure without blocking the rest of the batch, rejecting
+     a non-zip file, and 400ing when no YAML files are present. 482 tests
+     total, stable across repeated clean full-suite runs. Live-verified
+     end to end with Playwright against a freshly started server:
+     checking/unchecking select-all toggles every schedule row, typing
+     into the notifications search box filters the Alerts list to a
+     planted marker message, uploading a zip via the **Import zip…**
+     picker imports both bundled pipelines, checkbox-selecting two
+     artifacts and clicking **★ Favorite selected** adds both to
+     `localStorage` favorites, and viewing an artifact then clicking
+     **Clear** empties and hides the Recently Viewed section.
 
 ## 9. Roadmap
 
