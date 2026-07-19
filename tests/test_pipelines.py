@@ -69,6 +69,49 @@ def test_save_and_launch_pipeline_persists_to_disk_and_runs():
     assert [p["slug"] for p in listed] == ["custom_chain"]
 
 
+def test_save_without_launch_persists_but_never_runs():
+    payload = {
+        "name": "Draft Only",
+        "steps": [{"tier": "automation", "name": "fetch_raw_metrics", "inputs": {"signups": 1, "churn": 1, "revenue": 1}}],
+        "launch": False,
+    }
+
+    res = client.post("/api/pipelines", json=payload)
+    assert res.status_code == 200
+
+    body = res.json()
+    assert body["pipeline"]["slug"] == "draft_only"
+    assert "stream_id" not in body
+    assert (pipeline_store.PIPELINES_DIR / "draft_only.yaml").exists()
+
+    runs_before = client.get("/api/runs?limit=10000").json()
+    # A second save-without-launch of the same pipeline must still not run it.
+    client.post("/api/pipelines", json=payload)
+    runs_after = client.get("/api/runs?limit=10000").json()
+    assert len(runs_after) == len(runs_before)
+
+
+def test_save_without_launch_still_validates_and_blocks_disabled_modules():
+    bad_payload = {
+        "name": "Draft With Bad Reference",
+        "steps": [{"tier": "automation", "name": "does_not_exist"}],
+        "launch": False,
+    }
+    res = client.post("/api/pipelines", json=bad_payload)
+    assert res.status_code == 400
+    assert not (pipeline_store.PIPELINES_DIR / "draft_with_bad_reference.yaml").exists()
+
+
+def test_save_and_launch_is_still_the_default_when_launch_is_omitted():
+    payload = {
+        "name": "Default Launch",
+        "steps": [{"tier": "automation", "name": "fetch_raw_metrics", "inputs": {"signups": 1, "churn": 1, "revenue": 1}}],
+    }
+    res = client.post("/api/pipelines", json=payload)
+    assert res.status_code == 200
+    assert "stream_id" in res.json()
+
+
 def test_mapping_wires_an_earlier_steps_output_into_a_later_field():
     # Map analyze_metrics' declared "insight" output straight into the agent's
     # "notify_slack" field instead of leaving it at its static default (False) —
@@ -947,3 +990,115 @@ def test_restore_unknown_pipeline_version_404s():
     )
     res = client.post("/api/pipelines/no_versions_to_restore/versions/20200101T000000000000/restore")
     assert res.status_code == 404
+
+
+# ---- Delete a saved pipeline ----
+
+def test_delete_pipeline_removes_it_from_the_saved_list():
+    client.post(
+        "/api/pipelines",
+        json={"name": "Delete Me", "steps": [{"tier": "automation", "name": "fetch_raw_metrics"}]},
+    )
+    assert any(p["slug"] == "delete_me" for p in client.get("/api/pipelines").json())
+
+    res = client.delete("/api/pipelines/delete_me")
+    assert res.status_code == 200
+    assert res.json() == {"deleted": "delete_me"}
+    assert not any(p["slug"] == "delete_me" for p in client.get("/api/pipelines").json())
+
+
+def test_delete_unknown_pipeline_404s():
+    res = client.delete("/api/pipelines/does_not_exist")
+    assert res.status_code == 404
+
+
+def test_deleted_pipelines_version_history_survives_and_can_be_restored():
+    """The archived versions directory is deliberately left in place on
+    delete -- recreating a pipeline under the same name lets its History
+    panel see (and restore) whatever was archived before the delete."""
+    client.post(
+        "/api/pipelines",
+        json={
+            "name": "Recoverable",
+            "steps": [{"tier": "automation", "name": "fetch_raw_metrics", "inputs": {"signups": 1, "churn": 1, "revenue": 1}}],
+        },
+    )
+    client.post(
+        "/api/pipelines",
+        json={
+            "name": "Recoverable",
+            "steps": [{"tier": "automation", "name": "fetch_raw_metrics", "inputs": {"signups": 999, "churn": 1, "revenue": 1}}],
+        },
+    )
+    versions_before_delete = client.get("/api/pipelines/recoverable/versions").json()
+    assert len(versions_before_delete) == 1
+
+    assert client.delete("/api/pipelines/recoverable").status_code == 200
+
+    # Gone from the saved list...
+    assert not any(p["slug"] == "recoverable" for p in client.get("/api/pipelines").json())
+    # ...but its version history is still there.
+    versions_after_delete = client.get("/api/pipelines/recoverable/versions").json()
+    assert versions_after_delete == versions_before_delete
+
+    restored = client.post(
+        f"/api/pipelines/recoverable/versions/{versions_before_delete[0]['version_id']}/restore"
+    )
+    assert restored.status_code == 200
+    assert restored.json()["pipeline"]["steps"][0]["inputs"]["signups"] == 1
+    assert any(p["slug"] == "recoverable" for p in client.get("/api/pipelines").json())
+
+
+# ---- Diff two saved pipelines ----
+
+def test_compare_two_pipelines_reports_differing_keys():
+    client.post(
+        "/api/pipelines",
+        json={
+            "name": "Compare A",
+            "description": "First one",
+            "steps": [{"tier": "automation", "name": "fetch_raw_metrics", "inputs": {"signups": 1, "churn": 1, "revenue": 1}}],
+            "launch": False,
+        },
+    )
+    client.post(
+        "/api/pipelines",
+        json={
+            "name": "Compare B",
+            "description": "Second one",
+            "steps": [{"tier": "automation", "name": "fetch_raw_metrics", "inputs": {"signups": 999, "churn": 1, "revenue": 1}}],
+            "launch": False,
+        },
+    )
+
+    res = client.get("/api/pipelines/compare", params={"a": "compare_a", "b": "compare_b"})
+    assert res.status_code == 200
+    body = res.json()
+    assert body["a"]["name"] == "Compare A"
+    assert body["b"]["name"] == "Compare B"
+    assert "name" in body["diff"]
+    assert "description" in body["diff"]
+    assert "steps" in body["diff"]
+    assert body["diff"]["name"] == {"a": "Compare A", "b": "Compare B"}
+
+
+def test_compare_identical_pipelines_reports_no_differences():
+    payload = {
+        "name": "Identical Twin",
+        "steps": [{"tier": "automation", "name": "fetch_raw_metrics"}],
+        "launch": False,
+    }
+    client.post("/api/pipelines", json=payload)
+    # Save a second pipeline under a different name but identical steps/description.
+    client.post("/api/pipelines", json={**payload, "name": "Identical Twin 2"})
+
+    res = client.get("/api/pipelines/compare", params={"a": "identical_twin", "b": "identical_twin_2"})
+    diff = res.json()["diff"]
+    assert set(diff.keys()) <= {"name", "slug"}  # only the name/slug should ever differ here
+
+
+def test_compare_pipelines_404s_when_either_slug_is_unknown():
+    client.post("/api/pipelines", json={"name": "Solo", "steps": [{"tier": "automation", "name": "fetch_raw_metrics"}], "launch": False})
+
+    assert client.get("/api/pipelines/compare", params={"a": "solo", "b": "does_not_exist"}).status_code == 404
+    assert client.get("/api/pipelines/compare", params={"a": "does_not_exist", "b": "solo"}).status_code == 404

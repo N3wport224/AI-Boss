@@ -40,7 +40,7 @@ from engine import (
 )
 from engine.registry import instantiate, load_manifests
 
-from . import cache, graph, health, ingestion, linting, perf, pipelines as pipeline_store
+from . import cache, graph, health, ingestion, linting, perf, pipelines as pipeline_store, scaffold
 from .templates import PIPELINE_TEMPLATES
 from .events import RunEventBus
 from .ratelimit import RateLimiter
@@ -187,6 +187,7 @@ class PipelineDefinition(BaseModel):
     name: str
     description: str = ""
     steps: list[PipelineStepSpec]
+    launch: bool = True  # False saves a draft without immediately running it
 
 
 MIN_SCHEDULE_INTERVAL_SECONDS = 10.0
@@ -269,6 +270,13 @@ DEFAULT_BREAKER_THRESHOLD = 3
 
 
 def _breaker_threshold(tier: str, name: str) -> int:
+    """A runtime override (set from the dashboard, persisted in
+    `breaker_overrides`) wins if one's ever been set; otherwise falls back
+    to the module's own manifest `circuit_breaker_threshold`, or the
+    engine-wide default."""
+    override = store.get_breaker_threshold_override(tier, name)
+    if override is not None:
+        return override
     try:
         manifest = _manifest_by_name(tier, name)
     except HTTPException:
@@ -545,7 +553,8 @@ def list_modules():
                     "breaker": {
                         "tripped": health["tripped"],
                         "consecutive_failures": health["consecutive_failures"],
-                        "threshold": int(manifest.get("circuit_breaker_threshold", DEFAULT_BREAKER_THRESHOLD)),
+                        "threshold": _breaker_threshold(tier, manifest["name"]),
+                        "threshold_overridden": store.get_breaker_threshold_override(tier, manifest["name"]) is not None,
                     },
                     "stats": {
                         "total_runs": stats["total_runs"] if stats else 0,
@@ -555,6 +564,26 @@ def list_modules():
                 }
             )
         result[tier] = modules
+    return result
+
+
+class ModuleScaffoldRequest(BaseModel):
+    tier: str
+    name: str
+    description: str = ""
+
+
+@app.post("/api/modules/scaffold")
+def scaffold_module_route(payload: ModuleScaffoldRequest):
+    """Generate a starter <name>.py + <name>.yaml pair for a brand-new
+    automation/workflow/agent -- the boilerplate the README's "Adding a new
+    module" section otherwise asks a user to hand-write. Immediately
+    discoverable: the registry re-scans each tier directory on every
+    request, no server restart needed."""
+    try:
+        result = scaffold.scaffold_module(payload.tier, payload.name, payload.description, TIER_DIRS)
+    except scaffold.ScaffoldError as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
     return result
 
 
@@ -675,6 +704,33 @@ def reset_module_breaker(tier: str, name: str):
     return result
 
 
+class BreakerThresholdUpdate(BaseModel):
+    threshold: int
+
+
+@app.patch("/api/breakers/{tier}/{name}/threshold")
+def set_breaker_threshold(tier: str, name: str, payload: BreakerThresholdUpdate):
+    """Override how many consecutive failures trip this module's breaker,
+    independent of its manifest's own `circuit_breaker_threshold` — no YAML
+    edit needed, and it persists across a restart. Doesn't touch the
+    breaker's current failure count or tripped state, only the threshold
+    the *next* failure is measured against."""
+    _manifest_by_name(tier, name)  # 404 for a module that doesn't exist
+    if payload.threshold < 1:
+        raise HTTPException(status_code=400, detail="threshold must be at least 1.")
+    store.set_breaker_threshold(tier, name, payload.threshold)
+    return {"tier": tier, "name": name, "threshold": payload.threshold}
+
+
+@app.delete("/api/breakers/{tier}/{name}/threshold")
+def clear_breaker_threshold(tier: str, name: str):
+    """Revert to the module's manifest-declared threshold (or the
+    engine-wide default) instead of a specific overridden number."""
+    _manifest_by_name(tier, name)  # 404 for a module that doesn't exist
+    store.clear_breaker_threshold_override(tier, name)
+    return {"tier": tier, "name": name, "threshold": _breaker_threshold(tier, name)}
+
+
 class ModuleEnabledUpdate(BaseModel):
     enabled: bool
 
@@ -696,17 +752,27 @@ def list_saved_pipelines():
 
 
 @app.post("/api/pipelines")
-def save_and_launch_pipeline(definition: PipelineDefinition, http_request: Request):
-    """One-click save-and-launch for a pipeline built in the visual sequencer:
-    persists it to pipelines/<slug>.yaml (the same convention as every other
-    module folder) and immediately runs it through the same background-thread
-    + SSE mechanism as any other run."""
-    _enforce_run_rate_limit(http_request)
-    _ensure_modules_runnable(_module_refs_from_steps(definition.model_dump()["steps"]))
+def save_pipeline_route(definition: PipelineDefinition, http_request: Request):
+    """Save a pipeline built in the visual sequencer to pipelines/<slug>.yaml
+    (the same convention as every other module folder). By default (`launch`
+    omitted or true) it also immediately runs it through the same
+    background-thread + SSE mechanism as any other run — the original
+    one-click "Save & Launch" behavior. Passing `launch: false` saves a draft
+    without running it, for a pipeline that isn't ready to fire yet (missing
+    real input values, still being sketched out) or one that's only ever
+    meant to be triggered later by a schedule or webhook."""
+    payload = definition.model_dump()
+    launch = payload.pop("launch")
+    if launch:
+        _enforce_run_rate_limit(http_request)
+        _ensure_modules_runnable(_module_refs_from_steps(payload["steps"]))
     try:
-        saved = pipeline_store.save_pipeline(definition.model_dump(), TIER_DIRS)
+        saved = pipeline_store.save_pipeline(payload, TIER_DIRS)
     except pipeline_store.PipelineValidationError as exc:
         raise HTTPException(status_code=400, detail=str(exc))
+
+    if not launch:
+        return {"pipeline": saved}
 
     steps = _build_steps_from_definition(saved)
     stream_id = _launch_steps(steps)
@@ -804,6 +870,32 @@ def duplicate_pipeline(slug: str):
     return {"pipeline": duplicated}
 
 
+@app.delete("/api/pipelines/{slug}")
+def delete_saved_pipeline(slug: str):
+    try:
+        pipeline_store.delete_pipeline(slug)
+    except FileNotFoundError:
+        raise HTTPException(status_code=404, detail=f"No saved pipeline named '{slug}'.")
+    return {"deleted": slug}
+
+
+@app.get("/api/pipelines/compare")
+def compare_pipelines(a: str, b: str):
+    """Side-by-side key-level diff between two saved pipelines' current
+    definitions -- the same _diff_dicts() shallow diff already used for
+    /api/runs/compare and a pipeline's own version history, applied to two
+    different pipelines instead of two runs or two versions of one."""
+    try:
+        definition_a = pipeline_store.load_pipeline(a)
+    except FileNotFoundError:
+        raise HTTPException(status_code=404, detail=f"No saved pipeline named '{a}'.")
+    try:
+        definition_b = pipeline_store.load_pipeline(b)
+    except FileNotFoundError:
+        raise HTTPException(status_code=404, detail=f"No saved pipeline named '{b}'.")
+    return {"a": definition_a, "b": definition_b, "diff": _diff_dicts(definition_a, definition_b)}
+
+
 @app.get("/api/pipelines/{slug}/graph")
 def pipeline_graph(slug: str):
     try:
@@ -830,11 +922,19 @@ def clone_pipeline_template(template_id: str):
 
 @app.get("/api/pipelines/{slug}/versions")
 def list_pipeline_versions(slug: str):
-    try:
-        pipeline_store.load_pipeline(slug)  # 404s if the pipeline itself doesn't exist
-    except FileNotFoundError:
-        raise HTTPException(status_code=404, detail=f"No saved pipeline named '{slug}'.")
-    return pipeline_store.list_pipeline_versions(slug)
+    """404s only when there's truly nothing under this slug — neither a
+    current pipeline nor any archived version. `DELETE /api/pipelines/{slug}`
+    only removes the current definition, not its version history, so a
+    deleted pipeline's versions stay listable (and restorable via
+    `POST .../restore`, which never required the current file to exist
+    either) without needing to recreate it under the same name first."""
+    versions = pipeline_store.list_pipeline_versions(slug)
+    if not versions:
+        try:
+            pipeline_store.load_pipeline(slug)
+        except FileNotFoundError:
+            raise HTTPException(status_code=404, detail=f"No saved pipeline named '{slug}'.")
+    return versions
 
 
 @app.get("/api/pipelines/{slug}/versions/{version_id}")
@@ -1256,6 +1356,23 @@ def list_audit_log(limit: int = 50):
     this dashboard — what happened and when, without guessing. Populated only
     by the actions above; read-only, nothing here is user-editable."""
     return store.list_audit_events(limit)
+
+
+@app.get("/api/audit-log.csv")
+def audit_log_csv(limit: int = 1000):
+    """Same audit trail as the dashboard panel, as a downloadable CSV --
+    mirrors the run-history CSV export pattern (GET /api/runs.csv)."""
+    buffer = io.StringIO()
+    writer = csv.DictWriter(buffer, fieldnames=["id", "action", "detail", "created_at"])
+    writer.writeheader()
+    for event in store.list_audit_events(limit):
+        writer.writerow(event)
+
+    return StreamingResponse(
+        iter([buffer.getvalue()]),
+        media_type="text/csv",
+        headers={"Content-Disposition": "attachment; filename=audit_log.csv"},
+    )
 
 
 @app.get("/api/memory")

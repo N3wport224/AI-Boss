@@ -152,3 +152,28 @@ def test_audit_log_endpoint_orders_newest_first_and_respects_limit():
     assert len(events) == 2
     assert events[0]["action"] == "run_purge"
     assert events[1]["action"] == "artifact_purge"
+
+
+# ---- Batch 11: CSV export ----
+
+def test_audit_log_csv_export_has_a_header_and_rows():
+    client.post("/api/artifacts/purge", params={"older_than_hours": 999999})
+
+    res = client.get("/api/audit-log.csv")
+    assert res.status_code == 200
+    assert res.headers["content-type"].startswith("text/csv")
+
+    lines = res.text.strip().splitlines()
+    assert lines[0] == "id,action,detail,created_at"
+    assert len(lines) >= 2
+    assert "artifact_purge" in res.text
+
+
+def test_audit_log_csv_export_respects_limit():
+    client.post("/api/artifacts/purge", params={"older_than_hours": 999999})
+    client.post("/api/runs/purge", params={"older_than_hours": 999999})
+
+    res = client.get("/api/audit-log.csv", params={"limit": 1})
+    lines = res.text.strip().splitlines()
+    assert len(lines) == 2  # header + exactly one row
+    assert "run_purge" in lines[1]

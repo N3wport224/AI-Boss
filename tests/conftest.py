@@ -13,3 +13,24 @@ def _reset_run_rate_limiter():
 
     _run_rate_limiter._hits.clear()
     yield
+
+
+@pytest.fixture(autouse=True)
+def _reset_all_circuit_breakers():
+    """Circuit breaker state lives in the shared, process-wide StateStore
+    every test file's TestClient(app) points at. A module's breaker is
+    recorded from the same background worker thread that publishes its SSE
+    events, one statement after `bus.publish()` -- so a test that awaits
+    "run_failed"/"step_failed" over the stream and then immediately resets
+    or asserts on breaker state has no guarantee that recording has actually
+    happened yet (no happens-before relationship is enforced between that
+    worker thread and whichever thread the client's stream-read resumes on).
+    A test that intentionally trips a breaker can still race its own
+    best-effort reset and leave it tripped for whatever runs next. Resetting
+    before every test in the whole suite closes that window globally,
+    rather than chasing it file by file."""
+    from webapp.main import store
+
+    for entry in store.all_module_health():
+        store.reset_breaker(entry["tier"], entry["name"])
+    yield

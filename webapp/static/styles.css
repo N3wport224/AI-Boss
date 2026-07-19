@@ -1494,6 +1494,17 @@ body.density-compact .tier-section {
   border-color: var(--accent-pipeline);
 }
 
+.btn-danger {
+  background: var(--bg-elevated);
+  border: 1px solid var(--error);
+  color: var(--error);
+}
+
+.btn-danger:hover {
+  background: var(--error);
+  color: #1a0505;
+}
+
 /* Run history trend sparkline */
 
 .runs-trend {
@@ -1871,6 +1882,26 @@ body.density-compact .tier-section {
   gap: 8px;
   margin-bottom: 10px;
   min-width: 0;
+}
+
+.breaker-threshold-row {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  margin-bottom: 10px;
+  flex-wrap: wrap;
+  font-size: 0.8rem;
+  color: var(--text-dim);
+}
+
+.breaker-threshold-row .breaker-threshold-input {
+  width: 52px;
+  background: var(--bg-elevated);
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  color: var(--text);
+  padding: 4px 6px;
+  font-size: 0.8rem;
 }
 
 .webhook-url {

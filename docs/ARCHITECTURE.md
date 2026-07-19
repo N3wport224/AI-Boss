@@ -1137,6 +1137,119 @@ only a JSON parse error or timeout falls back to an empty issue list.
     and confirming a self-test run never grows run history, never mutates
     persistent agent memory, and never appears in the audit log. 279 tests
     total.
+100. **Add deleting a saved pipeline** (`delete_pipeline()` in
+     `webapp/pipelines.py`; `DELETE /api/pipelines/{slug}`): removes only the
+     current `<slug>.yaml` — its archived `_versions/<slug>/` history is
+     deliberately left in place, since neither `list_pipeline_versions()`
+     nor `restore_pipeline_version()` ever required the current file to
+     exist. `GET /api/pipelines/{slug}/versions` was relaxed to 404 only
+     when there's truly nothing under a slug (no current file *and* no
+     archived versions), so a deleted pipeline's history stays listable and
+     restorable via the API without recreating it under the same name
+     first. A **Delete** button (with a browser `confirm()`) on each saved-
+     pipeline card; a lingering frontend bug was caught here too —
+     `renderSavedPipelines()` hid the whole section when the list went to
+     zero but never cleared `savedPipelinesGrid.innerHTML`, leaving a stale
+     (deleted) card sitting hidden in the DOM — fixed alongside this feature.
+101. **Add saving a pipeline without launching it** (`PipelineDefinition.launch:
+     bool = True` on `POST /api/pipelines`; `false` skips
+     `_ensure_modules_runnable` and the launch step, returning just
+     `{"pipeline": saved}` with no `stream_id`): the original "Save & Launch"
+     button stays the default (omitting `launch` behaves exactly as before),
+     and a new **Save** button posts with `launch: false` for a draft that
+     isn't ready to fire yet, or one only ever meant to be triggered by a
+     schedule or webhook. The builder's validation + payload-building logic
+     was extracted into a shared `collectBuilderPipelinePayload()` so both
+     buttons validate identically without duplicating the step-serialization
+     code.
+102. **Add a runtime-configurable circuit breaker threshold** (new
+     `breaker_overrides` table — `(tier, name)` primary key, `threshold`,
+     `updated_at`, kept separate from `module_overrides` since the two
+     toggles are independent; `set_breaker_threshold()` /
+     `get_breaker_threshold_override()` / `clear_breaker_threshold_override()`
+     on `StateStore`; `PATCH` / `DELETE /api/breakers/{tier}/{name}/threshold`):
+     `_breaker_threshold()` checks the override first, falling back to the
+     module's manifest `circuit_breaker_threshold` (or the engine-wide
+     default of 3) exactly like `_is_module_effectively_enabled()` already
+     does for the enable/disable toggle. Lowering the threshold trips the
+     breaker sooner on the very next failure; raising it never silently
+     un-trips an already-open breaker, consistent with the existing
+     "only an explicit reset closes it" rule. Each module card gets a
+     compact **Breaker trips after N failure(s)** control with a **Set**
+     button and a **Use default** button that appears only when overridden.
+103. **Add diffing two saved pipelines** (`GET /api/pipelines/compare?a=&b=`):
+     reuses `_diff_dicts()` — the same shallow key-level diff already
+     powering `/api/runs/compare` and a pipeline's own version history —
+     applied to two different pipelines' current definitions instead of two
+     runs or two versions of one. A **Compare** row appears under Saved
+     Pipelines once there are at least two to compare, with two `<select>`s
+     and a result panel styled like the existing run-comparison bar.
+104. **Add a CSV export for the Recent Actions audit trail**
+     (`GET /api/audit-log.csv`): mirrors `GET /api/runs.csv`'s exact
+     `csv.DictWriter` + `StreamingResponse` pattern. An **Export CSV** link
+     next to the panel's **Refresh** button.
+105. **Add a new-module scaffolding wizard** (`webapp/scaffold.py`'s
+     `scaffold_module()`; `POST /api/modules/scaffold`): generates a starter
+     `<name>.py` + `<name>.yaml` pair in the right tier directory — the
+     exact boilerplate the README's "Adding a new module" section otherwise
+     asks a user to hand-write. The description is embedded via Python's
+     `!r` format conversion (never string-formatted directly into source),
+     so any quotes/backslashes/newlines a user types still produce valid,
+     compilable Python; the YAML manifest is built as a dict and written
+     with `yaml.safe_dump()` rather than hand-templated, for the same
+     reason. The derived module name follows the same lowercase/underscore
+     convention as a pipeline slug, with the extra constraint that it must
+     start with a letter (Python can't `import 123_thing`). Collides loudly
+     (400) rather than overwriting if a module of that name already exists
+     in the target tier. Immediately discoverable with no server restart,
+     since the registry re-scans each tier directory on every request. A
+     small form under **Tools** (tier, name, description) with a
+     **Scaffold module** button.
+106. **Add tests for all of Batch 11**: pipeline deletion (removed from the
+     saved list, 404 for an unknown slug, and — the actual point of leaving
+     version history intact — a deleted pipeline's versions still listable
+     and restorable back to a real saved pipeline); save-without-launch
+     persisting but never creating a run row, still validating and blocking
+     a bad module reference, and launch remaining the default when omitted;
+     breaker-threshold override precedence, the modules listing reflecting
+     both the effective threshold and whether it's overridden, rejecting a
+     threshold under 1, 404s for an unknown module, and the two behavioral
+     proofs that matter most — lowering the threshold trips the breaker on
+     the very first failure, and raising it afterward doesn't silently
+     un-trip an already-open one; pipeline comparison reporting the right
+     differing keys, no differences for two pipelines with identical steps,
+     and 404s when either slug is unknown; the audit CSV export's header,
+     row content, and `limit` handling; module scaffolding's generated
+     `.py` actually parsing as valid Python and its class actually
+     instantiating and running (not just "looks like a stub"), a
+     tricky description (quotes, a backslash, a newline) surviving into
+     valid Python *and* a correct YAML value, rejections for an unknown
+     tier / a letters-and-numbers-free name / a name that would start with
+     a digit / a same-tier collision, and the same set of checks again
+     through the real HTTP endpoint end-to-end (with an autouse fixture
+     cleaning up every file it creates, since — unlike pipelines/artifacts —
+     scaffolding writes into the real, git-tracked `automations/`/
+     `workflows/`/`agents/` source directories). Also root-caused a
+     pre-existing flaky test discovered while stabilizing this batch's
+     full-suite run: `handle_event()` in `_run_in_background()` (Batch 3)
+     calls `bus.publish(event)` and then `_record_breaker_event(event)` for
+     the same event, in that order, in the background worker thread — but
+     there's no happens-before relationship enforced between that thread
+     and whichever thread a test's stream-read resumes on after observing
+     "run_failed"/"step_failed" over SSE, so a test that awaits that event
+     and then immediately asserts or resets breaker state can race the
+     recording itself, sometimes running before it, sometimes after. This
+     let `test_pipeline_step_fails_for_real_once_retries_are_exhausted`
+     (Batch 7) leave `fetch_raw_metrics`'s breaker tripped roughly one run
+     in five, even with a `finally: store.reset_breaker(...)` at the end of
+     that test — the reset itself could race the delayed recording and
+     lose. Fixed generally rather than per-test: a new autouse
+     `_reset_all_circuit_breakers` fixture in `tests/conftest.py` resets
+     every module's breaker before each test in the whole suite, closing
+     the window regardless of which test or file caused the pollution.
+     Confirmed stable across 6 consecutive full clean-state runs after the
+     fix (2 of the preceding ~10 runs had failed on this same test before
+     it). 311 tests total.
 
 ## 9. Roadmap
 

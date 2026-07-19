@@ -69,6 +69,7 @@ const builderDescriptionEl = document.getElementById("builder-description");
 const builderStepsEl = document.getElementById("builder-steps");
 const builderAddStepBtn = document.getElementById("builder-add-step");
 const builderLaunchBtn = document.getElementById("builder-launch");
+const builderSaveOnlyBtn = document.getElementById("builder-save-only");
 const builderErrorEl = document.getElementById("builder-error");
 const builderTrackerEl = document.getElementById("builder-tracker");
 const builderResultEl = document.getElementById("builder-result");
@@ -1360,6 +1361,17 @@ function renderCard(module) {
           ? `${module.stats.total_runs} run${module.stats.total_runs === 1 ? "" : "s"} · ${Math.round(module.stats.success_rate * 100)}% success · avg ${formatDurationSeconds(module.stats.avg_duration_seconds)}`
           : "No runs recorded yet."
       }</p>
+      <div class="breaker-threshold-row" title="Consecutive failures before this module's circuit breaker trips">
+        <label>Breaker trips after</label>
+        <input type="number" class="breaker-threshold-input" min="1" value="${module.breaker.threshold}" data-tier="${module.tier}" data-name="${module.name}" />
+        <span>failure(s)</span>
+        <button class="btn btn-secondary btn-small breaker-threshold-save-btn" data-tier="${module.tier}" data-name="${module.name}" type="button">Set</button>
+        ${
+          module.breaker.threshold_overridden
+            ? `<button class="btn btn-secondary btn-small breaker-threshold-clear-btn" data-tier="${module.tier}" data-name="${module.name}" type="button">Use default</button>`
+            : ""
+        }
+      </div>
       ${breakerHtml}
       ${disabledHtml}
       <div class="code-panel hidden"></div>
@@ -1487,6 +1499,41 @@ function renderSections(modulesByTier) {
   });
   sectionsEl.querySelectorAll(".module-enable-btn").forEach((btn) => {
     btn.addEventListener("click", () => setModuleEnabled(btn.dataset.tier, btn.dataset.name, true));
+  });
+  sectionsEl.querySelectorAll(".breaker-threshold-save-btn").forEach((btn) => {
+    btn.addEventListener("click", async () => {
+      const card = btn.closest(".card");
+      const input = card.querySelector(".breaker-threshold-input");
+      const threshold = Number(input.value);
+      if (!Number.isInteger(threshold) || threshold < 1) {
+        showToast("Breaker threshold must be a whole number of at least 1.", "error");
+        return;
+      }
+      try {
+        const res = await fetch(`/api/breakers/${btn.dataset.tier}/${btn.dataset.name}/threshold`, {
+          method: "PATCH",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ threshold }),
+        });
+        if (!res.ok) throw new Error((await res.json()).detail || `HTTP ${res.status}`);
+        showToast(`${btn.dataset.name}'s breaker now trips after ${threshold} failure(s).`, "success");
+        await loadModules();
+      } catch (err) {
+        showToast(`Could not set breaker threshold: ${err.message}`, "error");
+      }
+    });
+  });
+  sectionsEl.querySelectorAll(".breaker-threshold-clear-btn").forEach((btn) => {
+    btn.addEventListener("click", async () => {
+      try {
+        const res = await fetch(`/api/breakers/${btn.dataset.tier}/${btn.dataset.name}/threshold`, { method: "DELETE" });
+        if (!res.ok) throw new Error((await res.json()).detail || `HTTP ${res.status}`);
+        showToast(`${btn.dataset.name}'s breaker threshold reset to its default.`, "success");
+        await loadModules();
+      } catch (err) {
+        showToast(`Could not reset breaker threshold: ${err.message}`, "error");
+      }
+    });
   });
   wireFavoriteToggles(sectionsEl);
   wireVariableChips(sectionsEl);
@@ -2281,21 +2328,35 @@ function showBuilderError(message) {
   builderErrorEl.classList.remove("hidden");
 }
 
-builderLaunchBtn.addEventListener("click", async () => {
+// Validates the builder's current state and returns {name, description, steps}
+// ready to POST, or null (after showing the specific validation error) if
+// it isn't launchable/saveable yet. Shared by both "Save" and "Save & Launch".
+function collectBuilderPipelinePayload() {
   builderErrorEl.classList.add("hidden");
 
   const name = builderNameEl.value.trim();
-  if (!name) return showBuilderError("Pipeline name is required.");
-  if (builderSteps.length === 0) return showBuilderError("Every step needs a module selected.");
+  if (!name) {
+    showBuilderError("Pipeline name is required.");
+    return null;
+  }
+  if (builderSteps.length === 0) {
+    showBuilderError("Every step needs a module selected.");
+    return null;
+  }
   for (const s of builderSteps) {
     if (s.parallel) {
-      if (s.branches.some((b) => !b.module)) return showBuilderError("Every parallel branch needs a module selected.");
+      if (s.branches.some((b) => !b.module)) {
+        showBuilderError("Every parallel branch needs a module selected.");
+        return null;
+      }
     } else if (!s.module) {
-      return showBuilderError("Every step needs a module selected.");
+      showBuilderError("Every step needs a module selected.");
+      return null;
     }
   }
   if (builderSteps.some((s) => !s.parallel && s.condition && !s.condition.source.trim())) {
-    return showBuilderError("A 'Run only if' condition needs a context key to check (or untick it).");
+    showBuilderError("A 'Run only if' condition needs a context key to check (or untick it).");
+    return null;
   }
 
   const moduleStepPayload = (step) => {
@@ -2321,6 +2382,41 @@ builderLaunchBtn.addEventListener("click", async () => {
       : moduleStepPayload(step)
   );
 
+  return { name, description: builderDescriptionEl.value.trim(), steps };
+}
+
+builderSaveOnlyBtn.addEventListener("click", async () => {
+  const payload = collectBuilderPipelinePayload();
+  if (!payload) return;
+
+  builderSaveOnlyBtn.disabled = true;
+  builderSaveOnlyBtn.textContent = "Saving...";
+  try {
+    const res = await fetch("/api/pipelines", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ ...payload, launch: false }),
+    });
+    const body = await res.json();
+    if (!res.ok) {
+      showBuilderError(body.detail || "Failed to save this pipeline.");
+      return;
+    }
+    showToast(`Saved "${body.pipeline.name}" as a draft — not run yet.`, "success");
+    await loadSavedPipelines();
+  } catch (err) {
+    showBuilderError(`Request failed: ${err}`);
+  } finally {
+    builderSaveOnlyBtn.disabled = false;
+    builderSaveOnlyBtn.textContent = "Save";
+  }
+});
+
+builderLaunchBtn.addEventListener("click", async () => {
+  const payload = collectBuilderPipelinePayload();
+  if (!payload) return;
+  const { name, description, steps } = payload;
+
   builderLaunchBtn.disabled = true;
   builderLaunchBtn.textContent = "Launching...";
 
@@ -2328,7 +2424,7 @@ builderLaunchBtn.addEventListener("click", async () => {
     const res = await fetch("/api/pipelines", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ name, description: builderDescriptionEl.value.trim(), steps }),
+      body: JSON.stringify({ name, description, steps }),
     });
 
     if (!res.ok) {
@@ -2387,6 +2483,7 @@ function renderSavedPipelines(pipelinesList) {
 
   if (!pipelinesList.length) {
     savedPipelinesSection.classList.add("hidden");
+    savedPipelinesGrid.innerHTML = "";
   } else {
     savedPipelinesSection.classList.remove("hidden");
 
@@ -2414,6 +2511,7 @@ function renderSavedPipelines(pipelinesList) {
               <button class="btn btn-secondary btn-small" data-graph-slug="${p.slug}" type="button">Graph</button>
               <button class="btn btn-secondary btn-small" data-history-slug="${p.slug}" type="button">History</button>
               <a class="btn btn-secondary btn-small" href="/api/pipelines/${p.slug}/export" download="${p.slug}.yaml">Export</a>
+              <button class="btn btn-danger btn-small" data-delete-slug="${p.slug}" data-delete-name="${p.name}" type="button">Delete</button>
             </div>
             <div class="tracker hidden"></div>
             <div class="log-tabs-wrap hidden"></div>
@@ -2438,6 +2536,9 @@ function renderSavedPipelines(pipelinesList) {
     savedPipelinesGrid.querySelectorAll("[data-history-slug]").forEach((btn) => {
       btn.addEventListener("click", () => togglePipelineHistory(btn.dataset.historySlug));
     });
+    savedPipelinesGrid.querySelectorAll("[data-delete-slug]").forEach((btn) => {
+      btn.addEventListener("click", () => deleteSavedPipeline(btn.dataset.deleteSlug, btn.dataset.deleteName));
+    });
     savedPipelinesGrid.querySelectorAll(".webhook-copy-btn").forEach((btn) => {
       btn.addEventListener("click", async () => {
         const url = `${window.location.origin}/api/pipelines/${btn.dataset.slug}/webhook`;
@@ -2452,9 +2553,75 @@ function renderSavedPipelines(pipelinesList) {
     wireFavoriteToggles(savedPipelinesGrid);
   }
 
+  populatePipelineCompareSelects(pipelinesList);
   applySearchFilter();
   renderFavoritesSection();
 }
+
+// ---- Pipeline comparison ----
+
+const pipelineCompareBarEl = document.getElementById("pipeline-compare-bar");
+const comparePipelineAEl = document.getElementById("compare-pipeline-a");
+const comparePipelineBEl = document.getElementById("compare-pipeline-b");
+const comparePipelinesBtn = document.getElementById("compare-pipelines-btn");
+const pipelineCompareResultEl = document.getElementById("pipeline-compare-result");
+
+function populatePipelineCompareSelects(pipelinesList) {
+  if (pipelinesList.length < 2) {
+    pipelineCompareBarEl.classList.add("hidden");
+    pipelineCompareResultEl.classList.add("hidden");
+    return;
+  }
+  pipelineCompareBarEl.classList.remove("hidden");
+
+  const options = pipelinesList.map((p) => `<option value="${p.slug}">${escapeHtml(p.name)}</option>`).join("");
+  const previousA = comparePipelineAEl.value;
+  const previousB = comparePipelineBEl.value;
+  comparePipelineAEl.innerHTML = options;
+  comparePipelineBEl.innerHTML = options;
+  if (pipelinesList.some((p) => p.slug === previousA)) comparePipelineAEl.value = previousA;
+  if (pipelinesList.some((p) => p.slug === previousB)) comparePipelineBEl.value = previousB;
+  else if (pipelinesList.length > 1) comparePipelineBEl.value = pipelinesList[1].slug;
+}
+
+comparePipelinesBtn.addEventListener("click", async () => {
+  const a = comparePipelineAEl.value;
+  const b = comparePipelineBEl.value;
+  if (!a || !b) return;
+
+  pipelineCompareResultEl.classList.remove("hidden");
+  if (a === b) {
+    pipelineCompareResultEl.innerHTML = `<div class="runs-empty">Pick two different pipelines to compare.</div>`;
+    return;
+  }
+
+  try {
+    const res = await fetch(`/api/pipelines/compare?a=${a}&b=${b}`);
+    const body = await res.json();
+    if (!res.ok) {
+      pipelineCompareResultEl.innerHTML = `<div class="runs-empty">${escapeHtml(body.detail || "Could not compare these pipelines.")}</div>`;
+      return;
+    }
+
+    const diffKeys = Object.keys(body.diff);
+    pipelineCompareResultEl.innerHTML = diffKeys.length
+      ? diffKeys
+          .map(
+            (key) => `
+            <div class="schedule-row">
+              <div class="schedule-row-main">
+                <strong>${escapeHtml(key)}</strong>
+                <span class="schedule-row-meta">${escapeHtml(body.a.name)}: ${escapeHtml(JSON.stringify(body.diff[key].a))}</span>
+                <span class="schedule-row-meta">${escapeHtml(body.b.name)}: ${escapeHtml(JSON.stringify(body.diff[key].b))}</span>
+              </div>
+            </div>`
+          )
+          .join("")
+      : `<div class="runs-empty">These pipelines are identical.</div>`;
+  } catch (err) {
+    pipelineCompareResultEl.innerHTML = `<div class="runs-empty">Compare failed: ${err}</div>`;
+  }
+});
 
 const TIER_NODE_COLOR = { automation: "#38bdf8", workflow: "#a78bfa", agent: "#34d399" };
 
@@ -2710,6 +2877,24 @@ async function cloneTemplate(templateId, btn) {
     showToast(`Clone failed: ${err}`, "error");
   } finally {
     btn.disabled = false;
+  }
+}
+
+async function deleteSavedPipeline(slug, name) {
+  if (!confirm(`Delete "${name}"? This can't be undone from here.`)) {
+    return;
+  }
+  try {
+    const res = await fetch(`/api/pipelines/${slug}`, { method: "DELETE" });
+    if (!res.ok) {
+      const err = await res.json();
+      showToast(err.detail || "Failed to delete this pipeline.", "error");
+      return;
+    }
+    showToast(`Deleted "${name}".`, "success");
+    await loadSavedPipelines();
+  } catch (err) {
+    showToast(`Delete failed: ${err}`, "error");
   }
 }
 
@@ -3560,6 +3745,54 @@ function runRegexTest() {
 
 [regexPatternEl, regexFlagsEl, regexTestStringEl].forEach((el) => el.addEventListener("input", runRegexTest));
 runRegexTest();
+
+// ---- New-module scaffolding wizard ----
+
+const scaffoldTierEl = document.getElementById("scaffold-tier");
+const scaffoldNameEl = document.getElementById("scaffold-name");
+const scaffoldDescriptionEl = document.getElementById("scaffold-description");
+const scaffoldCreateBtn = document.getElementById("scaffold-create-btn");
+const scaffoldResultEl = document.getElementById("scaffold-result");
+
+scaffoldCreateBtn.addEventListener("click", async () => {
+  const name = scaffoldNameEl.value.trim();
+  if (!name) {
+    scaffoldResultEl.classList.remove("hidden");
+    scaffoldResultEl.textContent = "Module name is required.";
+    return;
+  }
+
+  scaffoldCreateBtn.disabled = true;
+  scaffoldCreateBtn.textContent = "Scaffolding...";
+  try {
+    const res = await fetch("/api/modules/scaffold", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        tier: scaffoldTierEl.value,
+        name,
+        description: scaffoldDescriptionEl.value.trim(),
+      }),
+    });
+    const body = await res.json();
+    scaffoldResultEl.classList.remove("hidden");
+    if (!res.ok) {
+      scaffoldResultEl.textContent = body.detail || "Failed to scaffold this module.";
+      return;
+    }
+    scaffoldResultEl.innerHTML = `Created <code>${escapeHtml(body.py_path)}</code> and <code>${escapeHtml(body.yaml_path)}</code> — edit <code>run()</code> to bring it to life.`;
+    showToast(`Scaffolded "${body.name}" in the ${body.tier} tier.`, "success");
+    scaffoldNameEl.value = "";
+    scaffoldDescriptionEl.value = "";
+    await loadModules();
+  } catch (err) {
+    scaffoldResultEl.classList.remove("hidden");
+    scaffoldResultEl.textContent = `Request failed: ${err}`;
+  } finally {
+    scaffoldCreateBtn.disabled = false;
+    scaffoldCreateBtn.textContent = "Scaffold module";
+  }
+});
 
 // ---- Command palette (Ctrl/Cmd+K) ----
 

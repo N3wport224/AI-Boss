@@ -587,6 +587,30 @@ A few things live in the header/subheader on every page load:
   detail and timing, in a disposable context that never touches real run
   history, circuit breaker counts, or persistent agent memory.
 
+## Pipeline lifecycle, breaker thresholds, comparison, and module scaffolding
+
+- **Delete a saved pipeline** — a **Delete** button (with a confirm prompt)
+  on each saved-pipeline card removes its current definition. Its archived
+  version history is kept, not wiped, so it stays restorable.
+- **Save without launching** — a **Save** button next to **Save & Launch**
+  in the builder persists a pipeline as a draft without immediately running
+  it, for one that isn't ready to fire yet or is only ever meant to be
+  triggered by a schedule or webhook.
+- **Runtime-configurable circuit breaker threshold** — each module card has
+  its own **Breaker trips after N failure(s)** control, overriding the
+  manifest's own `circuit_breaker_threshold` without a YAML edit, with a
+  one-click revert to the manifest default.
+- **Diff two saved pipelines** — a **Compare** row under Saved Pipelines
+  picks any two and shows a key-level diff of their definitions, the same
+  tool already used for run comparison and pipeline version history.
+- **Audit log CSV export** — an **Export CSV** link next to the Recent
+  Actions panel downloads the full administrative-action history.
+- **New-module scaffolding wizard** — a small form under **Tools** generates
+  a starter `.py` + `.yaml` pair for a brand-new automation, workflow, or
+  agent — the exact boilerplate this README's "Adding a new module" section
+  otherwise asks you to hand-write — and it's discoverable immediately, no
+  restart needed.
+
 ## Tech stack
 
 - **Language:** Python 3.11+ — first-class async/sync support and native SDKs

@@ -93,6 +93,14 @@ CREATE TABLE IF NOT EXISTS audit_log (
     detail TEXT NOT NULL,
     created_at TEXT NOT NULL
 );
+
+CREATE TABLE IF NOT EXISTS breaker_overrides (
+    tier TEXT NOT NULL,
+    name TEXT NOT NULL,
+    threshold INTEGER NOT NULL,
+    updated_at TEXT NOT NULL,
+    PRIMARY KEY (tier, name)
+);
 """
 
 
@@ -546,6 +554,41 @@ class StateStore:
         with self._lock:
             rows = self._conn.execute("SELECT tier, name, enabled FROM module_overrides").fetchall()
         return {(tier, name): bool(enabled) for tier, name, enabled in rows}
+
+    def set_breaker_threshold(self, tier: str, name: str, threshold: int) -> None:
+        """A runtime override for how many consecutive failures trip a
+        module's circuit breaker, independent of its manifest's own
+        `circuit_breaker_threshold` — no YAML edit needed, and it persists
+        across a restart. A separate table from `module_overrides` since
+        the two toggles are independent (a module can have one, both, or
+        neither overridden)."""
+        with self._lock:
+            self._conn.execute(
+                "INSERT INTO breaker_overrides (tier, name, threshold, updated_at) VALUES (?, ?, ?, ?) "
+                "ON CONFLICT(tier, name) DO UPDATE SET threshold = excluded.threshold, updated_at = excluded.updated_at",
+                (tier, name, threshold, datetime.now(timezone.utc).isoformat()),
+            )
+            self._conn.commit()
+
+    def get_breaker_threshold_override(self, tier: str, name: str) -> Optional[int]:
+        """None means no override has ever been set — the caller should
+        fall back to the manifest's own `circuit_breaker_threshold` (or the
+        engine-wide default)."""
+        with self._lock:
+            row = self._conn.execute(
+                "SELECT threshold FROM breaker_overrides WHERE tier = ? AND name = ?", (tier, name)
+            ).fetchone()
+        return row[0] if row is not None else None
+
+    def clear_breaker_threshold_override(self, tier: str, name: str) -> None:
+        with self._lock:
+            self._conn.execute("DELETE FROM breaker_overrides WHERE tier = ? AND name = ?", (tier, name))
+            self._conn.commit()
+
+    def all_breaker_threshold_overrides(self) -> dict[tuple[str, str], int]:
+        with self._lock:
+            rows = self._conn.execute("SELECT tier, name, threshold FROM breaker_overrides").fetchall()
+        return {(tier, name): threshold for tier, name, threshold in rows}
 
     def record_audit_event(self, action: str, detail: str) -> dict:
         """Append-only log of destructive/administrative actions (run purge,

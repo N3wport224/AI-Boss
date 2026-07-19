@@ -250,6 +250,18 @@ def load_pipeline(slug: str) -> dict:
     return yaml.safe_load(path.read_text()) or {}
 
 
+def delete_pipeline(slug: str) -> None:
+    """Remove a saved pipeline's current definition. Its archived version
+    history under `_versions/<slug>/` is deliberately left in place —
+    `list_pipeline_versions()`/`restore_pipeline_version()` don't require the
+    current file to exist, so a deleted pipeline can still be brought back
+    by restoring any of its prior versions."""
+    path = PIPELINES_DIR / f"{slug}.yaml"
+    if not path.exists():
+        raise FileNotFoundError(slug)
+    path.unlink()
+
+
 def duplicate_pipeline(slug: str, tier_dirs: dict) -> dict:
     """Clone a saved pipeline under a new, non-colliding name — same steps,
     same mappings, ready to tweak independently of the original."""
