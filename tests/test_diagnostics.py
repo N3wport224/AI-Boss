@@ -97,6 +97,56 @@ def test_memory_csv_export_is_empty_but_valid_with_no_entries():
     assert lines == ["key,value,updated_at"]
 
 
+# ---- Batch 20: search across agent memory ----
+
+def test_search_memory_finds_a_keyword_in_the_key():
+    from webapp.main import store
+
+    store.clear_memory()
+    store.set_memory("batch20_marker_key", "some value")
+
+    res = client.get("/api/memory/search", params={"q": "batch20_marker_key"})
+    assert res.status_code == 200
+    body = res.json()
+    assert body["query"] == "batch20_marker_key"
+    assert any(r["key"] == "batch20_marker_key" for r in body["results"])
+    store.clear_memory()
+
+
+def test_search_memory_finds_a_keyword_in_the_value():
+    from webapp.main import store
+
+    store.clear_memory()
+    store.set_memory("some_key", "a batch20 unique value marker")
+
+    res = client.get("/api/memory/search", params={"q": "unique value marker"})
+    assert any(r["key"] == "some_key" for r in res.json()["results"])
+    store.clear_memory()
+
+
+def test_search_memory_redacts_a_secret_shaped_key():
+    from webapp.main import store
+
+    store.clear_memory()
+    store.set_memory("batch20_secret_token", "sk-should-be-hidden")
+
+    res = client.get("/api/memory/search", params={"q": "batch20_secret_token"})
+    match = next(r for r in res.json()["results"] if r["key"] == "batch20_secret_token")
+    assert match["value"] == "***REDACTED***"
+    store.clear_memory()
+
+
+def test_search_memory_returns_empty_for_a_blank_query():
+    res = client.get("/api/memory/search", params={"q": ""})
+    assert res.status_code == 200
+    assert res.json()["results"] == []
+
+
+def test_search_memory_finds_nothing_for_an_unmatched_keyword():
+    res = client.get("/api/memory/search", params={"q": "zzz_never_used_memory_key_zzz"})
+    assert res.json()["results"] == []
+
+
 def test_prune_runs_removes_only_finished_runs_older_than_cutoff(tmp_path):
     from datetime import datetime, timedelta, timezone
 

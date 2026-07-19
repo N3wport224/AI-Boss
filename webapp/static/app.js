@@ -88,6 +88,7 @@ const pipelineTagFilterInput = document.getElementById("pipeline-tag-filter");
 const pipelineDeepSearchInput = document.getElementById("pipeline-deep-search");
 const pipelineDeepSearchResultsEl = document.getElementById("pipeline-deep-search-results");
 const pipelinesBulkDeleteBtn = document.getElementById("pipelines-bulk-delete-btn");
+const pipelinesSelectAllEl = document.getElementById("pipelines-select-all");
 
 const selectedPipelineSlugs = new Set();
 
@@ -297,6 +298,7 @@ applyDensity(localStorage.getItem(DENSITY_STORAGE_KEY) || "comfortable");
 
 let persistentUnreadCount = 0;
 let persistentNotifications = [];
+const selectedNotificationIds = new Set();
 
 function renderNotificationRows(notifications, emptyMessage) {
   if (!notifications.length) return `<div class="dropdown-empty">${emptyMessage}</div>`;
@@ -304,6 +306,7 @@ function renderNotificationRows(notifications, emptyMessage) {
     .map(
       (n) => `
     <div class="notification-row ${n.read ? "" : "notification-unread"}">
+      <input type="checkbox" class="notification-select-checkbox" data-notification-id="${n.id}" ${selectedNotificationIds.has(n.id) ? "checked" : ""} />
       <i class="dot dot-${
         n.kind === "breaker_tripped" || n.kind === "schedule_failed"
           ? "error"
@@ -318,6 +321,60 @@ function renderNotificationRows(notifications, emptyMessage) {
     </div>`
     )
     .join("");
+}
+
+function updateNotificationBulkBtns() {
+  const markReadBtn = document.getElementById("notifications-bulk-mark-read-btn");
+  const deleteBtn = document.getElementById("notifications-bulk-delete-selected-btn");
+  if (markReadBtn) markReadBtn.disabled = selectedNotificationIds.size === 0;
+  if (deleteBtn) deleteBtn.disabled = selectedNotificationIds.size === 0;
+}
+
+function wireNotificationCheckboxes(container) {
+  container.querySelectorAll(".notification-select-checkbox").forEach((checkbox) => {
+    checkbox.addEventListener("click", (e) => e.stopPropagation());
+    checkbox.addEventListener("change", () => {
+      const id = Number(checkbox.dataset.notificationId);
+      if (checkbox.checked) selectedNotificationIds.add(id);
+      else selectedNotificationIds.delete(id);
+      updateNotificationBulkBtns();
+    });
+  });
+  updateNotificationBulkBtns();
+}
+
+function wireNotificationBulkControls(container) {
+  wireNotificationCheckboxes(container);
+  const markReadBtn = container.querySelector("#notifications-bulk-mark-read-btn");
+  const deleteBtn = container.querySelector("#notifications-bulk-delete-selected-btn");
+
+  markReadBtn?.addEventListener("click", async (e) => {
+    e.stopPropagation();
+    if (!selectedNotificationIds.size) return;
+    await fetch("/api/notifications/bulk-mark-read", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ notification_ids: [...selectedNotificationIds] }),
+    });
+    selectedNotificationIds.clear();
+    const res = await fetch("/api/notifications");
+    persistentNotifications = await res.json();
+    renderNotificationsPanel();
+  });
+
+  deleteBtn?.addEventListener("click", async (e) => {
+    e.stopPropagation();
+    if (!selectedNotificationIds.size) return;
+    await fetch("/api/notifications/bulk-delete", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ notification_ids: [...selectedNotificationIds] }),
+    });
+    selectedNotificationIds.clear();
+    const res = await fetch("/api/notifications");
+    persistentNotifications = await res.json();
+    renderNotificationsPanel();
+  });
 }
 
 function updateNotifBadge() {
@@ -388,6 +445,10 @@ function renderNotificationsPanel() {
       </div>
     </div>
     <input type="search" id="notifications-search-input" class="artifact-search-input" placeholder="Search alerts…" />
+    <div class="notification-section-actions" style="padding: 4px 0;">
+      <button class="btn btn-secondary btn-small" id="notifications-bulk-mark-read-btn" type="button" disabled>Mark selected read</button>
+      <button class="btn btn-secondary btn-small" id="notifications-bulk-delete-selected-btn" type="button" disabled>Delete selected</button>
+    </div>
     <div id="notifications-alerts-list">${alertsHtml}</div>
     <h4>Recent activity</h4>
     ${activityHtml}
@@ -418,12 +479,14 @@ function renderNotificationsPanel() {
     notificationSearchDebounce = setTimeout(async () => {
       if (!query) {
         listEl.innerHTML = renderNotificationRows(persistentNotifications, "No alerts yet.");
+        wireNotificationCheckboxes(listEl);
         return;
       }
       try {
         const res = await fetch(`/api/notifications/search?q=${encodeURIComponent(query)}`);
         const body = await res.json();
         listEl.innerHTML = renderNotificationRows(body.results, "No alerts match that search.");
+        wireNotificationCheckboxes(listEl);
       } catch (err) {
         listEl.innerHTML = `<div class="dropdown-empty">Search failed: ${err}</div>`;
       }
@@ -459,6 +522,8 @@ function renderNotificationsPanel() {
       }
     });
   });
+
+  wireNotificationBulkControls(notificationsPanel);
 }
 
 async function setAllNotificationPreferences(muted) {
@@ -890,6 +955,7 @@ function renderRunDetailSteps(runId, steps, blackboard, note) {
   return `
     <div class="run-detail-toolbar">
       <button class="btn btn-secondary btn-small rerun-btn" data-run-id="${runId}" type="button">↻ Re-run with these inputs</button>
+      <a class="btn btn-secondary btn-small" href="/api/runs/${runId}.json" download title="Download this run's full detail as JSON">⬇ Download JSON</a>
     </div>
     <div class="run-note-row">
       <label for="run-note__${runId}">Note</label>
@@ -3234,8 +3300,10 @@ function renderSavedPipelines(pipelinesList) {
         if (checkbox.checked) selectedPipelineSlugs.add(checkbox.dataset.slug);
         else selectedPipelineSlugs.delete(checkbox.dataset.slug);
         updatePipelinesBulkDeleteBtn();
+        pipelinesSelectAllEl.checked = pipelinesList.every((p) => selectedPipelineSlugs.has(p.slug));
       });
     });
+    pipelinesSelectAllEl.checked = pipelinesList.length > 0 && pipelinesList.every((p) => selectedPipelineSlugs.has(p.slug));
   }
 
   updatePipelinesBulkDeleteBtn();
@@ -3244,6 +3312,16 @@ function renderSavedPipelines(pipelinesList) {
   renderFavoritesSection();
   renderRecentlyViewedSection();
 }
+
+pipelinesSelectAllEl.addEventListener("change", () => {
+  const checkboxes = savedPipelinesGrid.querySelectorAll(".pipeline-select-checkbox");
+  checkboxes.forEach((checkbox) => {
+    checkbox.checked = pipelinesSelectAllEl.checked;
+    if (pipelinesSelectAllEl.checked) selectedPipelineSlugs.add(checkbox.dataset.slug);
+    else selectedPipelineSlugs.delete(checkbox.dataset.slug);
+  });
+  updatePipelinesBulkDeleteBtn();
+});
 
 pipelinesBulkDeleteBtn.addEventListener("click", async () => {
   if (!selectedPipelineSlugs.size) return;
@@ -4865,19 +4943,10 @@ setInterval(loadPerformance, 3000);
 
 const memoryListEl = document.getElementById("memory-list");
 const memoryClearBtn = document.getElementById("memory-clear-btn");
+const memorySearchInput = document.getElementById("memory-search-input");
 
-async function loadMemory() {
-  const res = await fetch("/api/memory");
-  const entries = await res.json();
-
-  if (!entries.length) {
-    memoryListEl.className = "runs-empty";
-    memoryListEl.textContent = "Nothing remembered yet.";
-    return;
-  }
-
-  memoryListEl.className = "runs-table";
-  memoryListEl.innerHTML = entries
+function renderMemoryRows(entries) {
+  return entries
     .map(
       (entry) => `
       <div class="schedule-row">
@@ -4891,7 +4960,9 @@ async function loadMemory() {
       </div>`
     )
     .join("");
+}
 
+function wireMemoryDeleteButtons() {
   memoryListEl.querySelectorAll("[data-memory-delete]").forEach((btn) => {
     btn.addEventListener("click", async () => {
       await fetch(`/api/memory/${btn.dataset.memoryDelete}`, { method: "DELETE" });
@@ -4899,6 +4970,48 @@ async function loadMemory() {
     });
   });
 }
+
+async function loadMemory() {
+  const res = await fetch("/api/memory");
+  const entries = await res.json();
+
+  if (!entries.length) {
+    memoryListEl.className = "runs-empty";
+    memoryListEl.textContent = "Nothing remembered yet.";
+    return;
+  }
+
+  memoryListEl.className = "runs-table";
+  memoryListEl.innerHTML = renderMemoryRows(entries);
+  wireMemoryDeleteButtons();
+}
+
+let memorySearchDebounce = null;
+memorySearchInput.addEventListener("input", () => {
+  const query = memorySearchInput.value.trim();
+  clearTimeout(memorySearchDebounce);
+  memorySearchDebounce = setTimeout(async () => {
+    if (!query) {
+      await loadMemory();
+      return;
+    }
+    try {
+      const res = await fetch(`/api/memory/search?q=${encodeURIComponent(query)}`);
+      const body = await res.json();
+      if (!body.results.length) {
+        memoryListEl.className = "runs-empty";
+        memoryListEl.textContent = "No memory entries match that search.";
+        return;
+      }
+      memoryListEl.className = "runs-table";
+      memoryListEl.innerHTML = renderMemoryRows(body.results);
+      wireMemoryDeleteButtons();
+    } catch (err) {
+      memoryListEl.className = "runs-empty";
+      memoryListEl.textContent = `Search failed: ${err}`;
+    }
+  }, 250);
+});
 
 memoryClearBtn.addEventListener("click", async () => {
   await fetch("/api/memory", { method: "DELETE" });
@@ -4970,18 +5083,9 @@ const AUDIT_ACTION_LABELS = {
   pipeline_version_restore: "Pipeline version restore",
 };
 
-async function loadAuditLog() {
-  const res = await fetch("/api/audit-log");
-  const events = await res.json();
-
-  if (!events.length) {
-    auditLogListEl.className = "runs-empty";
-    auditLogListEl.textContent = "No administrative actions recorded yet.";
-    return;
-  }
-
-  auditLogListEl.className = "runs-table";
-  auditLogListEl.innerHTML = events
+function renderAuditLogRows(events, emptyMessage) {
+  if (!events.length) return { className: "runs-empty", html: emptyMessage };
+  const html = events
     .map(
       (e) => `
       <div class="schedule-row">
@@ -4993,7 +5097,40 @@ async function loadAuditLog() {
       </div>`
     )
     .join("");
+  return { className: "runs-table", html };
 }
+
+async function loadAuditLog() {
+  const res = await fetch("/api/audit-log");
+  const events = await res.json();
+
+  const { className, html } = renderAuditLogRows(events, "No administrative actions recorded yet.");
+  auditLogListEl.className = className;
+  auditLogListEl.innerHTML = html;
+}
+
+const auditLogSearchInput = document.getElementById("audit-log-search-input");
+let auditLogSearchDebounce = null;
+auditLogSearchInput.addEventListener("input", () => {
+  const query = auditLogSearchInput.value.trim();
+  clearTimeout(auditLogSearchDebounce);
+  auditLogSearchDebounce = setTimeout(async () => {
+    if (!query) {
+      await loadAuditLog();
+      return;
+    }
+    try {
+      const res = await fetch(`/api/audit-log/search?q=${encodeURIComponent(query)}`);
+      const body = await res.json();
+      const { className, html } = renderAuditLogRows(body.results, "No actions match that search.");
+      auditLogListEl.className = className;
+      auditLogListEl.innerHTML = html;
+    } catch (err) {
+      auditLogListEl.className = "runs-empty";
+      auditLogListEl.textContent = `Search failed: ${err}`;
+    }
+  }, 250);
+});
 
 auditLogRefreshBtn.addEventListener("click", async () => {
   await loadAuditLog();

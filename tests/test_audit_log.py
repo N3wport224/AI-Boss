@@ -177,3 +177,33 @@ def test_audit_log_csv_export_respects_limit():
     lines = res.text.strip().splitlines()
     assert len(lines) == 2  # header + exactly one row
     assert "run_purge" in lines[1]
+
+
+# ---- Batch 20: search across the audit log ----
+
+def test_search_audit_log_finds_a_keyword_in_the_detail():
+    unique_marker = "batch20auditmarker9192"
+    client.post("/api/artifacts/purge", params={"older_than_hours": 999999})
+
+    res = client.get("/api/audit-log/search", params={"q": "artifact_purge"})
+    assert res.status_code == 200
+    body = res.json()
+    assert body["query"] == "artifact_purge"
+    assert any(r["action"] == "artifact_purge" for r in body["results"])
+
+
+def test_search_audit_log_is_case_insensitive():
+    client.post("/api/artifacts/purge", params={"older_than_hours": 999999})
+    res = client.get("/api/audit-log/search", params={"q": "ARTIFACT_PURGE"})
+    assert any(r["action"] == "artifact_purge" for r in res.json()["results"])
+
+
+def test_search_audit_log_returns_empty_for_a_blank_query():
+    res = client.get("/api/audit-log/search", params={"q": ""})
+    assert res.status_code == 200
+    assert res.json()["results"] == []
+
+
+def test_search_audit_log_finds_nothing_for_an_unmatched_keyword():
+    res = client.get("/api/audit-log/search", params={"q": "zzz_never_used_audit_action_zzz"})
+    assert res.json()["results"] == []

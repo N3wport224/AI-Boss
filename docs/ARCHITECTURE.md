@@ -1854,6 +1854,78 @@ only a JSON parse error or timeout falls back to an empty issue list.
      artifacts and clicking **★ Favorite selected** adds both to
      `localStorage` favorites, and viewing an artifact then clicking
      **Clear** empties and hides the Recently Viewed section.
+159. **Add a select-all checkbox for saved pipelines** (frontend-only --
+     mirrors the schedules-select-all pattern from Batch 19: checking it
+     checks (and selects) every visible saved-pipeline card in one action
+     before a bulk delete, unchecking it clears the whole selection, and
+     it self-syncs to reflect the current selection whenever an
+     individual card's checkbox changes).
+160. **Add search across the audit log**
+     (`StateStore.search_audit_events(query, limit=20)` -- the same
+     `LIKE`-with-escaped-wildcards pattern as `search_run_notes()` and
+     `search_notifications()`, matched against either the `action` or
+     `detail` column; `GET /api/audit-log/search?q=`). A search box above
+     the Recent Actions list filters just that panel, following the same
+     separate-container pattern the notifications search box already
+     established so retyping doesn't lose input focus.
+161. **Add checkbox-based bulk mark-read/delete for notifications**
+     (`StateStore.mark_notifications_read(ids)` and
+     `delete_notifications(ids)` -- an id-list `IN (...)` query each,
+     finer-grained than the existing mark-all-read (which flips every
+     unread row) and clear-read (which only ever deletes already-read
+     rows); `POST /api/notifications/bulk-mark-read` and
+     `POST /api/notifications/bulk-delete`, the latter deleting read and
+     unread alike since a user's checkbox selection isn't limited to
+     read-only rows). A checkbox per Alert row plus **Mark selected
+     read** / **Delete selected** buttons; checkbox wiring is factored
+     into its own `wireNotificationCheckboxes()` so both the full panel
+     render and the search-filtered re-render (which only replaces the
+     `#notifications-alerts-list` sub-container) attach fresh listeners
+     to whichever rows are currently on screen.
+162. **Add exporting a single run's full detail as JSON**
+     (`GET /api/runs/{run_id}.json` -- every step's inputs/outputs/timing,
+     the shared blackboard, and any note, as a downloadable JSON file;
+     distinct from `GET /api/runs.csv`/`.xlsx`, which only ever cover the
+     summary run-history list, never one run's full nested detail.
+     Registered *before* `GET /api/runs/{run_id}` in the source file --
+     the same route-ordering requirement documented throughout this
+     project: a plain `{run_id}` (typed `int`) route still *matches* a
+     path like `42.json` at the routing layer since Starlette's default
+     path-segment matching isn't dot-aware, and only 422s afterward when
+     FastAPI tries to coerce `"42.json"` to `int` -- so the more specific
+     literal-suffixed route has to be tried first, or it never gets a
+     chance to run at all). A **⬇ Download JSON** link sits next to the
+     existing **↻ Re-run** button in the run detail drill-down toolbar.
+163. **Add search across agent memory**
+     (`StateStore.search_memory(query, limit=20)` -- matched against
+     either the memory `key` or its JSON-encoded `value` text;
+     `GET /api/memory/search?q=`, redacted through the exact same
+     `redact_secrets()` pass as `GET /api/memory` so a secret-shaped key
+     never leaks its value into a search result either). A search box in
+     the Agent Memory panel filters that list the same way the audit-log
+     and notifications search boxes do.
+164. **Add tests for all of Batch 20**: searching the audit log matches
+     case-insensitively across both the action and detail columns and
+     returns empty for a blank or unmatched query; bulk-marking a
+     selected set of notifications read without touching the rest, and
+     being a no-op for unknown ids; bulk-deleting notifications
+     regardless of read state, and being a no-op on an empty selection;
+     the run-detail JSON download exactly matching the regular detail
+     endpoint's JSON body and 404ing for an unknown run id; searching
+     memory by key, by value substring, redacting a secret-shaped key in
+     the results, and returning empty for a blank or unmatched query.
+     497 tests total, stable across repeated clean full-suite runs.
+     Live-verified end to end with Playwright against a freshly started
+     server: checking/unchecking select-all toggles every saved-pipeline
+     card, typing into the audit-log search box filters the Recent
+     Actions list to a real `artifact_purge` event, checkbox-selecting
+     notifications and using **Mark selected read** then **Delete
+     selected** confirmed at the API level, downloading a run's
+     `.json` detail and finding the **⬇ Download JSON** link in the run
+     detail view, and — after actually running `churn_response_agent`
+     (the one bundled module that writes to memory) rather than stubbing
+     it out — searching for its `last_risk_level` key and confirming the
+     Agent Memory panel's search box filters down to it.
 
 ## 9. Roadmap
 

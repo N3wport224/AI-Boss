@@ -501,6 +501,25 @@ class StateStore:
             rows = self._conn.execute("SELECT key, value, updated_at FROM memory ORDER BY key").fetchall()
         return [{"key": key, "value": json.loads(value), "updated_at": updated_at} for key, value, updated_at in rows]
 
+    def search_memory(self, query: str, limit: int = 20) -> list[dict]:
+        """Case-insensitive keyword search across every memory entry's own
+        key and its JSON-encoded value text -- mirrors search_run_notes()'s
+        content-search pattern, applied to the cross-run memory store
+        instead of run annotations. SQL LIKE with escaped wildcards keeps
+        this a literal substring search, not a glob."""
+        query_stripped = query.strip()
+        if not query_stripped:
+            return []
+        like_pattern = "%" + query_stripped.replace("%", r"\%").replace("_", r"\_") + "%"
+        with self._lock:
+            rows = self._conn.execute(
+                "SELECT key, value, updated_at FROM memory "
+                "WHERE key LIKE ? ESCAPE '\\' OR value LIKE ? ESCAPE '\\' "
+                "ORDER BY key LIMIT ?",
+                (like_pattern, like_pattern, limit),
+            ).fetchall()
+        return [{"key": key, "value": json.loads(value), "updated_at": updated_at} for key, value, updated_at in rows]
+
     def clear_memory(self) -> None:
         with self._lock:
             self._conn.execute("DELETE FROM memory")
@@ -697,6 +716,24 @@ class StateStore:
             rows = self._conn.execute(
                 "SELECT id, action, detail, created_at FROM audit_log ORDER BY id DESC LIMIT ?",
                 (limit,),
+            ).fetchall()
+        return [{"id": r[0], "action": r[1], "detail": r[2], "created_at": r[3]} for r in rows]
+
+    def search_audit_events(self, query: str, limit: int = 20) -> list[dict]:
+        """Case-insensitive keyword search across every audit event's own
+        action and detail text -- mirrors search_run_notes()'s content-search
+        pattern, applied to the audit trail instead of run annotations. SQL
+        LIKE with escaped wildcards keeps this a literal substring search."""
+        query_stripped = query.strip()
+        if not query_stripped:
+            return []
+        like_pattern = "%" + query_stripped.replace("%", r"\%").replace("_", r"\_") + "%"
+        with self._lock:
+            rows = self._conn.execute(
+                "SELECT id, action, detail, created_at FROM audit_log "
+                "WHERE action LIKE ? ESCAPE '\\' OR detail LIKE ? ESCAPE '\\' "
+                "ORDER BY id DESC LIMIT ?",
+                (like_pattern, like_pattern, limit),
             ).fetchall()
         return [{"id": r[0], "action": r[1], "detail": r[2], "created_at": r[3]} for r in rows]
 
@@ -982,6 +1019,38 @@ class StateStore:
         which only flips the read flag and leaves every row in place."""
         with self._lock:
             cur = self._conn.execute("DELETE FROM notifications WHERE read = 1")
+            self._conn.commit()
+        return cur.rowcount
+
+    def mark_notifications_read(self, notification_ids: list[int]) -> int:
+        """Mark a user-picked set of notifications read at once -- the
+        finer-grained counterpart to mark_all_notifications_read(), for a
+        checkbox multi-select in the Alerts list. An unknown id is simply
+        a no-op UPDATE, same as mark_notification_read()'s single-id form."""
+        if not notification_ids:
+            return 0
+        placeholders = ",".join("?" * len(notification_ids))
+        with self._lock:
+            cur = self._conn.execute(
+                f"UPDATE notifications SET read = 1 WHERE id IN ({placeholders}) AND read = 0",
+                notification_ids,
+            )
+            self._conn.commit()
+        return cur.rowcount
+
+    def delete_notifications(self, notification_ids: list[int]) -> int:
+        """Delete a user-picked set of notifications at once -- the
+        finer-grained counterpart to clear_read_notifications() (which only
+        ever deletes already-read ones), for a checkbox multi-select that
+        may include unread alerts too."""
+        if not notification_ids:
+            return 0
+        placeholders = ",".join("?" * len(notification_ids))
+        with self._lock:
+            cur = self._conn.execute(
+                f"DELETE FROM notifications WHERE id IN ({placeholders})",
+                notification_ids,
+            )
             self._conn.commit()
         return cur.rowcount
 

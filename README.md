@@ -771,6 +771,21 @@ A few things live in the header/subheader on every page load:
 - **Clear Recently Viewed** — a **Clear** button empties the Recently
   Viewed strip in one action.
 
+## Pipeline select-all, audit-log search, notification bulk actions, run JSON export, and memory search
+
+- **Select-all for saved pipelines** — a header checkbox selects (or
+  clears) every saved pipeline before a bulk delete.
+- **Search the audit log** — a search box above Recent Actions filters
+  the administrative-action history by keyword.
+- **Bulk mark-read/delete for notifications** — checkbox-select
+  individual alerts and mark them read or delete them, read or unread,
+  in one action.
+- **Export a run's full detail as JSON** — a **⬇ Download JSON** link in
+  the run detail drill-down downloads that run's complete steps,
+  blackboard, and note.
+- **Search agent memory** — a search box in the Agent Memory panel
+  filters remembered key/value pairs by keyword.
+
 ## Tech stack
 
 - **Language:** Python 3.11+ — first-class async/sync support and native SDKs

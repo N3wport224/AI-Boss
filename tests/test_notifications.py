@@ -437,3 +437,46 @@ def test_search_notifications_returns_empty_for_a_blank_query():
 def test_search_notifications_finds_nothing_for_an_unmatched_keyword():
     res = client.get("/api/notifications/search", params={"q": "zzz_never_used_notification_zzz"})
     assert res.json()["results"] == []
+
+
+# ---- Batch 20: checkbox-based bulk mark-read/delete for notifications ----
+
+def test_bulk_mark_notifications_read_marks_only_the_selected_ones():
+    a = client.post("/api/notifications", json={"kind": "info", "message": "bulk read a"}).json()
+    b = client.post("/api/notifications", json={"kind": "info", "message": "bulk read b"}).json()
+    c = client.post("/api/notifications", json={"kind": "info", "message": "bulk read c stays unread"}).json()
+
+    res = client.post("/api/notifications/bulk-mark-read", json={"notification_ids": [a["id"], b["id"]]})
+    assert res.status_code == 200
+    assert res.json()["marked"] == 2
+
+    listed = {n["id"]: n for n in client.get("/api/notifications").json()}
+    assert listed[a["id"]]["read"] is True
+    assert listed[b["id"]]["read"] is True
+    assert listed[c["id"]]["read"] is False
+
+
+def test_bulk_mark_notifications_read_is_a_no_op_for_unknown_ids():
+    res = client.post("/api/notifications/bulk-mark-read", json={"notification_ids": [999999999]})
+    assert res.status_code == 200
+    assert res.json()["marked"] == 0
+
+
+def test_bulk_delete_notifications_removes_read_and_unread_alike():
+    a = client.post("/api/notifications", json={"kind": "info", "message": "bulk delete a"}).json()
+    b = client.post("/api/notifications", json={"kind": "info", "message": "bulk delete b unread"}).json()
+    client.post(f"/api/notifications/{a['id']}/read")
+
+    res = client.post("/api/notifications/bulk-delete", json={"notification_ids": [a["id"], b["id"]]})
+    assert res.status_code == 200
+    assert res.json()["deleted"] == 2
+
+    remaining_ids = {n["id"] for n in client.get("/api/notifications").json()}
+    assert a["id"] not in remaining_ids
+    assert b["id"] not in remaining_ids
+
+
+def test_bulk_delete_notifications_is_a_no_op_on_an_empty_selection():
+    res = client.post("/api/notifications/bulk-delete", json={"notification_ids": []})
+    assert res.status_code == 200
+    assert res.json()["deleted"] == 0

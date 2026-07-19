@@ -1561,8 +1561,7 @@ def compare_runs(a: int, b: int):
     return {"run_a": a, "run_b": b, "steps": comparisons}
 
 
-@app.get("/api/runs/{run_id}")
-def run_detail(run_id: int):
+def _run_detail(run_id: int) -> dict:
     steps = _parsed_steps_for_run(run_id)
     if not steps:
         raise HTTPException(status_code=404, detail=f"No recorded steps for run {run_id}.")
@@ -1572,6 +1571,31 @@ def run_detail(run_id: int):
         "blackboard": store.get_run_blackboard(run_id),
         "note": store.get_run_note(run_id) or "",
     }
+
+
+@app.get("/api/runs/{run_id}.json")
+def download_run_detail(run_id: int):
+    """The same full run detail as GET /api/runs/{run_id} (every step's
+    inputs/outputs/timing, the shared blackboard, and any note), as a
+    downloadable JSON file -- distinct from GET /api/runs.csv and
+    /api/runs.xlsx, which only ever cover the summary run-history list,
+    never one run's full nested detail. Registered *before*
+    GET /api/runs/{run_id} -- same route-ordering requirement as every
+    other literal-suffixed dynamic path in this file (e.g. /api/pipelines
+    export routes): otherwise Starlette's plain {run_id} matches
+    "N.json" too and 422s on the int conversion before this route is
+    ever tried."""
+    detail = _run_detail(run_id)
+    return StreamingResponse(
+        iter([json.dumps(detail, indent=2)]),
+        media_type="application/json",
+        headers={"Content-Disposition": f"attachment; filename=run_{run_id}.json"},
+    )
+
+
+@app.get("/api/runs/{run_id}")
+def run_detail(run_id: int):
+    return _run_detail(run_id)
 
 
 class RunNoteUpdate(BaseModel):
@@ -1731,6 +1755,11 @@ def list_audit_log(limit: int = 50):
     return store.list_audit_events(limit)
 
 
+@app.get("/api/audit-log/search")
+def search_audit_log(q: str = ""):
+    return {"query": q, "results": store.search_audit_events(q)}
+
+
 @app.get("/api/audit-log.csv")
 def audit_log_csv(limit: int = 1000):
     """Same audit trail as the dashboard panel, as a downloadable CSV --
@@ -1827,6 +1856,26 @@ def clear_read_notifications():
     return {"cleared": store.clear_read_notifications()}
 
 
+class BulkNotificationIds(BaseModel):
+    notification_ids: list[int]
+
+
+@app.post("/api/notifications/bulk-mark-read")
+def bulk_mark_notifications_read(payload: BulkNotificationIds):
+    """Mark a user-picked set of notifications read at once -- the
+    finer-grained counterpart to mark-all-read, for a checkbox
+    multi-select in the Alerts list."""
+    return {"marked": store.mark_notifications_read(payload.notification_ids)}
+
+
+@app.post("/api/notifications/bulk-delete")
+def bulk_delete_notifications(payload: BulkNotificationIds):
+    """Delete a user-picked set of notifications at once, whether read or
+    unread -- the finer-grained counterpart to clear-read, which only ever
+    deletes already-read ones."""
+    return {"deleted": store.delete_notifications(payload.notification_ids)}
+
+
 NOTIFICATION_KINDS = ("breaker_tripped", "schedule_failed", "resource_alert", "schedule_once_fired")
 
 
@@ -1872,6 +1921,17 @@ def list_memory():
     # memory key even when its value is a bare string, not just a nested dict.
     redacted = redact_secrets({entry["key"]: entry["value"] for entry in entries})
     return [{**entry, "value": redacted[entry["key"]]} for entry in entries]
+
+
+@app.get("/api/memory/search")
+def search_memory(q: str = ""):
+    """Case-insensitive keyword search across every memory entry's key and
+    value, redacted the same way GET /api/memory is -- a secret-shaped key
+    never leaks its value into a search result either."""
+    entries = store.search_memory(q)
+    redacted = redact_secrets({entry["key"]: entry["value"] for entry in entries})
+    results = [{**entry, "value": redacted[entry["key"]]} for entry in entries]
+    return {"query": q, "results": results}
 
 
 @app.get("/api/memory.csv")

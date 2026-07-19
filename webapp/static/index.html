@@ -219,6 +219,10 @@
       <div class="pipeline-filter-row">
         <input type="text" id="pipeline-tag-filter" placeholder="Filter by tag…" class="artifact-search-input" />
         <input type="text" id="pipeline-deep-search" placeholder="Search inside pipeline definitions (inputs, conditions, descriptions)…" class="artifact-search-input" />
+        <label class="schedule-select-all-label">
+          <input type="checkbox" id="pipelines-select-all" />
+          Select all
+        </label>
         <button id="pipelines-bulk-delete-btn" class="btn btn-danger btn-small" type="button" disabled>Delete selected</button>
       </div>
       <div id="pipeline-deep-search-results" class="hidden"></div>
@@ -377,6 +381,7 @@
         <code>context.memory</code> — unlike a run's own context, this survives
         across separate runs (e.g. an agent remembering last run's decision).
       </p>
+      <input type="search" id="memory-search-input" class="artifact-search-input" placeholder="Search memory keys and values…" />
       <div id="memory-list" class="runs-empty">Nothing remembered yet.</div>
     </section>
 
@@ -413,6 +418,7 @@
         Destructive/administrative actions taken through this dashboard — purges, restores,
         breaker resets, schedule pause/resume, version restores — newest first.
       </p>
+      <input type="search" id="audit-log-search-input" class="artifact-search-input" placeholder="Search recent actions…" />
       <div id="audit-log-list" class="runs-empty">Loading…</div>
     </section>
 

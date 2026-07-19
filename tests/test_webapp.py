@@ -505,6 +505,29 @@ def test_run_detail_404s_for_unknown_run():
     assert client.get("/api/runs/999999").status_code == 404
 
 
+# ---- Batch 20: export a single run's full detail as JSON ----
+
+def test_download_run_detail_json_matches_the_regular_detail_endpoint():
+    res = client.post(
+        "/api/modules/automation/fetch_raw_metrics/run",
+        json={"inputs": {"signups": 5, "churn": 1, "revenue": 50}, "force_refresh": True},
+    )
+    _collect_stream(res.json()["stream_id"])
+    run_id = client.get("/api/runs?limit=1").json()[0]["id"]
+
+    download = client.get(f"/api/runs/{run_id}.json")
+    assert download.status_code == 200
+    assert download.headers["content-type"].startswith("application/json")
+    assert f"filename=run_{run_id}.json" in download.headers["content-disposition"]
+
+    regular = client.get(f"/api/runs/{run_id}")
+    assert download.json() == regular.json()
+
+
+def test_download_run_detail_json_404s_for_unknown_run():
+    assert client.get("/api/runs/999999.json").status_code == 404
+
+
 def test_compare_404s_when_a_run_has_no_steps():
     res = client.post(
         "/api/modules/automation/fetch_raw_metrics/run",
