@@ -57,6 +57,7 @@ class Scheduler:
         trigger: Callable[[dict], None],
         poll_interval: float = 5.0,
         on_error: Callable[[dict, str], None] | None = None,
+        on_once_fired: Callable[[dict], None] | None = None,
     ):
         self.state_store = state_store
         self.trigger = trigger
@@ -67,6 +68,12 @@ class Scheduler:
         # notification even is. None by default so every existing caller
         # (and every prior test) keeps working unchanged.
         self.on_error = on_error
+        # Optional (schedule) callback fired only when a "once" schedule's
+        # trigger succeeds -- a one-time schedule is set up ahead of time
+        # and easy to forget about, unlike a recurring one the user is
+        # likely to check on repeatedly, so this is the one case worth a
+        # dedicated success notification. None by default, same as on_error.
+        self.on_once_fired = on_once_fired
         self._stop = threading.Event()
         self._thread: threading.Thread | None = None
         # A master pause, distinct from any individual schedule's own
@@ -124,3 +131,5 @@ class Scheduler:
             self.state_store.record_schedule_run(schedule["id"], next_run_at.isoformat(), status)
             if schedule_type == "once":
                 self.state_store.set_schedule_enabled(schedule["id"], False)
+                if status == "triggered" and self.on_once_fired is not None:
+                    self.on_once_fired(schedule)

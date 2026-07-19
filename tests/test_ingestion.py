@@ -753,3 +753,28 @@ def test_compare_schema_rejects_a_non_table_artifact():
 
     res = client.get("/api/artifacts/compare-schema", params={"a": pdf_name, "b": h_name})
     assert res.status_code == 400
+
+
+# ---- Batch 17: export artifacts list metadata to CSV ----
+
+def test_artifacts_csv_export_contains_header_and_uploaded_files():
+    client.post("/api/ingest/csv", files={"file": ("csvexport_a.csv", b"x,y\n4041,4042\n", "text/csv")})
+    a_name = next(f["name"] for f in client.get("/api/artifacts").json() if f["name"].endswith("csvexport_a.csv"))
+    client.put(f"/api/artifacts/{a_name}/tags", json={"tags": ["alpha", "beta"]})
+
+    res = client.get("/api/artifacts.csv")
+    assert res.status_code == 200
+    assert res.headers["content-type"].startswith("text/csv")
+    assert "attachment; filename=artifacts.csv" in res.headers["content-disposition"]
+
+    lines = res.text.strip().splitlines()
+    assert lines[0] == "filename,size_bytes,tags,modified_at"
+    row = next(line for line in lines[1:] if line.startswith(a_name))
+    assert "alpha;beta" in row
+
+
+def test_artifacts_csv_export_is_empty_but_valid_with_no_artifacts():
+    res = client.get("/api/artifacts.csv")
+    assert res.status_code == 200
+    lines = res.text.strip().splitlines()
+    assert lines == ["filename,size_bytes,tags,modified_at"]

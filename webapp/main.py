@@ -538,7 +538,12 @@ def _notify_schedule_error(schedule: dict, error_message: str) -> None:
     store.add_notification("schedule_failed", f"Scheduled run of {label} failed: {error_message}")
 
 
-_scheduler = Scheduler(store, _trigger_schedule, on_error=_notify_schedule_error)
+def _notify_once_schedule_fired(schedule: dict) -> None:
+    label = schedule["name"] if schedule.get("kind") == "pipeline" else f"[{schedule['tier']}] {schedule['name']}"
+    store.add_notification("schedule_once_fired", f"One-time scheduled run of {label} fired successfully.")
+
+
+_scheduler = Scheduler(store, _trigger_schedule, on_error=_notify_schedule_error, on_once_fired=_notify_once_schedule_fired)
 _scheduler.start()
 
 
@@ -1041,6 +1046,29 @@ def delete_saved_pipeline(slug: str):
         raise HTTPException(status_code=404, detail=f"No saved pipeline named '{slug}'.")
     store.delete_pipeline_tags(slug)
     return {"deleted": slug}
+
+
+class BulkDeletePipelines(BaseModel):
+    slugs: list[str]
+
+
+@app.post("/api/pipelines/bulk-delete")
+def bulk_delete_pipelines(payload: BulkDeletePipelines):
+    """Delete a user-picked set of saved pipelines in one action -- the
+    finer-grained counterpart to deleting one at a time, mirroring the
+    existing bulk-delete pattern for Recent Runs. An unknown slug is
+    skipped rather than failing the whole batch, same as bulk-tagging an
+    unknown artifact filename."""
+    deleted = []
+    for slug in payload.slugs:
+        try:
+            pipeline_store.delete_pipeline(slug)
+        except FileNotFoundError:
+            continue
+        store.delete_pipeline_tags(slug)
+        deleted.append(slug)
+    store.record_audit_event("pipeline_bulk_delete", f"Deleted {len(deleted)} selected pipeline(s): {deleted}.")
+    return {"deleted": deleted}
 
 
 class PipelineTagsUpdate(BaseModel):
@@ -1701,7 +1729,7 @@ def clear_read_notifications():
     return {"cleared": store.clear_read_notifications()}
 
 
-NOTIFICATION_KINDS = ("breaker_tripped", "schedule_failed", "resource_alert")
+NOTIFICATION_KINDS = ("breaker_tripped", "schedule_failed", "resource_alert", "schedule_once_fired")
 
 
 @app.get("/api/notifications/preferences")
@@ -1862,6 +1890,34 @@ def list_artifacts(tag: Optional[str] = None):
         tag_lower = tag.strip().lower()
         files = [f for f in files if tag_lower in (t.lower() for t in f["tags"])]
     return files
+
+
+@app.get("/api/artifacts.csv")
+def artifacts_csv():
+    """Every ingested artifact's metadata (not its content) as a downloadable
+    CSV -- mirrors the audit-log/notifications CSV export pattern. Tags are
+    joined with ';' since a CSV cell can't hold a list, and modified_at (a
+    raw Unix timestamp, the same value the API returns) is rendered as an
+    ISO 8601 UTC string for readability."""
+    files = ingestion.list_artifacts()
+    tags_by_file = store.all_artifact_tags()
+
+    buffer = io.StringIO()
+    writer = csv.DictWriter(buffer, fieldnames=["filename", "size_bytes", "tags", "modified_at"])
+    writer.writeheader()
+    for f in files:
+        writer.writerow({
+            "filename": f["name"],
+            "size_bytes": f["size_bytes"],
+            "tags": ";".join(tags_by_file.get(f["name"], [])),
+            "modified_at": datetime.fromtimestamp(f["modified_at"], tz=timezone.utc).isoformat(),
+        })
+
+    return StreamingResponse(
+        iter([buffer.getvalue()]),
+        media_type="text/csv",
+        headers={"Content-Disposition": "attachment; filename=artifacts.csv"},
+    )
 
 
 @app.get("/api/artifacts/tags-summary")

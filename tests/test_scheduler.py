@@ -291,3 +291,78 @@ def test_disabled_schedule_is_never_triggered(tmp_path):
 
     assert calls == []
     store.close()
+
+
+def test_scheduler_calls_on_once_fired_only_for_a_successful_once_schedule(tmp_path):
+    store = StateStore(str(tmp_path / "once_fired.db"))
+    fired = []
+    scheduler = Scheduler(
+        store, trigger=lambda schedule: None, poll_interval=0.05,
+        on_once_fired=lambda schedule: fired.append(schedule["name"]),
+    )
+
+    now = datetime.now(timezone.utc)
+    store.create_schedule(
+        kind="module", name="fake_once_fired", interval_seconds=None,
+        next_run_at=now.isoformat(), tier="automation", inputs={},
+        schedule_type="once",
+    )
+
+    scheduler.start()
+    time.sleep(0.3)
+    scheduler.stop()
+
+    assert fired == ["fake_once_fired"]
+    store.close()
+
+
+def test_scheduler_does_not_call_on_once_fired_when_the_once_schedule_errors(tmp_path):
+    store = StateStore(str(tmp_path / "once_fired_error.db"))
+    fired = []
+
+    def boom(schedule):
+        raise RuntimeError("nope")
+
+    scheduler = Scheduler(
+        store, trigger=boom, poll_interval=0.05,
+        on_once_fired=lambda schedule: fired.append(schedule["name"]),
+    )
+
+    now = datetime.now(timezone.utc)
+    store.create_schedule(
+        kind="module", name="fake_once_error", interval_seconds=None,
+        next_run_at=now.isoformat(), tier="automation", inputs={},
+        schedule_type="once",
+    )
+
+    scheduler.start()
+    time.sleep(0.3)
+    scheduler.stop()
+
+    assert fired == []
+    updated = store.list_schedules()[0]
+    assert "nope" in updated["last_status"]
+    assert updated["enabled"] is False  # still disabled after firing once, even on error
+    store.close()
+
+
+def test_scheduler_without_on_once_fired_never_raises(tmp_path):
+    """on_once_fired defaults to None -- every caller from before this
+    feature existed must keep working."""
+    store = StateStore(str(tmp_path / "once_no_hook.db"))
+    scheduler = Scheduler(store, trigger=lambda schedule: None, poll_interval=0.05)
+
+    now = datetime.now(timezone.utc)
+    store.create_schedule(
+        kind="module", name="fake_once_no_hook", interval_seconds=None,
+        next_run_at=now.isoformat(), tier="automation", inputs={},
+        schedule_type="once",
+    )
+
+    scheduler.start()
+    time.sleep(0.2)
+    scheduler.stop()
+
+    updated = store.list_schedules()[0]
+    assert updated["last_status"] == "triggered"
+    store.close()

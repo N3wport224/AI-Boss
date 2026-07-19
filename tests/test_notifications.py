@@ -239,7 +239,12 @@ def test_add_notification_is_a_no_op_when_its_kind_is_muted(tmp_path):
 
 def test_get_notification_preferences_defaults_to_all_unmuted():
     prefs = client.get("/api/notifications/preferences").json()
-    assert prefs == {"breaker_tripped": False, "schedule_failed": False, "resource_alert": False}
+    assert prefs == {
+        "breaker_tripped": False,
+        "schedule_failed": False,
+        "resource_alert": False,
+        "schedule_once_fired": False,
+    }
 
 
 def test_set_and_read_a_notification_preference_via_the_api():
@@ -334,3 +339,42 @@ def test_notifications_csv_export_respects_limit():
     assert res.status_code == 200
     lines = res.text.strip().splitlines()
     assert len(lines) - 1 == 2  # header + exactly 2 data rows
+
+
+# ---- Batch 17: notify when a one-time schedule successfully fires ----
+
+def test_scheduler_on_once_fired_hook_is_wired_to_the_apps_own_scheduler():
+    """webapp.main._scheduler is constructed with
+    on_once_fired=_notify_once_schedule_fired (not left at the Scheduler
+    default of None) -- the actual integration point this feature depends on."""
+    from webapp.main import _notify_once_schedule_fired, _scheduler
+
+    assert _scheduler.on_once_fired is _notify_once_schedule_fired
+
+
+def test_notify_once_schedule_fired_writes_a_notification_for_a_module_schedule():
+    from webapp.main import _notify_once_schedule_fired
+
+    before = store.unread_notification_count()
+    _notify_once_schedule_fired({"kind": "module", "tier": "automation", "name": "fetch_raw_metrics"})
+    after = store.unread_notification_count()
+    assert after == before + 1
+
+    latest = store.list_notifications(limit=1)[0]
+    assert latest["kind"] == "schedule_once_fired"
+    assert "fetch_raw_metrics" in latest["message"]
+
+
+def test_notify_once_schedule_fired_writes_a_notification_for_a_pipeline_schedule():
+    from webapp.main import _notify_once_schedule_fired
+
+    _notify_once_schedule_fired({"kind": "pipeline", "name": "My Saved Pipeline"})
+    latest = store.list_notifications(limit=1)[0]
+    assert latest["kind"] == "schedule_once_fired"
+    assert "My Saved Pipeline" in latest["message"]
+
+
+def test_schedule_once_fired_is_a_registered_notification_kind():
+    from webapp.main import NOTIFICATION_KINDS
+
+    assert "schedule_once_fired" in NOTIFICATION_KINDS

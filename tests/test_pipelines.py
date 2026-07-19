@@ -1249,6 +1249,47 @@ def test_deleted_pipelines_version_history_survives_and_can_be_restored():
     assert any(p["slug"] == "recoverable" for p in client.get("/api/pipelines").json())
 
 
+# ---- Batch 17: bulk-delete saved pipelines ----
+
+def test_bulk_delete_pipelines_removes_every_selected_one():
+    client.post("/api/pipelines", json={"name": "Bulk Del A", "steps": [{"tier": "automation", "name": "fetch_raw_metrics"}]})
+    client.post("/api/pipelines", json={"name": "Bulk Del B", "steps": [{"tier": "automation", "name": "fetch_raw_metrics"}]})
+    client.post("/api/pipelines", json={"name": "Bulk Del Keep", "steps": [{"tier": "automation", "name": "fetch_raw_metrics"}]})
+
+    res = client.post("/api/pipelines/bulk-delete", json={"slugs": ["bulk_del_a", "bulk_del_b"]})
+    assert res.status_code == 200
+    assert set(res.json()["deleted"]) == {"bulk_del_a", "bulk_del_b"}
+
+    remaining_slugs = {p["slug"] for p in client.get("/api/pipelines").json()}
+    assert "bulk_del_a" not in remaining_slugs
+    assert "bulk_del_b" not in remaining_slugs
+    assert "bulk_del_keep" in remaining_slugs
+
+
+def test_bulk_delete_pipelines_skips_unknown_slugs_without_failing():
+    client.post("/api/pipelines", json={"name": "Bulk Del Solo", "steps": [{"tier": "automation", "name": "fetch_raw_metrics"}]})
+
+    res = client.post("/api/pipelines/bulk-delete", json={"slugs": ["bulk_del_solo", "does_not_exist_at_all"]})
+    assert res.status_code == 200
+    assert res.json()["deleted"] == ["bulk_del_solo"]
+
+
+def test_bulk_delete_pipelines_is_a_no_op_on_an_empty_selection():
+    res = client.post("/api/pipelines/bulk-delete", json={"slugs": []})
+    assert res.status_code == 200
+    assert res.json()["deleted"] == []
+
+
+def test_bulk_delete_pipelines_also_clears_their_tags():
+    client.post("/api/pipelines", json={"name": "Bulk Del Tagged", "steps": [{"tier": "automation", "name": "fetch_raw_metrics"}]})
+    client.put("/api/pipelines/bulk_del_tagged/tags", json={"tags": ["important"]})
+
+    client.post("/api/pipelines/bulk-delete", json={"slugs": ["bulk_del_tagged"]})
+
+    tagged = client.get("/api/pipelines", params={"tag": "important"}).json()
+    assert not any(p["slug"] == "bulk_del_tagged" for p in tagged)
+
+
 # ---- Diff two saved pipelines ----
 
 def test_compare_two_pipelines_reports_differing_keys():

@@ -87,6 +87,16 @@ const savedPipelinesGrid = document.getElementById("saved-pipelines-grid");
 const pipelineTagFilterInput = document.getElementById("pipeline-tag-filter");
 const pipelineDeepSearchInput = document.getElementById("pipeline-deep-search");
 const pipelineDeepSearchResultsEl = document.getElementById("pipeline-deep-search-results");
+const pipelinesBulkDeleteBtn = document.getElementById("pipelines-bulk-delete-btn");
+
+const selectedPipelineSlugs = new Set();
+
+function updatePipelinesBulkDeleteBtn() {
+  pipelinesBulkDeleteBtn.disabled = selectedPipelineSlugs.size === 0;
+  pipelinesBulkDeleteBtn.textContent = selectedPipelineSlugs.size
+    ? `Delete selected (${selectedPipelineSlugs.size})`
+    : "Delete selected";
+}
 
 const pipelineTemplatesGrid = document.getElementById("pipeline-templates-grid");
 
@@ -297,6 +307,7 @@ const NOTIFICATION_KIND_LABELS = {
   breaker_tripped: "Circuit breaker trips",
   schedule_failed: "Scheduled run failures",
   resource_alert: "Resource usage alerts",
+  schedule_once_fired: "One-time schedule fired",
 };
 
 function renderNotificationsPanel() {
@@ -315,7 +326,13 @@ function renderNotificationsPanel() {
         .map(
           (n) => `
         <div class="notification-row ${n.read ? "" : "notification-unread"}">
-          <i class="dot dot-${n.kind === "breaker_tripped" || n.kind === "schedule_failed" ? "error" : "running"}"></i>
+          <i class="dot dot-${
+            n.kind === "breaker_tripped" || n.kind === "schedule_failed"
+              ? "error"
+              : n.kind === "schedule_once_fired"
+              ? "ready"
+              : "running"
+          }"></i>
           <div>
             <span class="notification-message">${escapeHtml(n.message)}</span>
             <span class="notification-time">${new Date(n.created_at).toLocaleString()}</span>
@@ -1192,6 +1209,16 @@ function renderFavoritesSection() {
     btn.addEventListener("click", () => runFavorite(btn.dataset.favRun));
   });
 }
+
+const favoritesClearAllBtn = document.getElementById("favorites-clear-all-btn");
+favoritesClearAllBtn.addEventListener("click", () => {
+  if (!favoriteKeys.size) return;
+  favoriteKeys.clear();
+  saveFavoriteKeys();
+  renderFavoritesSection();
+  renderRecentlyViewedSection();
+  showToast("Cleared all favorites.", "success");
+});
 
 function runFavorite(key) {
   if (key.startsWith("module::")) {
@@ -3003,9 +3030,11 @@ function renderSavedPipelines(pipelinesList) {
             </span>`
           )
           .join("");
+        const bulkChecked = selectedPipelineSlugs.has(p.slug) ? "checked" : "";
         return `
           <div class="card" id="pipeline-card__${p.slug}" data-search-text="${searchText}">
             <div class="card-head">
+              <input type="checkbox" class="pipeline-select-checkbox" data-slug="${p.slug}" ${bulkChecked} title="Select for bulk delete" />
               <h3 class="card-title">${p.name}</h3>
               ${favoriteButtonHtml(favKey)}
             </div>
@@ -3088,13 +3117,49 @@ function renderSavedPipelines(pipelinesList) {
       });
     });
     wireFavoriteToggles(savedPipelinesGrid);
+
+    const liveSlugs = new Set(pipelinesList.map((p) => p.slug));
+    [...selectedPipelineSlugs].forEach((slug) => {
+      if (!liveSlugs.has(slug)) selectedPipelineSlugs.delete(slug);
+    });
+    savedPipelinesGrid.querySelectorAll(".pipeline-select-checkbox").forEach((checkbox) => {
+      checkbox.addEventListener("change", () => {
+        if (checkbox.checked) selectedPipelineSlugs.add(checkbox.dataset.slug);
+        else selectedPipelineSlugs.delete(checkbox.dataset.slug);
+        updatePipelinesBulkDeleteBtn();
+      });
+    });
   }
 
+  updatePipelinesBulkDeleteBtn();
   populatePipelineCompareSelects(pipelinesList);
   applySearchFilter();
   renderFavoritesSection();
   renderRecentlyViewedSection();
 }
+
+pipelinesBulkDeleteBtn.addEventListener("click", async () => {
+  if (!selectedPipelineSlugs.size) return;
+  if (!confirm(`Delete ${selectedPipelineSlugs.size} selected pipeline(s)? This cannot be undone.`)) return;
+
+  try {
+    const res = await fetch("/api/pipelines/bulk-delete", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ slugs: [...selectedPipelineSlugs] }),
+    });
+    const body = await res.json();
+    if (!res.ok) {
+      showToast(body.detail || "Bulk delete failed.", "error");
+      return;
+    }
+    selectedPipelineSlugs.clear();
+    showToast(`Deleted ${body.deleted.length} pipeline(s).`, "success");
+    await loadSavedPipelines();
+  } catch (err) {
+    showToast(`Bulk delete failed: ${err}`, "error");
+  }
+});
 
 // ---- Pipeline comparison ----
 
@@ -4412,11 +4477,19 @@ async function loadSchedules() {
             <button class="btn btn-secondary btn-small" data-schedule-toggle="${s.id}" data-enabled="${s.enabled}">
               ${s.enabled ? "Pause" : "Resume"}
             </button>
+            <button class="btn btn-secondary btn-small" data-schedule-duplicate="${s.id}">Duplicate</button>
             <button class="btn btn-secondary btn-small" data-schedule-delete="${s.id}">Delete</button>
           </div>
         </div>`;
     })
     .join("");
+
+  schedulesListEl.querySelectorAll("[data-schedule-duplicate]").forEach((btn) => {
+    btn.addEventListener("click", () => {
+      const schedule = schedules.find((s) => String(s.id) === btn.dataset.scheduleDuplicate);
+      if (schedule) fillScheduleFormFrom(schedule);
+    });
+  });
 
   schedulesListEl.querySelectorAll("[data-schedule-toggle]").forEach((btn) => {
     btn.addEventListener("click", async () => {
@@ -4438,6 +4511,33 @@ async function loadSchedules() {
       showToast("Schedule deleted.", "success");
     });
   });
+}
+
+function fillScheduleFormFrom(schedule) {
+  scheduleFormEl.classList.remove("hidden");
+  scheduleKindEl.value = schedule.kind;
+  populateScheduleTargets();
+  scheduleTargetEl.value = schedule.kind === "module" ? `${schedule.tier}::${schedule.name}` : schedule.name;
+
+  scheduleFrequencyEl.value = schedule.schedule_type || "interval";
+  scheduleFrequencyEl.dispatchEvent(new Event("change"));
+
+  if (schedule.schedule_type === "daily") {
+    scheduleDailyTimeEl.value = schedule.daily_time;
+  } else if (schedule.schedule_type === "weekly") {
+    scheduleWeeklyTimeEl.value = schedule.daily_time;
+    scheduleDayOfWeekEl.value = String(schedule.day_of_week);
+  } else if (schedule.schedule_type === "once") {
+    // The original run_at has already passed by the time a fired schedule
+    // could be duplicated -- leave it blank so the user must pick a new
+    // future time rather than duplicating a create-time validation error.
+    scheduleRunAtEl.value = "";
+  } else {
+    scheduleIntervalEl.value = schedule.interval_seconds;
+  }
+
+  scheduleFormEl.scrollIntoView({ behavior: "smooth", block: "center" });
+  showToast("Schedule settings copied below — adjust and create.", "success");
 }
 
 scheduleAddToggleBtn.addEventListener("click", () => {

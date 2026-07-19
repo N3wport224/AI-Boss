@@ -1679,6 +1679,73 @@ only a JSON parse error or timeout falls back to an empty issue list.
      created notification's message inside it, and confirming the
      Recently Viewed strip appears and updates after both viewing an
      artifact and running a module.
+141. **Add notifying when a one-time schedule successfully fires**
+     (`Scheduler` gains an optional `on_once_fired(schedule)` callback,
+     alongside the existing `on_error`, called only when a `"once"`
+     schedule's trigger succeeds -- a recurring schedule's success is
+     unremarkable and already visible in the Schedules list, but a
+     one-time schedule is set up ahead of time and easy to forget about,
+     so its firing is the one case worth a dedicated notification. A new
+     `schedule_once_fired` notification kind, muteable like every other
+     kind, rendered with a success (green) dot rather than the generic
+     "running" one).
+142. **Add clearing all favorites at once** (a **Clear all** button in the
+     Favorites section heading empties `favoriteKeys` in a single action --
+     frontend-only, `localStorage`-backed, mirroring the per-item star
+     toggle but for everything at once; also refreshes the Recently Viewed
+     strip since a cleared favorite may still appear there under a
+     different lifecycle).
+143. **Add exporting the artifacts list to CSV** (`GET /api/artifacts.csv`
+     -- the same `csv.DictWriter` + `StreamingResponse` pattern as the
+     notifications/audit-log CSV exports, over
+     `filename, size_bytes, tags, modified_at`; tags are joined with `;`
+     since a CSV cell can't hold a list, and `modified_at` is rendered as
+     an ISO 8601 UTC string even though the JSON API exposes the raw Unix
+     timestamp). An **Export CSV** link sits next to the existing Purge
+     control in the artifacts row.
+144. **Add duplicating an existing schedule** (frontend-only -- a
+     **Duplicate** button per schedule row reopens the create-schedule
+     form pre-filled with that schedule's kind/target/frequency settings
+     via a new `fillScheduleFormFrom()` helper, for editing before saving
+     as a new schedule; no new backend endpoint needed since it reuses the
+     existing `POST /api/schedules`. A duplicated one-time schedule
+     deliberately leaves `run_at` blank rather than copying an
+     already-passed time forward, forcing the user to pick a new future
+     instant).
+145. **Add bulk-deleting saved pipelines** (`POST /api/pipelines/bulk-delete`
+     -- mirrors the existing bulk-delete-runs pattern: iterates the given
+     slugs, deletes each via the same `pipeline_store.delete_pipeline()`
+     used by the single-delete endpoint, skips an unknown slug rather than
+     failing the whole batch, and clears that pipeline's tags too. A
+     checkbox per saved-pipeline card plus a **Delete selected** button in
+     the filter row, confirmed with a native `confirm()` prompt before
+     sending the request. Originally scoped as a pipeline-level
+     description/notes field, but `PipelineDefinition.description` already
+     covers that end to end -- builder input, card display, save/load,
+     diff, and YAML export/import all already round-trip it, confirmed via
+     existing test coverage in `tests/test_pipelines.py` -- so this slot
+     was repurposed to a genuinely missing feature instead.
+146. **Add tests for all of Batch 17**: the scheduler firing
+     `on_once_fired` only on a successful `"once"` trigger (never on an
+     error, and never when the hook is left at its `None` default); the
+     app's own scheduler being wired with `on_once_fired`; a
+     `schedule_once_fired` notification's kind and message for both a
+     module and a pipeline schedule; `schedule_once_fired` appearing in
+     both `NOTIFICATION_KINDS` and the notification-preferences default
+     response; artifacts.csv containing an uploaded file's tags and being
+     valid-but-empty with nothing ingested; bulk-deleting saved pipelines
+     removing every selected slug while leaving others untouched, skipping
+     an unknown slug, a no-op on an empty selection, and clearing tags
+     alongside the deleted pipeline. 459 tests total, stable across
+     repeated clean full-suite runs. Live-verified end to end with
+     Playwright against a freshly started server: creating a near-future
+     one-time schedule and polling until its success notification
+     appears, favoriting something and confirming **Clear all** empties
+     and hides the Favorites section, downloading `artifacts.csv` and
+     confirming the **Export CSV** link is present, clicking **Duplicate**
+     on a schedule and confirming the form reopens pre-filled, and
+     checkbox-selecting two saved pipelines and confirming **Delete
+     selected** removes both.
 
 ## 9. Roadmap
 

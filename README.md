@@ -723,6 +723,23 @@ A few things live in the header/subheader on every page load:
   entirely in `localStorage` — no server round trip, and it hides itself
   automatically once empty.
 
+## Schedule fire notifications, favorites clearing, artifact CSV export, schedule duplication, and pipeline bulk-delete
+
+- **Notify when a one-time schedule fires** — a `schedule_once_fired`
+  alert appears in the bell icon once a "once" schedule's run actually
+  succeeds, so a set-and-forget schedule doesn't require checking the
+  Schedules list manually to know it ran.
+- **Clear all favorites** — a **Clear all** button in the Favorites
+  section heading empties every favorite in one action.
+- **Export the artifacts list to CSV** — an **Export CSV** link next to
+  Purge downloads every ingested file's name, size, tags, and modified
+  time.
+- **Duplicate a schedule** — a **Duplicate** button per schedule reopens
+  the create-schedule form pre-filled with that schedule's settings, for
+  editing before saving as a new one.
+- **Bulk-delete saved pipelines** — checkbox-select multiple saved
+  pipelines and remove them all at once with **Delete selected**.
+
 ## Tech stack
 
 - **Language:** Python 3.11+ — first-class async/sync support and native SDKs
