@@ -2328,6 +2328,25 @@ def bulk_delete_notifications(payload: BulkNotificationIds):
     return {"deleted": store.delete_notifications(payload.notification_ids)}
 
 
+@app.post("/api/notifications/bulk-export")
+def bulk_export_notifications(payload: BulkNotificationIds):
+    """Download a user-picked set of notifications as a CSV -- the
+    finer-grained counterpart to the full-list GET /api/notifications.csv
+    export, for a checkbox multi-select in the Alerts list."""
+    wanted = set(payload.notification_ids)
+    buffer = io.StringIO()
+    writer = csv.DictWriter(buffer, fieldnames=["id", "kind", "message", "created_at", "read"])
+    writer.writeheader()
+    for notification in store.list_notifications(limit=100000):
+        if notification["id"] in wanted:
+            writer.writerow(notification)
+    return StreamingResponse(
+        iter([buffer.getvalue()]),
+        media_type="text/csv",
+        headers={"Content-Disposition": "attachment; filename=notifications_selected.csv"},
+    )
+
+
 NOTIFICATION_KINDS = ("breaker_tripped", "schedule_failed", "resource_alert", "schedule_once_fired")
 
 
@@ -2634,6 +2653,24 @@ def artifact_tags_summary():
     return summary
 
 
+@app.get("/api/artifacts/tags-summary.csv")
+def artifact_tags_summary_csv():
+    """Same tag/count directory as GET /api/artifacts/tags-summary, as a
+    downloadable CSV -- mirrors every other CSV export in this app. A
+    literal path, not a suffix on a dynamic segment, so there's no
+    route-ordering conflict with any /api/artifacts/{name}-style route."""
+    buffer = io.StringIO()
+    writer = csv.DictWriter(buffer, fieldnames=["tag", "count"])
+    writer.writeheader()
+    for entry in artifact_tags_summary():
+        writer.writerow(entry)
+    return StreamingResponse(
+        iter([buffer.getvalue()]),
+        media_type="text/csv",
+        headers={"Content-Disposition": "attachment; filename=artifact_tags.csv"},
+    )
+
+
 @app.post("/api/artifacts/purge")
 def purge_artifacts(older_than_hours: float = 24):
     removed = ingestion.purge_old_artifacts(older_than_hours)
@@ -2692,6 +2729,36 @@ def bulk_download_artifacts(payload: BulkDownloadArtifacts):
         buffer,
         media_type="application/zip",
         headers={"Content-Disposition": "attachment; filename=artifacts_export.zip"},
+    )
+
+
+@app.post("/api/artifacts/bulk-export-csv")
+def bulk_export_artifacts_csv(payload: BulkDownloadArtifacts):
+    """A user-picked set of artifacts' metadata (not their content) as a
+    downloadable CSV -- the finer-grained counterpart to the full-list
+    GET /api/artifacts.csv export, complementing bulk-download's zip of
+    file *content* with just the rows for a checkbox multi-select. An
+    unknown filename is skipped rather than failing the whole batch."""
+    wanted = {Path(name).name for name in payload.filenames}
+    tags_by_file = store.all_artifact_tags()
+
+    buffer = io.StringIO()
+    writer = csv.DictWriter(buffer, fieldnames=["filename", "size_bytes", "tags", "modified_at"])
+    writer.writeheader()
+    for f in ingestion.list_artifacts():
+        if f["name"] not in wanted:
+            continue
+        writer.writerow({
+            "filename": f["name"],
+            "size_bytes": f["size_bytes"],
+            "tags": ";".join(tags_by_file.get(f["name"], [])),
+            "modified_at": datetime.fromtimestamp(f["modified_at"], tz=timezone.utc).isoformat(),
+        })
+
+    return StreamingResponse(
+        iter([buffer.getvalue()]),
+        media_type="text/csv",
+        headers={"Content-Disposition": "attachment; filename=artifacts_selected.csv"},
     )
 
 

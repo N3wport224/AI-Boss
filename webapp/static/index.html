@@ -147,6 +147,7 @@
             <span>hours</span>
             <button id="purge-btn" class="btn btn-secondary btn-small" type="button">Purge</button>
             <a class="btn btn-secondary btn-small" href="/api/artifacts.csv" download>Export CSV</a>
+            <a class="btn btn-secondary btn-small" href="/api/artifacts/tags-summary.csv" download title="Every tag in use and how many files carry it, as a CSV">Export tags CSV</a>
           </div>
         </div>
         <div class="artifacts-bulk-tag-row">
@@ -156,6 +157,7 @@
           <button id="artifact-compare-btn" class="btn btn-secondary btn-small" type="button" disabled title="Select exactly two table-shaped files to compare their schemas">Compare schemas</button>
           <button id="artifact-bulk-favorite-btn" class="btn btn-secondary btn-small" type="button" disabled>★ Favorite selected</button>
           <button id="artifact-bulk-download-btn" class="btn btn-secondary btn-small" type="button" disabled title="Download every selected artifact as a single zip">⬇ Download selected</button>
+          <button id="artifact-bulk-export-csv-btn" class="btn btn-secondary btn-small" type="button" disabled title="Download the metadata (not the content) of every selected artifact as a CSV">Export selected CSV</button>
           <button id="artifact-bulk-delete-btn" class="btn btn-danger btn-small" type="button" disabled>Delete selected</button>
         </div>
         <div id="artifact-tag-directory" class="tag-directory hidden"></div>

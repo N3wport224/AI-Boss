@@ -2458,6 +2458,59 @@ only a JSON parse error or timeout falls back to an empty issue list.
      for `automation,http_request` were both present; clicking **Export
      JSON** on a saved pipeline card downloaded a JSON file whose `slug`
      and `name` matched.
+207. **Add bulk exporting selected notifications to CSV**
+     (`POST /api/notifications/bulk-export` -- takes a `notification_ids`
+     list, filters `store.list_notifications()` down to just those, and
+     streams the matches back as a CSV with the same
+     `id,kind,message,created_at,read` header as the full-list
+     `GET /api/notifications.csv` export. An **Export selected CSV**
+     button sits next to the existing **Mark selected read**/**Delete
+     selected** bulk buttons in the Alerts panel, using the same
+     fetch-as-blob-then-click-a-throwaway-`<a>` download technique as
+     every other POST-driven export in this app).
+208. **Add sorting the Alerts panel's notification list** (frontend-only --
+     a **Sort: newest first / Sort: kind** dropdown reorders a shallow
+     copy of `persistentNotifications` (`sortedNotifications()`) before
+     `renderNotificationRows()` renders it, mirroring the Batch 28
+     schedule-sort dropdown pattern. Newest-first was already the de
+     facto order the API returned rows in; this makes that explicit and
+     adds an alternate).
+209. **Add exporting the artifact tag directory to CSV**
+     (`GET /api/artifacts/tags-summary.csv` -- the same tag/count pairs
+     `GET /api/artifacts/tags-summary` already returns, as a downloadable
+     `tag,count` CSV, mirroring every other CSV export in the app. An
+     **Export tags CSV** link sits next to the existing **Export CSV**
+     link above the Artifacts list).
+210. **Add bulk exporting selected artifacts' metadata to CSV**
+     (`POST /api/artifacts/bulk-export-csv` -- takes a `filenames` list
+     and streams back just those rows in the same
+     `filename,size_bytes,tags,modified_at` shape as the full-list
+     `GET /api/artifacts.csv` export, complementing the existing
+     bulk-download's zip of file *content* with a metadata-only
+     counterpart. An **Export selected CSV** button sits next to the
+     existing **⬇ Download selected** button in the artifact bulk-action
+     row).
+211. **Add tests for all of Batch 29**: bulk-exporting notifications
+     returns only the selected ids' rows; bulk-exporting artifact metadata
+     returns only the selected filenames' rows (and is header-only for an
+     empty selection); the tag-directory CSV export's header and rows
+     match the JSON summary endpoint. One test-only fix along the way:
+     a newly added tags-summary-CSV test used trivial CSV byte content
+     (`"x,y\n1,2\n"`) that collided with the app's own duplicate-content
+     ingestion blocker against some other test's identical bytes
+     elsewhere in the full suite, silently skipping the file write and
+     causing a `StopIteration` looking the artifact back up by name --
+     fixed by using distinctive numbers, the same convention every
+     neighboring test in that file already followed. 564 tests total,
+     stable across two repeated clean full-suite runs. Live-verified end
+     to end with Playwright against a freshly started server: switching
+     the Alerts panel's sort dropdown reordered notifications; checkbox-
+     selecting two notifications and clicking **Export selected CSV**
+     downloaded a CSV containing exactly those two messages; tagging an
+     uploaded artifact and clicking **Export tags CSV** downloaded a CSV
+     whose header and a row for that tag were both present; checkbox-
+     selecting that same artifact and clicking its own **Export selected
+     CSV** button downloaded a CSV row with its filename and tag.
 
 ## 9. Roadmap
 

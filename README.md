@@ -912,6 +912,18 @@ A few things live in the header/subheader on every page load:
   pipeline card downloads its definition in JSON, alongside the existing
   YAML export.
 
+## Notification/artifact bulk export, notification sort, and a tag CSV export
+
+- **Bulk export selected notifications to CSV** — checkbox-select multiple
+  alerts and download just those as a CSV.
+- **Sort notifications** — a Newest first / Kind dropdown in the Alerts
+  panel reorders the list.
+- **Export artifact tag directory to CSV** — an **Export tags CSV** link
+  above the Artifacts list downloads every tag and its usage count.
+- **Bulk export selected artifacts' metadata to CSV** — checkbox-select
+  multiple artifacts and download just their metadata (name/size/tags) as
+  a CSV, distinct from the existing bulk zip-of-content download.
+
 ## Tech stack
 
 - **Language:** Python 3.11+ — first-class async/sync support and native SDKs

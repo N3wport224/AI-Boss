@@ -480,3 +480,24 @@ def test_bulk_delete_notifications_is_a_no_op_on_an_empty_selection():
     res = client.post("/api/notifications/bulk-delete", json={"notification_ids": []})
     assert res.status_code == 200
     assert res.json()["deleted"] == 0
+
+
+def test_bulk_export_notifications_returns_only_selected_as_csv():
+    a = client.post("/api/notifications", json={"kind": "info", "message": "bulk export a"}).json()
+    b = client.post("/api/notifications", json={"kind": "info", "message": "bulk export b"}).json()
+    other = client.post("/api/notifications", json={"kind": "info", "message": "bulk export not selected"}).json()
+
+    res = client.post("/api/notifications/bulk-export", json={"notification_ids": [a["id"], b["id"]]})
+    assert res.status_code == 200
+    assert res.headers["content-type"].startswith("text/csv")
+    assert "attachment; filename=notifications_selected.csv" in res.headers["content-disposition"]
+
+    lines = res.text.strip().splitlines()
+    assert lines[0] == "id,kind,message,created_at,read"
+    body_ids = {int(line.split(",")[0]) for line in lines[1:]}
+    assert body_ids == {a["id"], b["id"]}
+    assert other["id"] not in body_ids
+
+    client.post(
+        "/api/notifications/bulk-delete", json={"notification_ids": [a["id"], b["id"], other["id"]]}
+    )

@@ -412,6 +412,7 @@ applyDensity(localStorage.getItem(DENSITY_STORAGE_KEY) || "comfortable");
 let persistentUnreadCount = 0;
 let persistentNotifications = [];
 const selectedNotificationIds = new Set();
+let notificationSortMode = "newest";
 
 function renderNotificationRows(notifications, emptyMessage) {
   if (!notifications.length) return `<div class="dropdown-empty">${emptyMessage}</div>`;
@@ -439,8 +440,20 @@ function renderNotificationRows(notifications, emptyMessage) {
 function updateNotificationBulkBtns() {
   const markReadBtn = document.getElementById("notifications-bulk-mark-read-btn");
   const deleteBtn = document.getElementById("notifications-bulk-delete-selected-btn");
+  const exportBtn = document.getElementById("notifications-bulk-export-btn");
   if (markReadBtn) markReadBtn.disabled = selectedNotificationIds.size === 0;
   if (deleteBtn) deleteBtn.disabled = selectedNotificationIds.size === 0;
+  if (exportBtn) exportBtn.disabled = selectedNotificationIds.size === 0;
+}
+
+function sortedNotifications() {
+  const copy = [...persistentNotifications];
+  if (notificationSortMode === "kind") {
+    copy.sort((a, b) => a.kind.localeCompare(b.kind));
+  } else {
+    copy.sort((a, b) => new Date(b.created_at) - new Date(a.created_at));
+  }
+  return copy;
 }
 
 function wireNotificationCheckboxes(container) {
@@ -501,6 +514,39 @@ function wireNotificationBulkControls(container) {
     persistentNotifications = await res.json();
     renderNotificationsPanel();
   });
+
+  const exportBtn = container.querySelector("#notifications-bulk-export-btn");
+  exportBtn?.addEventListener("click", async (e) => {
+    e.stopPropagation();
+    if (!selectedNotificationIds.size) return;
+    try {
+      const res = await fetch("/api/notifications/bulk-export", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ notification_ids: [...selectedNotificationIds] }),
+      });
+      if (!res.ok) throw new Error(`HTTP ${res.status}`);
+      const blob = await res.blob();
+      const url = URL.createObjectURL(blob);
+      const link = document.createElement("a");
+      link.href = url;
+      link.download = "notifications_selected.csv";
+      document.body.appendChild(link);
+      link.click();
+      link.remove();
+      URL.revokeObjectURL(url);
+      showToast(`Exported ${selectedNotificationIds.size} notification(s) as CSV.`, "success");
+    } catch (err) {
+      showToast(`Export failed: ${err}`, "error");
+    }
+  });
+
+  const sortSelect = container.querySelector("#notifications-sort");
+  sortSelect?.addEventListener("click", (e) => e.stopPropagation());
+  sortSelect?.addEventListener("change", () => {
+    notificationSortMode = sortSelect.value;
+    renderNotificationsPanel();
+  });
 }
 
 function updateNotifBadge() {
@@ -543,7 +589,7 @@ function renderNotificationsPanel() {
     )
     .join("");
 
-  const alertsHtml = renderNotificationRows(persistentNotifications, "No alerts yet.");
+  const alertsHtml = renderNotificationRows(sortedNotifications(), "No alerts yet.");
 
   const activityHtml = toastHistory.length
     ? toastHistory
@@ -572,11 +618,16 @@ function renderNotificationsPanel() {
     </div>
     <input type="search" id="notifications-search-input" class="artifact-search-input" placeholder="Search alerts…" />
     <div class="notification-section-actions" style="padding: 4px 0;">
+      <select id="notifications-sort">
+        <option value="newest" ${notificationSortMode === "newest" ? "selected" : ""}>Sort: newest first</option>
+        <option value="kind" ${notificationSortMode === "kind" ? "selected" : ""}>Sort: kind</option>
+      </select>
       <label class="schedule-select-all-label">
         <input type="checkbox" id="notifications-select-all" ${persistentNotifications.length && persistentNotifications.every((n) => selectedNotificationIds.has(n.id)) ? "checked" : ""} />
         Select all
       </label>
       <button class="btn btn-secondary btn-small" id="notifications-bulk-mark-read-btn" type="button" disabled>Mark selected read</button>
+      <button class="btn btn-secondary btn-small" id="notifications-bulk-export-btn" type="button" disabled>Export selected CSV</button>
       <button class="btn btn-secondary btn-small" id="notifications-bulk-delete-selected-btn" type="button" disabled>Delete selected</button>
     </div>
     <div id="notifications-alerts-list">${alertsHtml}</div>
@@ -4363,6 +4414,7 @@ const artifactCompareBtn = document.getElementById("artifact-compare-btn");
 const artifactCompareResultEl = document.getElementById("artifact-compare-result");
 const artifactBulkFavoriteBtn = document.getElementById("artifact-bulk-favorite-btn");
 const artifactBulkDownloadBtn = document.getElementById("artifact-bulk-download-btn");
+const artifactBulkExportCsvBtn = document.getElementById("artifact-bulk-export-csv-btn");
 const artifactBulkDeleteBtn = document.getElementById("artifact-bulk-delete-btn");
 
 const selectedArtifactNames = new Set();
@@ -4404,6 +4456,10 @@ function updateArtifactBulkTagBtn() {
   artifactBulkDeleteBtn.textContent = selectedArtifactNames.size
     ? `Delete selected (${selectedArtifactNames.size})`
     : "Delete selected";
+  artifactBulkExportCsvBtn.disabled = selectedArtifactNames.size === 0;
+  artifactBulkExportCsvBtn.textContent = selectedArtifactNames.size
+    ? `Export selected CSV (${selectedArtifactNames.size})`
+    : "Export selected CSV";
 }
 
 async function loadArtifactTagDirectory() {
@@ -4969,6 +5025,30 @@ artifactBulkDownloadBtn.addEventListener("click", async () => {
     showToast(`Downloaded ${selectedArtifactNames.size} artifact(s) as a zip.`, "success");
   } catch (err) {
     showToast(`Bulk download failed: ${err}`, "error");
+  }
+});
+
+artifactBulkExportCsvBtn.addEventListener("click", async () => {
+  if (!selectedArtifactNames.size) return;
+  try {
+    const res = await fetch("/api/artifacts/bulk-export-csv", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ filenames: [...selectedArtifactNames] }),
+    });
+    if (!res.ok) throw new Error(`HTTP ${res.status}`);
+    const blob = await res.blob();
+    const url = URL.createObjectURL(blob);
+    const link = document.createElement("a");
+    link.href = url;
+    link.download = "artifacts_selected.csv";
+    document.body.appendChild(link);
+    link.click();
+    link.remove();
+    URL.revokeObjectURL(url);
+    showToast(`Exported ${selectedArtifactNames.size} artifact(s) as CSV.`, "success");
+  } catch (err) {
+    showToast(`Export failed: ${err}`, "error");
   }
 });
 

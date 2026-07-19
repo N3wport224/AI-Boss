@@ -534,6 +534,21 @@ def test_tags_summary_counts_tagged_artifacts():
     assert by_tag["q1"] == 1
 
 
+def test_tags_summary_csv_export_has_a_header_and_matches_the_json_summary():
+    client.post("/api/ingest/csv", files={"file": ("tagdir_csv_a.csv", b"x,y\n981,982\n", "text/csv")})
+    a_name = next(f["name"] for f in client.get("/api/artifacts").json() if f["name"].endswith("tagdir_csv_a.csv"))
+    client.put(f"/api/artifacts/{a_name}/tags", json={"tags": ["csv_export_marker"]})
+
+    res = client.get("/api/artifacts/tags-summary.csv")
+    assert res.status_code == 200
+    assert res.headers["content-type"].startswith("text/csv")
+    assert "attachment; filename=artifact_tags.csv" in res.headers["content-disposition"]
+
+    lines = res.text.strip().splitlines()
+    assert lines[0] == "tag,count"
+    assert any(line.startswith("csv_export_marker,") for line in lines[1:])
+
+
 def test_tags_summary_is_sorted_by_count_descending():
     client.post("/api/ingest/csv", files={"file": ("tagdir_c.csv", b"x,y\n965,966\n", "text/csv")})
     client.post("/api/ingest/csv", files={"file": ("tagdir_d.csv", b"x,y\n967,968\n", "text/csv")})
@@ -888,3 +903,32 @@ def test_bulk_download_artifacts_404s_when_nothing_selected_exists():
 def test_bulk_download_artifacts_404s_on_an_empty_selection():
     res = client.post("/api/artifacts/bulk-download", json={"filenames": []})
     assert res.status_code == 404
+
+
+def test_bulk_export_artifacts_csv_returns_only_selected_metadata():
+    client.post("/api/ingest/csv", files={"file": ("bulkexp_a.csv", b"x,y\n9301,9302\n", "text/csv")})
+    client.post("/api/ingest/csv", files={"file": ("bulkexp_b.csv", b"x,y\n9303,9304\n", "text/csv")})
+    client.post("/api/ingest/csv", files={"file": ("bulkexp_c.csv", b"x,y\n9305,9306\n", "text/csv")})
+    files = client.get("/api/artifacts").json()
+    a_name = next(f["name"] for f in files if f["name"].endswith("bulkexp_a.csv"))
+    b_name = next(f["name"] for f in files if f["name"].endswith("bulkexp_b.csv"))
+    c_name = next(f["name"] for f in files if f["name"].endswith("bulkexp_c.csv"))
+    client.put(f"/api/artifacts/{a_name}/tags", json={"tags": ["bulk_export_marker"]})
+
+    res = client.post("/api/artifacts/bulk-export-csv", json={"filenames": [a_name, b_name, "does-not-exist.csv"]})
+    assert res.status_code == 200
+    assert res.headers["content-type"].startswith("text/csv")
+    assert "attachment; filename=artifacts_selected.csv" in res.headers["content-disposition"]
+
+    lines = res.text.strip().splitlines()
+    assert lines[0] == "filename,size_bytes,tags,modified_at"
+    body = "\n".join(lines[1:])
+    assert a_name in body and "bulk_export_marker" in body
+    assert b_name in body
+    assert c_name not in body
+
+
+def test_bulk_export_artifacts_csv_is_header_only_on_an_empty_selection():
+    res = client.post("/api/artifacts/bulk-export-csv", json={"filenames": []})
+    assert res.status_code == 200
+    assert res.text.strip().splitlines() == ["filename,size_bytes,tags,modified_at"]
