@@ -308,6 +308,27 @@ def test_bulk_set_schedules_enabled_skips_unknown_ids():
     assert res.json()["updated"] == [id_a]
 
 
+def test_bulk_clear_schedule_labels_blanks_out_selected_and_skips_unknown_ids():
+    id_a = _create_test_schedule()
+    id_b = _create_test_schedule()
+    id_keep = _create_test_schedule()
+
+    client.patch(f"/api/schedules/{id_a}", json={"label": "Nightly A"})
+    client.patch(f"/api/schedules/{id_b}", json={"label": "Nightly B"})
+    client.patch(f"/api/schedules/{id_keep}", json={"label": "Keep me"})
+
+    res = client.post("/api/schedules/bulk-clear-label", json={"schedule_ids": [id_a, id_b, 9999999]})
+    assert res.status_code == 200
+    assert set(res.json()["updated"]) == {id_a, id_b}
+
+    listed = {s["id"]: s for s in client.get("/api/schedules").json()}
+    assert listed[id_a]["label"] == ""
+    assert listed[id_b]["label"] == ""
+    assert listed[id_keep]["label"] == "Keep me"
+
+    client.post("/api/schedules/bulk-delete", json={"schedule_ids": [id_a, id_b, id_keep]})
+
+
 def test_bulk_delete_schedules_removes_every_selected_one():
     id_a = _create_test_schedule()
     id_b = _create_test_schedule()

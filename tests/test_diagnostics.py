@@ -97,6 +97,46 @@ def test_memory_csv_export_is_empty_but_valid_with_no_entries():
     assert lines == ["key,value,updated_at"]
 
 
+# ---- Batch 27: export agent memory to JSON ----
+
+
+def test_memory_json_export_round_trips_through_import_and_redacts_secrets():
+    from webapp.main import store
+
+    store.clear_memory()
+    store.set_memory("batch27_marker", "plain value")
+    store.set_memory("batch27_secret_token", "sk-should-be-hidden")
+
+    res = client.get("/api/memory.json")
+    assert res.status_code == 200
+    assert res.headers["content-type"].startswith("application/json")
+    assert "attachment; filename=memory.json" in res.headers["content-disposition"]
+
+    body = res.json()
+    assert body["batch27_marker"] == "plain value"
+    assert body["batch27_secret_token"] != "sk-should-be-hidden"
+    assert "REDACTED" in body["batch27_secret_token"]
+
+    store.clear_memory()
+    import_res = client.post(
+        "/api/memory/import",
+        files={"file": ("memory.json", json.dumps(body).encode(), "application/json")},
+    )
+    assert import_res.status_code == 200
+    assert set(import_res.json()["imported"]) == {"batch27_marker", "batch27_secret_token"}
+
+    store.clear_memory()
+
+
+def test_memory_json_export_is_an_empty_object_with_no_entries():
+    from webapp.main import store
+
+    store.clear_memory()
+    res = client.get("/api/memory.json")
+    assert res.status_code == 200
+    assert res.json() == {}
+
+
 # ---- Batch 20: search across agent memory ----
 
 def test_import_memory_upserts_every_key_from_the_json_file():

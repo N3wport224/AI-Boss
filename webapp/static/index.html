@@ -138,7 +138,7 @@
         <div id="ingestion-result" class="log-tabs-wrap hidden"></div>
 
         <div class="artifacts-row">
-          <h4>Artifacts</h4>
+          <h4>Artifacts <span id="artifacts-stats-summary" class="artifacts-stats-summary"></span></h4>
           <div class="artifacts-controls">
             <input type="search" id="artifact-search" placeholder="Search ingested content…" class="artifact-search-input" />
             <input type="text" id="artifact-tag-filter" placeholder="Filter by tag…" class="artifact-search-input" />
@@ -323,6 +323,8 @@
         </label>
         <button id="schedules-bulk-pause-btn" class="btn btn-secondary btn-small" type="button" disabled>Pause selected</button>
         <button id="schedules-bulk-resume-btn" class="btn btn-secondary btn-small" type="button" disabled>Resume selected</button>
+        <button id="schedules-bulk-favorite-btn" class="btn btn-secondary btn-small" type="button" disabled>★ Favorite selected</button>
+        <button id="schedules-bulk-clear-label-btn" class="btn btn-secondary btn-small" type="button" disabled>Clear labels</button>
         <button id="schedules-bulk-delete-btn" class="btn btn-danger btn-small" type="button" disabled>Delete selected</button>
       </div>
       <div id="schedules-list" class="runs-empty">No schedules yet — recurring runs will appear here.</div>
@@ -395,6 +397,7 @@
           <label class="btn btn-secondary btn-small" for="memory-import-input">Import…</label>
           <input type="file" id="memory-import-input" accept=".json" hidden />
           <a class="btn btn-secondary btn-small" href="/api/memory.csv" download>Export CSV</a>
+          <a class="btn btn-secondary btn-small" href="/api/memory.json" download>Export JSON</a>
           <button id="memory-clear-btn" class="btn btn-secondary btn-small" type="button">Clear all</button>
           <button class="collapse-toggle" type="button" data-collapse-key="memory">▾</button>
         </div>

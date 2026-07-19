@@ -221,6 +221,8 @@ const schedulerPauseToggleBtn = document.getElementById("scheduler-pause-toggle"
 const schedulerPausedBannerEl = document.getElementById("scheduler-paused-banner");
 const schedulesBulkPauseBtn = document.getElementById("schedules-bulk-pause-btn");
 const schedulesBulkResumeBtn = document.getElementById("schedules-bulk-resume-btn");
+const schedulesBulkFavoriteBtn = document.getElementById("schedules-bulk-favorite-btn");
+const schedulesBulkClearLabelBtn = document.getElementById("schedules-bulk-clear-label-btn");
 const schedulesBulkDeleteBtn = document.getElementById("schedules-bulk-delete-btn");
 const schedulesSelectAllEl = document.getElementById("schedules-select-all");
 const scheduleFilterInput = document.getElementById("schedule-filter");
@@ -233,10 +235,14 @@ function updateSchedulesBulkButtons() {
   const disabled = selectedScheduleIds.size === 0;
   schedulesBulkPauseBtn.disabled = disabled;
   schedulesBulkResumeBtn.disabled = disabled;
+  schedulesBulkFavoriteBtn.disabled = disabled;
+  schedulesBulkClearLabelBtn.disabled = disabled;
   schedulesBulkDeleteBtn.disabled = disabled;
   const suffix = selectedScheduleIds.size ? ` (${selectedScheduleIds.size})` : "";
   schedulesBulkPauseBtn.textContent = `Pause selected${suffix}`;
   schedulesBulkResumeBtn.textContent = `Resume selected${suffix}`;
+  schedulesBulkFavoriteBtn.textContent = `★ Favorite selected${suffix}`;
+  schedulesBulkClearLabelBtn.textContent = `Clear labels${suffix}`;
   schedulesBulkDeleteBtn.textContent = `Delete selected${suffix}`;
 }
 
@@ -4337,6 +4343,7 @@ const dropzone = document.getElementById("dropzone");
 const fileInput = document.getElementById("file-input");
 const ingestionResultEl = document.getElementById("ingestion-result");
 const artifactsListEl = document.getElementById("artifacts-list");
+const artifactsStatsSummaryEl = document.getElementById("artifacts-stats-summary");
 const purgeHoursInput = document.getElementById("purge-hours");
 const purgeBtn = document.getElementById("purge-btn");
 const artifactSearchInput = document.getElementById("artifact-search");
@@ -4455,6 +4462,11 @@ async function loadArtifacts() {
   [...selectedArtifactNames].forEach((name) => {
     if (!liveNames.has(name)) selectedArtifactNames.delete(name);
   });
+
+  const totalBytes = files.reduce((sum, f) => sum + (f.size_bytes || 0), 0);
+  artifactsStatsSummaryEl.textContent = files.length
+    ? `(${files.length} file${files.length === 1 ? "" : "s"}, ${formatBytes(totalBytes)})`
+    : "";
 
   if (!files.length) {
     artifactsListEl.innerHTML = `<div class="runs-empty">${
@@ -5348,6 +5360,25 @@ async function bulkSetSelectedSchedulesEnabled(enabled) {
 
 schedulesBulkPauseBtn.addEventListener("click", () => bulkSetSelectedSchedulesEnabled(false));
 schedulesBulkResumeBtn.addEventListener("click", () => bulkSetSelectedSchedulesEnabled(true));
+
+schedulesBulkFavoriteBtn.addEventListener("click", () => {
+  if (!selectedScheduleIds.size) return;
+  selectedScheduleIds.forEach((id) => favoriteKeys.add(`schedule::${id}`));
+  saveFavoriteKeys();
+  renderFavoritesSection();
+  showToast(`Favorited ${selectedScheduleIds.size} schedule(s).`, "success");
+});
+
+schedulesBulkClearLabelBtn.addEventListener("click", async () => {
+  if (!selectedScheduleIds.size) return;
+  await fetch("/api/schedules/bulk-clear-label", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ schedule_ids: [...selectedScheduleIds] }),
+  });
+  showToast(`Cleared label on ${selectedScheduleIds.size} schedule(s).`, "success");
+  await loadSchedules();
+});
 
 schedulesSelectAllEl.addEventListener("change", () => {
   const checkboxes = schedulesListEl.querySelectorAll(".schedule-select-checkbox");

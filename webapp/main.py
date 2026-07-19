@@ -1727,6 +1727,19 @@ def bulk_set_schedules_enabled(payload: BulkScheduleSetEnabled):
     return {"updated": updated, "enabled": payload.enabled}
 
 
+@app.post("/api/schedules/bulk-clear-label")
+def bulk_clear_schedule_labels(payload: BulkScheduleIds):
+    """Blank out the label on a user-picked set of schedules at once,
+    mirroring the existing bulk-remove-tag pattern for artifacts/pipelines.
+    An unknown id is skipped rather than failing the whole batch."""
+    updated = []
+    for schedule_id in payload.schedule_ids:
+        schedule = store.set_schedule_label(schedule_id, "")
+        if schedule is not None:
+            updated.append(schedule_id)
+    return {"updated": updated}
+
+
 @app.get("/api/scheduler/status")
 def scheduler_status():
     return {"paused": _scheduler.paused}
@@ -2343,6 +2356,23 @@ def memory_csv():
         iter([buffer.getvalue()]),
         media_type="text/csv",
         headers={"Content-Disposition": "attachment; filename=memory.csv"},
+    )
+
+
+@app.get("/api/memory.json")
+def memory_json():
+    """The persistent cross-run memory store as a downloadable JSON file of
+    `{key: value}` pairs -- shaped to be re-uploaded straight back through
+    POST /api/memory/import, unlike the CSV export (whose per-row
+    key/value/updated_at shape isn't importable as-is). Goes through the
+    same redact_secrets() pass as GET /api/memory and the CSV export."""
+    entries = store.all_memory()
+    redacted = redact_secrets({entry["key"]: entry["value"] for entry in entries})
+    buffer = json.dumps(redacted, indent=2)
+    return StreamingResponse(
+        iter([buffer]),
+        media_type="application/json",
+        headers={"Content-Disposition": "attachment; filename=memory.json"},
     )
 
 

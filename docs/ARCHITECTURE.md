@@ -2365,6 +2365,48 @@ only a JSON parse error or timeout falls back to an empty issue list.
      **Failed**/**Completed**/**All** chips, showed only the
      matching-status rows each time and the original row count again
      under **All**.
+197. **Add bulk favoriting selected schedules** (frontend-only -- a
+     **★ Favorite selected** button next to the existing schedule bulk
+     pause/resume/delete actions adds every checked schedule's
+     `schedule::{id}` key to the same `favoriteKeys` Set the single-schedule
+     ★ toggle from Batch 26 uses, then calls `saveFavoriteKeys()` and
+     `renderFavoritesSection()` once for the whole selection rather than
+     per-row, mirroring the existing Batch 19 bulk-favorite-artifacts
+     button).
+198. **Add exporting agent memory to JSON**
+     (`GET /api/memory.json` -- returns the same redacted `{key: value}`
+     shape `POST /api/memory/import` expects, unlike the existing CSV
+     export's per-row `key,value,updated_at` shape, which isn't directly
+     re-importable. An **Export JSON** link sits next to the existing
+     **Export CSV** link in the Agent Memory panel heading).
+199. **Add bulk clearing labels from selected schedules**
+     (`POST /api/schedules/bulk-clear-label` -- loops
+     `store.set_schedule_label(id, "")` over a user-picked set of ids,
+     skipping unknown ones, mirroring the existing bulk-remove-tag pattern
+     for artifacts/pipelines. A **Clear labels** button sits next to the
+     new bulk-favorite button in the schedule bulk-action row).
+200. **Add aggregate artifact storage stats to the panel heading**
+     (frontend-only -- `loadArtifacts()` now sums `size_bytes` across
+     whatever `GET /api/artifacts` returns -- respecting the active tag
+     filter, since that's the same list already being rendered -- and
+     writes a "(N files, X MB)" summary next to the **Artifacts** heading
+     using the existing `formatBytes()` helper. No backend change: the
+     size was already in the API response, just not surfaced anywhere).
+201. **Add tests for all of Batch 27**: bulk-clearing schedule labels blanks
+     only the selected ids and leaves an unselected schedule's label
+     untouched; the memory JSON export round-trips through the existing
+     import endpoint and redacts a secret-shaped key exactly like the CSV
+     export does; an empty memory store exports as `{}`. 556 tests total,
+     stable across two repeated clean full-suite runs. Live-verified end
+     to end with Playwright against a freshly started server: checkbox-
+     selecting two schedules and clicking **★ Favorite selected** added
+     both `schedule::{id}` keys to the persisted favorites in
+     `localStorage`; clicking **Clear labels** on the same selection
+     blanked both schedules' labels via `GET /api/schedules`; clicking
+     **Export JSON** in the Agent Memory panel downloaded a real
+     `memory.json` file containing a previously-imported key; uploading a
+     CSV file and reloading showed "(2 files, 86 B)" next to the
+     **Artifacts** heading.
 
 ## 9. Roadmap
 

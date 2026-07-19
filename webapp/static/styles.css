@@ -2318,6 +2318,13 @@ body.density-compact .tier-section {
   letter-spacing: 0.05em;
 }
 
+.artifacts-stats-summary {
+  text-transform: none;
+  letter-spacing: normal;
+  font-weight: normal;
+  opacity: 0.75;
+}
+
 .artifacts-controls {
   display: flex;
   align-items: center;

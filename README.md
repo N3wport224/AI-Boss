@@ -885,6 +885,19 @@ A few things live in the header/subheader on every page load:
 - **Run status filter chips** — All/Completed/Failed/Running chips above
   Recent Runs narrow the table to one status without a page reload.
 
+## Schedule bulk favoriting/label clearing, memory JSON export, and artifact storage stats
+
+- **Bulk favorite selected schedules** — checkbox-select multiple schedules
+  and add them all to Favorites at once.
+- **Bulk clear labels from selected schedules** — checkbox-select multiple
+  schedules and blank out their labels in one click.
+- **Export agent memory to JSON** — an **Export JSON** link next to the
+  existing Export CSV button downloads memory in the same `{key: value}`
+  shape the **Import…** picker expects, for a clean round trip.
+- **Artifact storage stats** — the Artifacts panel heading shows the total
+  file count and combined size of whatever's currently listed (respecting
+  the active tag filter).
+
 ## Tech stack
 
 - **Language:** Python 3.11+ — first-class async/sync support and native SDKs
