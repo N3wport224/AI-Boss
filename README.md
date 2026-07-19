@@ -559,6 +559,34 @@ A few things live in the header/subheader on every page load:
   to know who else is participating. Shown as a **🗒 Shared Agent
   Blackboard** section in a run's detail drill-down when notes exist.
 
+## Module toggles, URL ingestion, templates, audit trail, and self-test
+
+- **Module enable/disable toggle** — a card's own **On/Off** switch turns a
+  module off at runtime, independent of its manifest's own `enabled` flag —
+  no YAML edit needed, and it persists across a restart. A disabled module
+  blocks every launch path (standalone run, full pipeline, saved pipeline,
+  schedule, webhook, rerun) exactly like a tripped circuit breaker.
+- **Ingest a file from a URL** — paste a link to a `.csv`/`.json`/`.xlsx`
+  file next to the upload dropzone instead of only dragging a local file;
+  it's fetched with the same streaming size cap and duplicate-content
+  detection direct uploads already get.
+- **Pipeline starter templates** — a **Pipeline Templates** gallery offers
+  three ready-made pipelines built entirely from the bundled modules (the
+  basic churn-response chain, the multi-agent handoff-with-escalation
+  chain, and an outbound-webhook notifier). **Use this template** clones one
+  into your own saved pipelines to customize.
+- **Recent Actions audit trail** — a **Recent Actions** panel logs every
+  destructive/administrative action (run purge, bulk-delete runs, artifact
+  purge, backup restore, circuit breaker reset, scheduler pause/resume,
+  pipeline version restore) with a timestamp and detail, newest first, so
+  it's never a guess what happened and when.
+- **One-click module self-test** — a **🧪 Self-Test** button actually runs
+  every enabled module once with its own manifest's default inputs (not
+  just checking that manifests parse and entrypoints instantiate, which
+  `/api/health` already does) and reports a pass/fail per module with error
+  detail and timing, in a disposable context that never touches real run
+  history, circuit breaker counts, or persistent agent memory.
+
 ## Tech stack
 
 - **Language:** Python 3.11+ — first-class async/sync support and native SDKs

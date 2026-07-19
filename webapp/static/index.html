@@ -30,6 +30,10 @@
       </div>
       <button id="theme-toggle" class="icon-btn" type="button" title="Toggle light/dark theme">☀️</button>
       <button id="density-toggle" class="icon-btn" type="button" title="Toggle compact card view">▤</button>
+      <div class="dropdown-wrap">
+        <button id="self-test-btn" class="btn btn-secondary" type="button" title="Run every enabled module once with safe default inputs and report pass/fail">🧪 Self-Test</button>
+        <div id="self-test-panel" class="dropdown-panel hidden"></div>
+      </div>
       <button id="builder-toggle" class="btn btn-secondary" type="button">+ New Pipeline</button>
       <button id="run-pipeline-btn" class="btn btn-primary">Run Full Pipeline</button>
     </div>
@@ -121,6 +125,10 @@
           <label class="btn btn-secondary btn-small" for="file-input">Choose file</label>
           <input type="file" id="file-input" accept=".csv,.pdf,.json,.xlsx" hidden />
         </div>
+        <div class="ingest-url-row">
+          <input type="text" id="ingest-url-input" class="artifact-search-input" placeholder="…or paste a URL to a .csv, .json, or .xlsx file" />
+          <button id="ingest-url-btn" class="btn btn-secondary btn-small" type="button">Fetch &amp; Ingest</button>
+        </div>
         <div id="ingestion-result" class="log-tabs-wrap hidden"></div>
 
         <div class="artifacts-row">
@@ -156,6 +164,18 @@
         </div>
       </div>
       <div class="card-grid" id="favorites-grid"></div>
+    </section>
+
+    <section class="tier-section tier-templates" id="pipeline-templates-section">
+      <div class="tier-heading">
+        <span class="bar"></span>
+        <h2>Pipeline Templates</h2>
+        <div class="tier-heading-actions">
+          <button class="collapse-toggle" type="button" data-collapse-key="pipeline-templates">▾</button>
+        </div>
+      </div>
+      <p class="card-desc">Ready-made starting points using the bundled modules — clone one into your own saved pipelines, then customize.</p>
+      <div class="card-grid" id="pipeline-templates-grid"></div>
     </section>
 
     <section class="tier-section tier-pipeline hidden" id="saved-pipelines-section">
@@ -279,6 +299,22 @@
       <div id="env-vars-list" class="runs-empty">Loading…</div>
       <h3 class="env-subhead">Runtime settings</h3>
       <div id="env-settings-list" class="runs-empty">Loading…</div>
+    </section>
+
+    <section class="tier-section tier-audit" id="audit-log-section">
+      <div class="tier-heading">
+        <span class="bar"></span>
+        <h2>Recent Actions</h2>
+        <div class="tier-heading-actions">
+          <button id="audit-log-refresh-btn" class="btn btn-secondary btn-small" type="button">Refresh</button>
+          <button class="collapse-toggle" type="button" data-collapse-key="audit-log">▾</button>
+        </div>
+      </div>
+      <p class="card-desc">
+        Destructive/administrative actions taken through this dashboard — purges, restores,
+        breaker resets, schedule pause/resume, version restores — newest first.
+      </p>
+      <div id="audit-log-list" class="runs-empty">Loading…</div>
     </section>
 
     <section class="tier-section tier-runs" id="recent-runs-section">

@@ -1,0 +1,154 @@
+"""Batch 10: recent actions audit trail -- a lightweight, state-store-backed
+log of destructive/administrative actions (run purge, bulk-delete runs,
+artifact purge, backup restore, circuit breaker reset, schedule pause/resume,
+pipeline version restore) so a user can see what happened and when without
+guessing.
+"""
+import json
+import shutil
+
+import pytest
+from fastapi.testclient import TestClient
+
+from engine.state_store import StateStore
+from webapp import pipelines as pipeline_store
+from webapp.main import app, store
+
+client = TestClient(app)
+
+
+@pytest.fixture(autouse=True)
+def clean_pipelines_dir():
+    if pipeline_store.PIPELINES_DIR.exists():
+        shutil.rmtree(pipeline_store.PIPELINES_DIR)
+    yield
+    if pipeline_store.PIPELINES_DIR.exists():
+        shutil.rmtree(pipeline_store.PIPELINES_DIR)
+
+
+# ---- Store-level behavior ----
+
+def test_record_and_list_events_newest_first(tmp_path):
+    s = StateStore(str(tmp_path / "audit.db"))
+    first = s.record_audit_event("run_purge", "Purged 3 run(s).")
+    second = s.record_audit_event("artifact_purge", "Purged 1 artifact(s).")
+
+    events = s.list_audit_events()
+    assert events[0]["id"] == second["id"]
+    assert events[1]["id"] == first["id"]
+    assert events[0]["action"] == "artifact_purge"
+    assert events[0]["created_at"]
+    s.close()
+
+
+def test_list_respects_limit(tmp_path):
+    s = StateStore(str(tmp_path / "audit_limit.db"))
+    for i in range(5):
+        s.record_audit_event("run_purge", f"event {i}")
+
+    events = s.list_audit_events(limit=2)
+    assert len(events) == 2
+    assert events[0]["detail"] == "event 4"
+    assert events[1]["detail"] == "event 3"
+    s.close()
+
+
+# ---- End-to-end through the webapp ----
+
+def test_circuit_breaker_reset_is_logged():
+    res = client.post("/api/breakers/automation/fetch_raw_metrics/reset")
+    assert res.status_code == 200
+
+    events = client.get("/api/audit-log").json()
+    assert any(
+        e["action"] == "circuit_breaker_reset" and "automation/fetch_raw_metrics" in e["detail"]
+        for e in events
+    )
+
+
+def test_run_purge_is_logged():
+    res = client.post("/api/runs/purge", params={"older_than_hours": 999999})
+    assert res.status_code == 200
+
+    events = client.get("/api/audit-log").json()
+    assert any(e["action"] == "run_purge" for e in events)
+
+
+def test_run_bulk_delete_is_logged():
+    res = client.post("/api/runs/bulk-delete", json={"run_ids": [999999999]})
+    assert res.status_code == 200
+
+    events = client.get("/api/audit-log").json()
+    assert any(e["action"] == "run_bulk_delete" and "999999999" in e["detail"] for e in events)
+
+
+def test_artifact_purge_is_logged():
+    res = client.post("/api/artifacts/purge", params={"older_than_hours": 999999})
+    assert res.status_code == 200
+
+    events = client.get("/api/audit-log").json()
+    assert any(e["action"] == "artifact_purge" for e in events)
+
+
+def test_scheduler_pause_and_resume_are_logged():
+    try:
+        pause_res = client.post("/api/scheduler/pause")
+        assert pause_res.status_code == 200
+        resume_res = client.post("/api/scheduler/resume")
+        assert resume_res.status_code == 200
+    finally:
+        client.post("/api/scheduler/resume")  # never leave the shared scheduler paused for later tests
+
+    events = client.get("/api/audit-log").json()
+    assert any(e["action"] == "scheduler_pause" for e in events)
+    assert any(e["action"] == "scheduler_resume" for e in events)
+
+
+def test_pipeline_version_restore_is_logged():
+    client.post(
+        "/api/pipelines",
+        json={
+            "name": "Audit Restore Target",
+            "steps": [{"tier": "automation", "name": "fetch_raw_metrics", "inputs": {"signups": 1, "churn": 1, "revenue": 1}}],
+        },
+    )
+    client.post(
+        "/api/pipelines",
+        json={
+            "name": "Audit Restore Target",
+            "steps": [{"tier": "automation", "name": "fetch_raw_metrics", "inputs": {"signups": 999, "churn": 1, "revenue": 1}}],
+        },
+    )
+    old_version_id = client.get("/api/pipelines/audit_restore_target/versions").json()[0]["version_id"]
+
+    res = client.post(f"/api/pipelines/audit_restore_target/versions/{old_version_id}/restore")
+    assert res.status_code == 200
+
+    events = client.get("/api/audit-log").json()
+    assert any(
+        e["action"] == "pipeline_version_restore" and "audit_restore_target" in e["detail"]
+        for e in events
+    )
+
+
+def test_backup_restore_is_logged():
+    fake_snapshot = {
+        "runs": [], "steps": [], "schedules": [], "ingested_files": [], "memory": [], "pipelines": [],
+    }
+    snapshot_bytes = json.dumps(fake_snapshot).encode()
+
+    res = client.post("/api/backup/restore", files={"file": ("audit_backup.json", snapshot_bytes, "application/json")})
+    assert res.status_code == 200
+
+    events = client.get("/api/audit-log").json()
+    assert any(e["action"] == "backup_restore" for e in events)
+
+
+def test_audit_log_endpoint_orders_newest_first_and_respects_limit():
+    client.post("/api/artifacts/purge", params={"older_than_hours": 999999})
+    client.post("/api/runs/purge", params={"older_than_hours": 999999})
+
+    events = client.get("/api/audit-log", params={"limit": 2}).json()
+    assert len(events) == 2
+    assert events[0]["action"] == "run_purge"
+    assert events[1]["action"] == "artifact_purge"

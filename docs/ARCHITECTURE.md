@@ -1054,6 +1054,89 @@ only a JSON parse error or timeout falls back to an empty issue list.
     features were verified) — both were live-verified in a real browser
     instead, including a mocked-high-usage round trip for the banner and
     an add/remove/undo/Ctrl+Z round trip for the builder. 238 tests total.
+94. **Add a runtime module enable/disable toggle** (`module_overrides` table
+    — `(tier, name)` primary key, `enabled`, `updated_at`; `set_module_enabled()`
+    / `get_module_enabled_override()` / `all_module_overrides()` on
+    `StateStore`; `PATCH /api/modules/{tier}/{name}`): a card's own On/Off
+    switch, independent of the module's manifest `enabled` flag and
+    persisted across a restart — no YAML edit needed. Folded into the same
+    pre-launch check the circuit breaker already used, renamed
+    `_ensure_breakers_closed` → `_ensure_modules_runnable` (still the one
+    function checked at all 8 launch-path call sites), so a disabled module
+    blocks standalone run, full pipeline, saved pipeline, schedule, webhook,
+    and rerun exactly like a tripped breaker — same 409, a distinct message.
+    `_is_module_effectively_enabled()` resolves the override if one's ever
+    been set, else falls back to the manifest's own `enabled` default. `GET
+    /api/modules` now reports `runtime_enabled` per module for the card's
+    toggle state.
+95. **Add URL-based file ingestion** (`webapp/ingestion.py`'s
+    `filename_from_url()` / `fetch_url_bytes()`, a streaming
+    `httpx.Client(...).stream("GET", url)` read in 1MB chunks against the
+    same `MAX_UPLOAD_BYTES` ceiling and `UploadTooLargeError` a direct
+    upload already enforces; `POST /api/ingest/url`, dispatched by file
+    extension to the same `ingest_csv_bytes` / `ingest_json_bytes` /
+    `ingest_xlsx_bytes` parsers a direct upload uses): paste a link next to
+    the dropzone instead of only dragging a local file — same size cap,
+    same content-hash duplicate detection, same auto-cleansing.
+96. **Add a pipeline starter template gallery** (`webapp/templates.py`'s
+    static, hand-written `PIPELINE_TEMPLATES` list — not user data, not
+    persisted, not editable through the API; `save_pipeline_from_template()`
+    in `webapp/pipelines.py`, reusing `duplicate_pipeline()`'s
+    non-colliding-name pattern; `GET /api/pipeline-templates`, `POST
+    /api/pipeline-templates/{id}/clone`): three templates built entirely
+    from the five bundled modules — the basic 3-tier churn-response chain,
+    batch 8's multi-agent handoff-with-escalation chain, and an
+    outbound-HTTP webhook notifier — so a new user has genuinely useful
+    starting points instead of always building from one blank step. A
+    **Pipeline Templates** section with a card per template and a **Use
+    this template** button that clones it into Saved Pipelines.
+97. **Add a Recent Actions audit trail** (`audit_log` table — append-only,
+    `action`/`detail`/`created_at`; `record_audit_event()` /
+    `list_audit_events()` on `StateStore`; `GET /api/audit-log`): every
+    destructive/administrative action — run purge, bulk-delete runs,
+    artifact purge, backup restore, circuit breaker reset, scheduler
+    pause/resume, pipeline version restore — logs one row at its existing
+    call site, no new abstraction layer. A **Recent Actions** panel lists
+    them newest-first with a human label, detail, and timestamp; the
+    dashboard refreshes it right after triggering any of the above so it's
+    never stale without a manual click.
+98. **Add a one-click module self-test** (`POST /api/self-test`): actually
+    calls every enabled module's `run()` once with its own manifest's
+    default inputs (`_coerce_inputs(manifest, {})`, the same defaults a
+    card's own Run button uses when no field is touched) — unlike
+    `/api/health`, which only confirms manifests parse and entrypoints
+    instantiate, this catches a module that imports fine but breaks the
+    moment it's actually called. Each module gets its own fresh,
+    disposable `ExecutionContext` with no `state_store` attached, so a
+    self-test run never touches real run history, circuit breaker counts,
+    or persistent agent memory (`MemoryStore` falls back to a throwaway
+    in-memory dict with no store attached) — and it's deliberately never
+    logged to the audit trail, since it's a read-only diagnostic, not an
+    administrative action. A module disabled via batch 10's own toggle is
+    reported `skipped` rather than attempted. A **🧪 Self-Test** button in
+    the header opens a dropdown reporting pass/fail per module with error
+    detail and timing, mirroring the existing health-panel/notifications
+    dropdown pattern.
+99. **Add tests for all of Batch 10**: module-toggle precedence (override
+    beats manifest default) and its block-then-lift round trip across
+    every launch path, plus a 404 for an unknown module; URL ingestion's
+    CSV/JSON/XLSX dispatch, a 404 upstream, a too-large stream, and
+    content-hash dedupe against a real local `HTTPServer` fixture (content
+    deliberately made byte-distinct from other test files' fixtures after
+    two cross-file dedupe collisions surfaced only on a full-suite run);
+    every template listed and cloned, distinct-name-on-second-clone, a 404
+    for an unknown template, and the escalation template's handoff mapping
+    actually running end-to-end through the real high-risk path; every
+    audited action logging a row with the right action/detail (circuit
+    breaker reset, run purge, bulk-delete, artifact purge, scheduler
+    pause/resume, pipeline version restore, backup restore) plus
+    newest-first ordering and a `limit` round trip at the store level; the
+    self-test endpoint covering every bundled module with a definite
+    status and timing, a real `fetch_raw_metrics` pass proving genuine
+    execution (not just import), a disabled module reported `skipped`,
+    and confirming a self-test run never grows run history, never mutates
+    persistent agent memory, and never appears in the audit log. 279 tests
+    total.
 
 ## 9. Roadmap
 

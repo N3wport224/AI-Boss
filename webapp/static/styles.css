@@ -12,6 +12,7 @@
   --accent-pipeline: #fbbf24;
   --accent-favorite: #fb7185;
   --accent-ingestion: #2dd4bf;
+  --accent-templates: #fb923c;
   --ready: #34d399;
   --running: #38bdf8;
   --error: #f87171;
@@ -357,6 +358,61 @@ h1 {
   color: #fff;
 }
 
+.card.module-disabled {
+  border-color: var(--accent-pipeline);
+  opacity: 0.85;
+}
+
+.module-disabled-banner {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  flex-wrap: wrap;
+  font-size: 0.82rem;
+  color: var(--accent-pipeline);
+  background: rgba(251, 191, 36, 0.08);
+  border: 1px dashed var(--accent-pipeline);
+  border-radius: 8px;
+  padding: 10px 12px;
+  margin-bottom: 12px;
+}
+
+.module-enable-btn {
+  background: none;
+  border: 1px solid var(--accent-pipeline);
+  color: var(--accent-pipeline);
+  border-radius: 8px;
+  padding: 6px 12px;
+  font-size: 0.8rem;
+  cursor: pointer;
+  margin-left: auto;
+}
+
+.module-enable-btn:hover {
+  background: var(--accent-pipeline);
+  color: #0b1020;
+}
+
+.module-toggle-btn {
+  background: var(--bg-elevated);
+  border: 1px solid var(--border);
+  color: var(--text-dim);
+  border-radius: 999px;
+  padding: 3px 10px;
+  font-size: 0.72rem;
+  cursor: pointer;
+}
+
+.module-toggle-btn:not(.off) {
+  border-color: var(--ready);
+  color: var(--ready);
+}
+
+.module-toggle-btn.off {
+  border-color: var(--accent-pipeline);
+  color: var(--accent-pipeline);
+}
+
 .scheduler-paused-banner {
   display: flex;
   align-items: center;
@@ -528,6 +584,8 @@ main {
   flex-shrink: 0;
 }
 .tier-ingestion .bar { background: var(--accent-ingestion); }
+.tier-templates .bar { background: var(--accent-templates); }
+.tier-audit .bar { background: var(--text-dim); }
 
 .card.search-hidden {
   display: none;
@@ -605,6 +663,7 @@ body.density-compact .tier-section {
 .tier-agent .card { --border-accent: var(--accent-agent); }
 .tier-pipeline .card { --border-accent: var(--accent-pipeline); }
 .tier-favorites .card { --border-accent: var(--accent-favorite); }
+.tier-templates .card { --border-accent: var(--accent-templates); }
 
 .favorite-toggle {
   background: none;
@@ -1994,6 +2053,16 @@ body.density-compact .tier-section {
 
 .dropzone p {
   margin: 0 0 10px;
+}
+
+.ingest-url-row {
+  display: flex;
+  gap: 8px;
+  margin-top: 10px;
+}
+
+.ingest-url-row .artifact-search-input {
+  flex: 1;
 }
 
 .artifacts-row {

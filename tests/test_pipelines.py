@@ -514,10 +514,18 @@ def test_pipeline_step_fails_for_real_once_retries_are_exhausted(monkeypatch):
     res = client.post("/api/pipelines", json=payload)
     assert res.status_code == 200
 
-    events = _collect_stream(res.json()["stream_id"])
-    assert events[-1]["kind"] == "run_failed"
-    assert len([e for e in events if e["kind"] == "step_retrying"]) == 2
-    assert any(e["kind"] == "step_failed" for e in events)
+    try:
+        events = _collect_stream(res.json()["stream_id"])
+        assert events[-1]["kind"] == "run_failed"
+        assert len([e for e in events if e["kind"] == "step_retrying"]) == 2
+        assert any(e["kind"] == "step_failed" for e in events)
+    finally:
+        # 3 consecutive failures (1 attempt + 2 retries) trips fetch_raw_metrics'
+        # breaker on the shared app-level StateStore — reset it so it doesn't
+        # block this same module in other test files sharing the same store.
+        from webapp.main import store
+
+        store.reset_breaker("automation", "fetch_raw_metrics")
 
 
 def test_pipeline_step_without_retry_key_omits_it_from_saved_yaml():

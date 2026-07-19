@@ -11,7 +11,9 @@ import json
 import time
 from pathlib import Path
 from typing import Optional
+from urllib.parse import unquote, urlparse
 
+import httpx
 from pypdf import PdfReader
 
 ARTIFACTS_DIR = Path(__file__).resolve().parent.parent / "artifacts"
@@ -60,6 +62,36 @@ async def read_upload_with_limit(file, max_bytes: Optional[int] = None) -> bytes
         if total > max_bytes:
             raise UploadTooLargeError(total, max_bytes)
         chunks.append(chunk)
+    return b"".join(chunks)
+
+
+def filename_from_url(url: str) -> str:
+    """Best-effort filename for a fetched URL — the last path segment,
+    percent-decoded, or a generic fallback if the URL has none (e.g. it
+    ends in '/')."""
+    name = unquote(Path(urlparse(url).path).name)
+    return name or "downloaded_file"
+
+
+def fetch_url_bytes(url: str, timeout: float = 15.0, max_bytes: Optional[int] = None) -> bytes:
+    """GET a URL and return its body, aborting as soon as the running total
+    exceeds `max_bytes` — the URL-ingestion counterpart to
+    `read_upload_with_limit`'s chunked cap for a direct file upload. Same
+    trust model as the `http_request` automation module: the URL is
+    whatever the user explicitly supplies, no credentials baked in, so this
+    is a plain HTTP fetch rather than a SaaS integration."""
+    if max_bytes is None:
+        max_bytes = MAX_UPLOAD_BYTES
+    total = 0
+    chunks = []
+    with httpx.Client(timeout=timeout, follow_redirects=True) as client:
+        with client.stream("GET", url) as response:
+            response.raise_for_status()
+            for chunk in response.iter_bytes(1024 * 1024):
+                total += len(chunk)
+                if total > max_bytes:
+                    raise UploadTooLargeError(total, max_bytes)
+                chunks.append(chunk)
     return b"".join(chunks)
 
 

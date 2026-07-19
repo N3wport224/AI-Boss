@@ -268,3 +268,24 @@ def duplicate_pipeline(slug: str, tier_dirs: dict) -> dict:
         "steps": original["steps"],
     }
     return save_pipeline(new_definition, tier_dirs)
+
+
+def save_pipeline_from_template(template: dict, tier_dirs: dict) -> dict:
+    """Clone a built-in starter template (see webapp/templates.py) into the
+    user's own saved pipelines. Uses the template's own name unless that
+    name's slug is already taken (e.g. this template was cloned before),
+    in which case a numeric suffix disambiguates it — same non-colliding
+    naming scheme as `duplicate_pipeline`."""
+    base_name = template["name"]
+    candidate_name = base_name
+    counter = 2
+    while (PIPELINES_DIR / f"{_slugify(candidate_name)}.yaml").exists():
+        candidate_name = f"{base_name} ({counter})"
+        counter += 1
+
+    new_definition = {
+        "name": candidate_name,
+        "description": template.get("description", ""),
+        "steps": template["steps"],
+    }
+    return save_pipeline(new_definition, tier_dirs)

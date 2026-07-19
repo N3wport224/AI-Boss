@@ -16,6 +16,7 @@ import io
 import json
 import re
 import threading
+import time
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Callable, Optional
@@ -27,6 +28,7 @@ from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 
 from engine import (
+    ExecutionContext,
     Orchestrator,
     ParallelGroup,
     StateStore,
@@ -39,6 +41,7 @@ from engine import (
 from engine.registry import instantiate, load_manifests
 
 from . import cache, graph, health, ingestion, linting, perf, pipelines as pipeline_store
+from .templates import PIPELINE_TEMPLATES
 from .events import RunEventBus
 from .ratelimit import RateLimiter
 from .scheduler import Scheduler, next_daily_run_at
@@ -296,18 +299,46 @@ def _module_refs_from_steps(steps: list[dict]) -> list[tuple[str, str]]:
     return refs
 
 
-def _ensure_breakers_closed(module_refs: list[tuple[str, str]]) -> None:
+def _is_module_effectively_enabled(tier: str, name: str) -> bool:
+    """A runtime toggle override (from the dashboard) wins if one has ever
+    been set; otherwise falls back to the manifest's own `enabled` flag."""
+    override = store.get_module_enabled_override(tier, name)
+    if override is not None:
+        return override
+    try:
+        manifest = _manifest_by_name(tier, name)
+    except HTTPException:
+        return True  # unknown module — not this check's concern
+    return manifest.get("enabled", True)
+
+
+def _ensure_modules_runnable(module_refs: list[tuple[str, str]]) -> None:
+    """Blocks a launch outright if any module it touches has a tripped
+    breaker or is runtime-disabled — same blast radius either way: every
+    launch path (module card, full pipeline, saved pipelines, schedules,
+    webhooks, rerun) refuses to run until the module is reset/re-enabled."""
     tripped = []
+    disabled = []
     for tier, name in dict.fromkeys(module_refs):  # de-dupe, keep order
         health = store.get_module_health(tier, name)
         if health["tripped"]:
             tripped.append(f"{tier}/{name} ({health['consecutive_failures']} consecutive failures)")
+        if not _is_module_effectively_enabled(tier, name):
+            disabled.append(f"{tier}/{name}")
     if tripped:
         raise HTTPException(
             status_code=409,
             detail=(
                 f"Circuit breaker open for {', '.join(tripped)}. "
                 "Reset it from the module card to allow runs again."
+            ),
+        )
+    if disabled:
+        raise HTTPException(
+            status_code=409,
+            detail=(
+                f"Module disabled: {', '.join(disabled)}. "
+                "Re-enable it from the module card to allow runs again."
             ),
         )
 
@@ -473,11 +504,11 @@ def _trigger_schedule(schedule: dict) -> None:
     # says so in the Schedules panel instead of silently not running.
     if schedule["kind"] == "pipeline":
         definition = pipeline_store.load_pipeline(schedule["name"])
-        _ensure_breakers_closed(_module_refs_from_steps(definition["steps"]))
+        _ensure_modules_runnable(_module_refs_from_steps(definition["steps"]))
         steps = _build_steps_from_definition(definition)
         _run_scheduled(steps, {})
     else:
-        _ensure_breakers_closed([(schedule["tier"], schedule["name"])])
+        _ensure_modules_runnable([(schedule["tier"], schedule["name"])])
         manifest = _manifest_by_name(schedule["tier"], schedule["name"])
         module = instantiate(manifest["entrypoint"])
         inputs = _coerce_inputs(manifest, schedule["inputs"])
@@ -510,6 +541,7 @@ def list_modules():
                     "inputs": manifest.get("inputs", []),
                     "outputs": manifest.get("outputs", []),
                     "status": "error" if last_success is False else "ready",
+                    "runtime_enabled": _is_module_effectively_enabled(tier, manifest["name"]),
                     "breaker": {
                         "tripped": health["tripped"],
                         "consecutive_failures": health["consecutive_failures"],
@@ -534,6 +566,52 @@ def module_stats():
     return store.module_stats()
 
 
+@app.post("/api/self-test")
+def run_self_test():
+    """Actually run every enabled module once with its own manifest's default
+    inputs — unlike /api/health (which only checks that manifests parse and
+    entrypoints instantiate), this exercises real run() code, catching a
+    module that imports fine but breaks the moment it's actually called.
+
+    Each module gets its own fresh, disposable ExecutionContext with no
+    state_store attached — nothing here touches real run history, circuit
+    breaker counts, or persistent agent memory. It's a read-only diagnostic,
+    not a real run, so it's never logged to the audit trail either."""
+    results = []
+    for tier, directory in TIER_DIRS.items():
+        for manifest in load_manifests(directory):
+            name = manifest["name"]
+            if not manifest.get("enabled", True) or not _is_module_effectively_enabled(tier, name):
+                results.append(
+                    {"tier": tier, "name": name, "status": "skipped", "detail": "Module disabled.", "duration_seconds": 0.0}
+                )
+                continue
+
+            inputs = _coerce_inputs(manifest, {})
+            inputs = interpolate_template_fields(manifest, inputs, inputs.get)
+            context = ExecutionContext(initial=inputs)
+
+            started = time.perf_counter()
+            try:
+                module = instantiate(manifest["entrypoint"])
+                module.run(context)
+                status, detail = "pass", None
+            except Exception as exc:
+                status, detail = "fail", str(exc)
+            duration = time.perf_counter() - started
+
+            results.append(
+                {"tier": tier, "name": name, "status": status, "detail": detail, "duration_seconds": round(duration, 4)}
+            )
+
+    return {
+        "results": results,
+        "passed": sum(1 for r in results if r["status"] == "pass"),
+        "failed": sum(1 for r in results if r["status"] == "fail"),
+        "skipped": sum(1 for r in results if r["status"] == "skipped"),
+    }
+
+
 @app.get("/api/modules/{tier}/{name}/source")
 async def module_source(tier: str, name: str):
     manifest = _manifest_by_name(tier, name)
@@ -547,7 +625,7 @@ async def module_source(tier: str, name: str):
 def run_module(tier: str, name: str, payload: RunRequest, http_request: Request):
     _enforce_run_rate_limit(http_request)
     manifest = _manifest_by_name(tier, name)
-    _ensure_breakers_closed([(tier, name)])
+    _ensure_modules_runnable([(tier, name)])
     module = instantiate(manifest["entrypoint"])
     inputs = _coerce_inputs(manifest, payload.inputs)
     # A template field can reference {a_sibling_field} on this same card; there's
@@ -575,7 +653,7 @@ def run_module(tier: str, name: str, payload: RunRequest, http_request: Request)
 def run_pipeline(payload: RunRequest, http_request: Request):
     _enforce_run_rate_limit(http_request)
     steps = _build_pipeline()
-    _ensure_breakers_closed([(s.module.tier.value, s.module.name) for s in steps])
+    _ensure_modules_runnable([(s.module.tier.value, s.module.name) for s in steps])
     orchestrator = Orchestrator(steps, state_store=store, stop_on_error=False)
     stream_id = bus.create()
     _run_in_background(orchestrator, payload.inputs, stream_id)
@@ -592,7 +670,24 @@ def list_breakers():
 @app.post("/api/breakers/{tier}/{name}/reset")
 def reset_module_breaker(tier: str, name: str):
     _manifest_by_name(tier, name)  # 404 for a module that doesn't exist
-    return store.reset_breaker(tier, name)
+    result = store.reset_breaker(tier, name)
+    store.record_audit_event("circuit_breaker_reset", f"Reset circuit breaker for {tier}/{name}.")
+    return result
+
+
+class ModuleEnabledUpdate(BaseModel):
+    enabled: bool
+
+
+@app.patch("/api/modules/{tier}/{name}")
+def set_module_enabled(tier: str, name: str, payload: ModuleEnabledUpdate):
+    """Runtime on/off toggle for a module, independent of its manifest's own
+    `enabled` flag — no YAML edit needed, and it persists across a restart.
+    A disabled module is blocked from every launch path exactly like a
+    tripped circuit breaker (see `_ensure_modules_runnable`)."""
+    _manifest_by_name(tier, name)  # 404 for a module that doesn't exist
+    store.set_module_enabled(tier, name, payload.enabled)
+    return {"tier": tier, "name": name, "runtime_enabled": payload.enabled}
 
 
 @app.get("/api/pipelines")
@@ -607,7 +702,7 @@ def save_and_launch_pipeline(definition: PipelineDefinition, http_request: Reque
     module folder) and immediately runs it through the same background-thread
     + SSE mechanism as any other run."""
     _enforce_run_rate_limit(http_request)
-    _ensure_breakers_closed(_module_refs_from_steps(definition.model_dump()["steps"]))
+    _ensure_modules_runnable(_module_refs_from_steps(definition.model_dump()["steps"]))
     try:
         saved = pipeline_store.save_pipeline(definition.model_dump(), TIER_DIRS)
     except pipeline_store.PipelineValidationError as exc:
@@ -626,7 +721,7 @@ def run_saved_pipeline(slug: str, http_request: Request):
     except FileNotFoundError:
         raise HTTPException(status_code=404, detail=f"No saved pipeline named '{slug}'.")
 
-    _ensure_breakers_closed(_module_refs_from_steps(definition["steps"]))
+    _ensure_modules_runnable(_module_refs_from_steps(definition["steps"]))
     steps = _build_steps_from_definition(definition)
     stream_id = _launch_steps(steps)
     return {"stream_id": stream_id}
@@ -657,7 +752,7 @@ async def trigger_pipeline_webhook(slug: str, http_request: Request):
     if not isinstance(overrides, dict):
         raise HTTPException(status_code=400, detail="Webhook body must be a JSON object.")
 
-    _ensure_breakers_closed(_module_refs_from_steps(definition["steps"]))
+    _ensure_modules_runnable(_module_refs_from_steps(definition["steps"]))
     steps = _build_steps_from_definition(definition, entry_overrides=overrides)
     stream_id = _launch_steps(steps)
     return {"stream_id": stream_id}
@@ -718,6 +813,21 @@ def pipeline_graph(slug: str):
     return graph.build_pipeline_graph(definition)
 
 
+@app.get("/api/pipeline-templates")
+def list_pipeline_templates():
+    """Built-in starter templates — static, curated content, not user data."""
+    return PIPELINE_TEMPLATES
+
+
+@app.post("/api/pipeline-templates/{template_id}/clone")
+def clone_pipeline_template(template_id: str):
+    template = next((t for t in PIPELINE_TEMPLATES if t["id"] == template_id), None)
+    if template is None:
+        raise HTTPException(status_code=404, detail=f"No template named '{template_id}'.")
+    saved = pipeline_store.save_pipeline_from_template(template, TIER_DIRS)
+    return {"pipeline": saved}
+
+
 @app.get("/api/pipelines/{slug}/versions")
 def list_pipeline_versions(slug: str):
     try:
@@ -748,6 +858,7 @@ def restore_pipeline_version(slug: str, version_id: str):
         raise HTTPException(status_code=404, detail=f"No version '{version_id}' for pipeline '{slug}'.")
     except pipeline_store.PipelineValidationError as exc:
         raise HTTPException(status_code=400, detail=str(exc))
+    store.record_audit_event("pipeline_version_restore", f"Restored '{slug}' to version {version_id}.")
     return {"pipeline": restored}
 
 
@@ -824,12 +935,14 @@ def pause_scheduler():
     distinct from pausing any individual schedule. Every schedule's own
     `enabled` flag is left untouched; nothing fires until resumed."""
     _scheduler.pause()
+    store.record_audit_event("scheduler_pause", "Paused the scheduler — no schedule will fire until resumed.")
     return {"paused": True}
 
 
 @app.post("/api/scheduler/resume")
 def resume_scheduler():
     _scheduler.resume()
+    store.record_audit_event("scheduler_resume", "Resumed the scheduler.")
     return {"paused": False}
 
 
@@ -937,6 +1050,7 @@ def purge_runs(older_than_hours: float = 24 * 30):
     — mirrors artifact purge, but for run history instead of uploaded files.
     Defaults to 30 days; never touches a run that's still in progress."""
     removed = store.prune_runs(older_than_hours)
+    store.record_audit_event("run_purge", f"Purged {removed} run(s) older than {older_than_hours}h.")
     return {"removed_count": removed}
 
 
@@ -949,6 +1063,7 @@ def bulk_delete_runs(payload: BulkDeleteRuns):
     """Delete a user-picked set of runs — the finer-grained counterpart to
     /api/runs/purge's age-based sweep, for a checkbox multi-select in the UI."""
     removed = store.delete_runs(payload.run_ids)
+    store.record_audit_event("run_bulk_delete", f"Deleted {removed} selected run(s): {payload.run_ids}.")
     return {"removed_count": removed}
 
 
@@ -1019,7 +1134,7 @@ def rerun_run(run_id: int, http_request: Request):
     if not steps:
         raise HTTPException(status_code=404, detail=f"No recorded steps for run {run_id}.")
 
-    _ensure_breakers_closed([(s["tier"], s["name"]) for s in steps])
+    _ensure_modules_runnable([(s["tier"], s["name"]) for s in steps])
 
     specs = []
     for s in steps:
@@ -1130,7 +1245,17 @@ async def restore_backup(file: UploadFile = File(...)):
             continue  # references a module that doesn't exist in this install
 
     counts["pipelines"] = restored_pipelines
+    summary = ", ".join(f"{k}: {v}" for k, v in counts.items())
+    store.record_audit_event("backup_restore", f"Restored backup snapshot ({summary}).")
     return counts
+
+
+@app.get("/api/audit-log")
+def list_audit_log(limit: int = 50):
+    """Newest-first log of destructive/administrative actions taken through
+    this dashboard — what happened and when, without guessing. Populated only
+    by the actions above; read-only, nothing here is user-editable."""
+    return store.list_audit_events(limit)
 
 
 @app.get("/api/memory")
@@ -1189,6 +1314,49 @@ async def ingest_xlsx(file: UploadFile = File(...)):
         raise HTTPException(status_code=400, detail=f"Could not parse XLSX: {exc}")
 
 
+class IngestUrlRequest(BaseModel):
+    url: str
+
+
+_URL_INGEST_DISPATCH = {
+    ".csv": ingestion.ingest_csv_bytes,
+    ".json": ingestion.ingest_json_bytes,
+    ".xlsx": ingestion.ingest_xlsx_bytes,
+}
+
+
+@app.post("/api/ingest/url")
+def ingest_from_url(payload: IngestUrlRequest):
+    """Fetch a CSV/JSON/XLSX file by URL and ingest it through the exact same
+    parse+dedupe+cleanse pipeline as a direct upload. A plain HTTP GET of a
+    user-supplied URL, not a SaaS integration — same trust model as the
+    http_request automation module. The file type is inferred from the
+    URL's own extension, same as the folder watcher's dispatch."""
+    if not payload.url.strip():
+        raise HTTPException(status_code=400, detail="url is required")
+
+    filename = ingestion.filename_from_url(payload.url)
+    suffix = Path(filename).suffix.lower()
+    ingest_fn = _URL_INGEST_DISPATCH.get(suffix)
+    if ingest_fn is None:
+        raise HTTPException(
+            status_code=400,
+            detail=f"Unrecognized file type '{suffix or '(none)'}' — the URL must end in .csv, .json, or .xlsx.",
+        )
+
+    try:
+        data = ingestion.fetch_url_bytes(payload.url)
+    except ingestion.UploadTooLargeError as exc:
+        raise HTTPException(status_code=413, detail=str(exc))
+    except Exception as exc:
+        raise HTTPException(status_code=400, detail=f"Could not fetch URL: {exc}")
+
+    try:
+        return ingest_fn(filename, data, store)
+    except Exception as exc:
+        raise HTTPException(status_code=400, detail=f"Could not parse fetched file: {exc}")
+
+
 @app.post("/api/ingest/pdf")
 async def ingest_pdf(file: UploadFile = File(...)):
     """Upload a PDF, get back its extracted text. Same content-hash dedupe as CSV,
@@ -1233,6 +1401,7 @@ def list_artifacts(tag: Optional[str] = None):
 @app.post("/api/artifacts/purge")
 def purge_artifacts(older_than_hours: float = 24):
     removed = ingestion.purge_old_artifacts(older_than_hours)
+    store.record_audit_event("artifact_purge", f"Purged {len(removed)} artifact(s) older than {older_than_hours}h.")
     return {"removed_count": len(removed), "removed": removed}
 
 

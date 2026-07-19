@@ -78,6 +78,21 @@ CREATE TABLE IF NOT EXISTS artifact_tags (
     tags TEXT NOT NULL,
     updated_at TEXT NOT NULL
 );
+
+CREATE TABLE IF NOT EXISTS module_overrides (
+    tier TEXT NOT NULL,
+    name TEXT NOT NULL,
+    enabled INTEGER NOT NULL,
+    updated_at TEXT NOT NULL,
+    PRIMARY KEY (tier, name)
+);
+
+CREATE TABLE IF NOT EXISTS audit_log (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    action TEXT NOT NULL,
+    detail TEXT NOT NULL,
+    created_at TEXT NOT NULL
+);
 """
 
 
@@ -505,6 +520,55 @@ class StateStore:
             )
             self._conn.commit()
             return self._module_health_row(tier, name)
+
+    def set_module_enabled(self, tier: str, name: str, enabled: bool) -> None:
+        """A runtime on/off override for a module, independent of its
+        manifest's own `enabled` flag — toggled from the dashboard, not by
+        editing a YAML file, and persisted so it survives a restart."""
+        with self._lock:
+            self._conn.execute(
+                "INSERT INTO module_overrides (tier, name, enabled, updated_at) VALUES (?, ?, ?, ?) "
+                "ON CONFLICT(tier, name) DO UPDATE SET enabled = excluded.enabled, updated_at = excluded.updated_at",
+                (tier, name, int(enabled), datetime.now(timezone.utc).isoformat()),
+            )
+            self._conn.commit()
+
+    def get_module_enabled_override(self, tier: str, name: str) -> Optional[bool]:
+        """None means no override has ever been set — the caller should fall
+        back to the manifest's own `enabled` flag (default True)."""
+        with self._lock:
+            row = self._conn.execute(
+                "SELECT enabled FROM module_overrides WHERE tier = ? AND name = ?", (tier, name)
+            ).fetchone()
+        return bool(row[0]) if row is not None else None
+
+    def all_module_overrides(self) -> dict[tuple[str, str], bool]:
+        with self._lock:
+            rows = self._conn.execute("SELECT tier, name, enabled FROM module_overrides").fetchall()
+        return {(tier, name): bool(enabled) for tier, name, enabled in rows}
+
+    def record_audit_event(self, action: str, detail: str) -> dict:
+        """Append-only log of destructive/administrative actions (run purge,
+        bulk-delete, artifact purge, backup restore, circuit breaker reset,
+        schedule pause/resume, pipeline version restore) so a user can see
+        what happened and when without guessing. Never edited or deduped —
+        each call is its own row."""
+        created_at = datetime.now(timezone.utc).isoformat()
+        with self._lock:
+            cursor = self._conn.execute(
+                "INSERT INTO audit_log (action, detail, created_at) VALUES (?, ?, ?)",
+                (action, detail, created_at),
+            )
+            self._conn.commit()
+            return {"id": cursor.lastrowid, "action": action, "detail": detail, "created_at": created_at}
+
+    def list_audit_events(self, limit: int = 50) -> list[dict]:
+        with self._lock:
+            rows = self._conn.execute(
+                "SELECT id, action, detail, created_at FROM audit_log ORDER BY id DESC LIMIT ?",
+                (limit,),
+            ).fetchall()
+        return [{"id": r[0], "action": r[1], "detail": r[2], "created_at": r[3]} for r in rows]
 
     _SCHEDULE_COLUMNS = (
         "id", "kind", "tier", "name", "inputs", "interval_seconds",

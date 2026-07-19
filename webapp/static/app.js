@@ -45,6 +45,9 @@ const notificationsBtn = document.getElementById("notifications-btn");
 const notifBadge = document.getElementById("notif-badge");
 const notificationsPanel = document.getElementById("notifications-panel");
 
+const selfTestBtn = document.getElementById("self-test-btn");
+const selfTestPanel = document.getElementById("self-test-panel");
+
 const metricTotalEl = document.getElementById("metric-total");
 const metricSuccessEl = document.getElementById("metric-success");
 const metricDurationEl = document.getElementById("metric-duration");
@@ -75,6 +78,8 @@ const builderCancelEditBtn = document.getElementById("builder-cancel-edit");
 
 const savedPipelinesSection = document.getElementById("saved-pipelines-section");
 const savedPipelinesGrid = document.getElementById("saved-pipelines-grid");
+
+const pipelineTemplatesGrid = document.getElementById("pipeline-templates-grid");
 
 const scheduleAddToggleBtn = document.getElementById("schedule-add-toggle");
 const scheduleFormEl = document.getElementById("schedule-form");
@@ -299,6 +304,7 @@ notificationsBtn.addEventListener("click", () => {
   const opening = notificationsPanel.classList.contains("hidden");
   notificationsPanel.classList.toggle("hidden");
   healthPanel.classList.add("hidden");
+  selfTestPanel.classList.add("hidden");
   if (opening) {
     unreadNotifications = 0;
     updateNotifBadge();
@@ -360,6 +366,7 @@ async function loadHealth() {
         await loadMemory();
         await loadSchedules();
         await loadSavedPipelines();
+        await loadAuditLog();
       } catch (err) {
         showToast(`Restore failed: ${err}`, "error");
       }
@@ -374,12 +381,64 @@ async function loadHealth() {
 healthBeacon.addEventListener("click", () => {
   healthPanel.classList.toggle("hidden");
   notificationsPanel.classList.add("hidden");
+  selfTestPanel.classList.add("hidden");
 });
 
 document.addEventListener("click", (e) => {
   if (!e.target.closest(".dropdown-wrap")) {
     notificationsPanel.classList.add("hidden");
     healthPanel.classList.add("hidden");
+    selfTestPanel.classList.add("hidden");
+  }
+});
+
+// ---- One-click module self-test ----
+
+function renderSelfTestResults(body) {
+  const STATUS_DOT = { pass: "dot-ready", fail: "dot-error", skipped: "dot-running" };
+  selfTestPanel.innerHTML = `
+    <h4>Module Self-Test</h4>
+    <p class="dropdown-empty" style="padding: 0 0 8px;">
+      ${body.passed} passed · ${body.failed} failed · ${body.skipped} skipped
+    </p>
+    ${body.results
+      .map(
+        (r) => `
+      <div class="health-check-row">
+        <i class="dot ${STATUS_DOT[r.status] || "dot-error"}"></i>
+        <div>
+          <span class="health-check-name">[${escapeHtml(r.tier)}] ${escapeHtml(r.name)}</span>
+          <span class="health-check-detail">${
+            r.status === "pass"
+              ? `passed in ${r.duration_seconds}s`
+              : r.status === "skipped"
+              ? "skipped — module disabled"
+              : `failed in ${r.duration_seconds}s: ${escapeHtml(r.detail || "")}`
+          }</span>
+        </div>
+      </div>`
+      )
+      .join("")}`;
+}
+
+selfTestBtn.addEventListener("click", async () => {
+  const opening = selfTestPanel.classList.contains("hidden");
+  notificationsPanel.classList.add("hidden");
+  healthPanel.classList.add("hidden");
+  selfTestPanel.classList.toggle("hidden");
+  if (!opening) return;
+
+  selfTestPanel.innerHTML = `<h4>Module Self-Test</h4><div class="dropdown-empty">Running every enabled module once…</div>`;
+  selfTestBtn.disabled = true;
+  try {
+    const res = await fetch("/api/self-test", { method: "POST" });
+    const body = await res.json();
+    renderSelfTestResults(body);
+    showToast(`Self-test: ${body.passed} passed, ${body.failed} failed, ${body.skipped} skipped.`, body.failed ? "error" : "success");
+  } catch (err) {
+    selfTestPanel.innerHTML = `<h4>Module Self-Test</h4><p class="dropdown-empty">Self-test failed: ${err}</p>`;
+  } finally {
+    selfTestBtn.disabled = false;
   }
 });
 
@@ -1269,19 +1328,28 @@ function renderCard(module) {
     : "";
 
   const tripped = module.breaker?.tripped;
+  const runtimeEnabled = module.runtime_enabled !== false;
+  const blocked = tripped || !runtimeEnabled;
   const breakerHtml = tripped
     ? `<div class="breaker-banner">
          ⛔ Circuit breaker open — ${module.breaker.consecutive_failures} consecutive failure${module.breaker.consecutive_failures === 1 ? "" : "s"} (trips at ${module.breaker.threshold}). Runs are blocked.
          <button class="btn breaker-reset-btn" data-tier="${module.tier}" data-name="${module.name}" type="button">Reset breaker</button>
        </div>`
     : "";
+  const disabledHtml = !runtimeEnabled
+    ? `<div class="module-disabled-banner">
+         🚫 Module disabled — runs are blocked until re-enabled.
+         <button class="btn module-enable-btn" data-tier="${module.tier}" data-name="${module.name}" type="button">Enable module</button>
+       </div>`
+    : "";
 
   return `
-    <div class="card ${tripped ? "breaker-tripped" : ""}" id="${cardId}" data-search-text="${searchText}">
+    <div class="card ${tripped ? "breaker-tripped" : ""} ${runtimeEnabled ? "" : "module-disabled"}" id="${cardId}" data-search-text="${searchText}">
       <div class="card-head">
         <h3 class="card-title">${module.name}</h3>
         <div class="card-head-actions">
           ${favoriteButtonHtml(favKey)}
+          <button class="module-toggle-btn ${runtimeEnabled ? "" : "off"}" data-tier="${module.tier}" data-name="${module.name}" data-enabled="${runtimeEnabled}" type="button" title="${runtimeEnabled ? "Disable this module" : "Enable this module"}">${runtimeEnabled ? "⏻ On" : "⏻ Off"}</button>
           <button class="code-toggle" data-tier="${module.tier}" data-name="${module.name}" type="button" title="View source">&lt;/&gt;</button>
           <div class="status-slot">${tripped ? statusPill("tripped") : statusPill(module.status)}</div>
         </div>
@@ -1293,10 +1361,11 @@ function renderCard(module) {
           : "No runs recorded yet."
       }</p>
       ${breakerHtml}
+      ${disabledHtml}
       <div class="code-panel hidden"></div>
       ${fieldsHtml}
       <div class="run-row">
-        <button class="btn btn-run" data-tier="${module.tier}" data-name="${module.name}" ${tripped ? "disabled" : ""}>Run</button>
+        <button class="btn btn-run" data-tier="${module.tier}" data-name="${module.name}" ${blocked ? "disabled" : ""}>Run</button>
         <label class="force-refresh-toggle" title="Skip the cached result (if any) and run fresh">
           <input type="checkbox" class="force-refresh-check" id="refresh__${cardId}" />
           Force refresh
@@ -1309,6 +1378,21 @@ function renderCard(module) {
 
 function escapeHtml(text) {
   return String(text).replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
+}
+
+async function setModuleEnabled(tier, name, enabled) {
+  try {
+    const res = await fetch(`/api/modules/${tier}/${name}`, {
+      method: "PATCH",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ enabled }),
+    });
+    if (!res.ok) throw new Error((await res.json()).detail || `HTTP ${res.status}`);
+    showToast(`${name} ${enabled ? "enabled" : "disabled"}.`, "success");
+    await loadModules();
+  } catch (err) {
+    showToast(`Could not update ${name}: ${err.message}`, "error");
+  }
 }
 
 async function toggleModuleSource(tier, name) {
@@ -1389,10 +1473,20 @@ function renderSections(modulesByTier) {
         if (!res.ok) throw new Error((await res.json()).detail || `HTTP ${res.status}`);
         showToast(`Circuit breaker reset for ${btn.dataset.name}.`, "success");
         await loadModules(); // re-render: banner gone, Run re-enabled
+        await loadAuditLog();
       } catch (err) {
         showToast(`Reset failed: ${err.message}`, "error");
       }
     });
+  });
+  sectionsEl.querySelectorAll(".module-toggle-btn").forEach((btn) => {
+    btn.addEventListener("click", () => {
+      const currentlyEnabled = btn.dataset.enabled === "true";
+      setModuleEnabled(btn.dataset.tier, btn.dataset.name, !currentlyEnabled);
+    });
+  });
+  sectionsEl.querySelectorAll(".module-enable-btn").forEach((btn) => {
+    btn.addEventListener("click", () => setModuleEnabled(btn.dataset.tier, btn.dataset.name, true));
   });
   wireFavoriteToggles(sectionsEl);
   wireVariableChips(sectionsEl);
@@ -2555,6 +2649,7 @@ async function restorePipelineVersion(slug, versionId) {
     }
     showToast(`Restored "${body.pipeline.name}" to this version.`, "success");
     await loadSavedPipelines();
+    await loadAuditLog();
   } catch (err) {
     showToast(`Restore failed: ${err}`, "error");
   }
@@ -2565,6 +2660,57 @@ async function loadSavedPipelines() {
   const pipelinesList = await res.json();
   renderSavedPipelines(pipelinesList);
   return pipelinesList;
+}
+
+// ---- Pipeline starter templates ----
+
+function renderPipelineTemplates(templatesList) {
+  pipelineTemplatesGrid.innerHTML = templatesList
+    .map((t) => {
+      const chain = t.steps.map((s) => `[${s.tier}] ${s.name}`).join(" → ");
+      return `
+        <div class="card">
+          <div class="card-head">
+            <h3 class="card-title">${t.name}</h3>
+          </div>
+          <p class="card-desc">${t.description}</p>
+          <p class="card-desc pipeline-chain">${chain}</p>
+          <div class="pipeline-card-actions">
+            <button class="btn btn-run" data-template-id="${t.id}" type="button">Use this template</button>
+          </div>
+        </div>`;
+    })
+    .join("");
+
+  pipelineTemplatesGrid.querySelectorAll("[data-template-id]").forEach((btn) => {
+    btn.addEventListener("click", () => cloneTemplate(btn.dataset.templateId, btn));
+  });
+}
+
+async function loadPipelineTemplates() {
+  const res = await fetch("/api/pipeline-templates");
+  const templatesList = await res.json();
+  renderPipelineTemplates(templatesList);
+  return templatesList;
+}
+
+async function cloneTemplate(templateId, btn) {
+  btn.disabled = true;
+  try {
+    const res = await fetch(`/api/pipeline-templates/${templateId}/clone`, { method: "POST" });
+    if (!res.ok) {
+      const err = await res.json();
+      showToast(err.detail || "Failed to clone this template.", "error");
+      return;
+    }
+    const { pipeline } = await res.json();
+    showToast(`Added "${pipeline.name}" to your saved pipelines.`, "success");
+    await loadSavedPipelines();
+  } catch (err) {
+    showToast(`Clone failed: ${err}`, "error");
+  } finally {
+    btn.disabled = false;
+  }
 }
 
 async function clonePipeline(slug) {
@@ -2839,6 +2985,67 @@ fileInput.addEventListener("change", (e) => {
   fileInput.value = "";
 });
 
+const ingestUrlInput = document.getElementById("ingest-url-input");
+const ingestUrlBtn = document.getElementById("ingest-url-btn");
+
+async function ingestFromUrl() {
+  const url = ingestUrlInput.value.trim();
+  if (!url) {
+    showToast("Enter a URL first.", "error");
+    return;
+  }
+
+  ingestionResultEl.classList.remove("hidden");
+  ingestionResultEl.innerHTML = `<pre class="log-tab-content">Fetching ${escapeHtml(url)}…</pre>`;
+  ingestUrlBtn.disabled = true;
+
+  try {
+    const res = await fetch("/api/ingest/url", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ url }),
+    });
+    const body = await res.json();
+
+    if (!res.ok) {
+      ingestionResultEl.innerHTML = `<pre class="log-tab-content">Error: ${escapeHtml(body.detail || "Fetch failed.")}</pre>`;
+      showToast(`Ingest failed: ${body.detail || "unknown error"}`, "error");
+      return;
+    }
+
+    if (body.duplicate) {
+      ingestionResultEl.innerHTML = `<pre class="log-tab-content">This exact file was already ingested as "${escapeHtml(body.original_filename)}" at ${new Date(body.ingested_at).toLocaleString()}. Skipped.</pre>`;
+      showToast(`Duplicate of "${body.original_filename}" — skipped.`, "error");
+    } else {
+      const preview = JSON.stringify(body.preview, null, 2);
+      const note = body.truncated ? `\n… (truncated — ${body.row_count} rows total)` : "";
+      const cleaning = body.cleaning || {};
+      const cleaningNotes = [];
+      if (cleaning.blank_rows_removed) cleaningNotes.push(`${cleaning.blank_rows_removed} blank row(s) removed`);
+      if (cleaning.duplicate_rows_removed) cleaningNotes.push(`${cleaning.duplicate_rows_removed} duplicate row(s) removed`);
+      if (cleaning.cells_trimmed) cleaningNotes.push(`${cleaning.cells_trimmed} cell(s) trimmed`);
+      const cleaningBanner = cleaningNotes.length
+        ? `<div class="cached-badge">🧹 auto-cleansed: ${cleaningNotes.join(", ")}</div>`
+        : "";
+      ingestionResultEl.innerHTML = `${cleaningBanner}<pre class="log-tab-content">${preview}${note}</pre>`;
+      showToast(`Ingested ${body.filename}: ${body.row_count} row(s).`, "success");
+    }
+
+    ingestUrlInput.value = "";
+    await loadArtifacts();
+  } catch (err) {
+    ingestionResultEl.innerHTML = `<pre class="log-tab-content">Request failed: ${err}</pre>`;
+    showToast(`Ingest failed: ${err}`, "error");
+  } finally {
+    ingestUrlBtn.disabled = false;
+  }
+}
+
+ingestUrlBtn.addEventListener("click", ingestFromUrl);
+ingestUrlInput.addEventListener("keydown", (e) => {
+  if (e.key === "Enter") ingestFromUrl();
+});
+
 ["dragenter", "dragover"].forEach((evt) =>
   dropzone.addEventListener(evt, (e) => {
     e.preventDefault();
@@ -2862,6 +3069,7 @@ purgeBtn.addEventListener("click", async () => {
   const body = await res.json();
   showToast(`Purged ${body.removed_count} artifact file(s).`, "success");
   await loadArtifacts();
+  await loadAuditLog();
 });
 
 const runsPurgeHoursInput = document.getElementById("runs-purge-hours");
@@ -2873,6 +3081,7 @@ runsPurgeBtn.addEventListener("click", async () => {
   const body = await res.json();
   showToast(`Purged ${body.removed_count} old run(s) from history.`, "success");
   await refreshTelemetry();
+  await loadAuditLog();
 });
 
 const runsBulkDeleteBtn = document.getElementById("runs-bulk-delete-btn");
@@ -2889,6 +3098,7 @@ runsBulkDeleteBtn.addEventListener("click", async () => {
   selectedRunIds.clear();
   showToast(`Deleted ${body.removed_count} selected run(s).`, "success");
   await refreshTelemetry();
+  await loadAuditLog();
 });
 
 // ---- Full-text search across run history (step outputs + errors) ----
@@ -3155,6 +3365,7 @@ schedulerPauseToggleBtn.addEventListener("click", async () => {
   await fetch(endpoint, { method: "POST" });
   await loadSchedulerStatus();
   showToast(isPaused ? "Scheduler resumed." : "Scheduler paused — no schedule will fire until resumed.", "success");
+  await loadAuditLog();
 });
 
 loadSchedulerStatus();
@@ -3253,6 +3464,52 @@ async function loadEnvironment() {
 envRefreshBtn.addEventListener("click", async () => {
   await loadEnvironment();
   showToast("Environment view refreshed.", "success");
+});
+
+// ---- Recent actions audit trail ----
+
+const auditLogListEl = document.getElementById("audit-log-list");
+const auditLogRefreshBtn = document.getElementById("audit-log-refresh-btn");
+
+const AUDIT_ACTION_LABELS = {
+  run_purge: "Run purge",
+  run_bulk_delete: "Bulk delete runs",
+  artifact_purge: "Artifact purge",
+  backup_restore: "Backup restore",
+  circuit_breaker_reset: "Circuit breaker reset",
+  scheduler_pause: "Scheduler paused",
+  scheduler_resume: "Scheduler resumed",
+  pipeline_version_restore: "Pipeline version restore",
+};
+
+async function loadAuditLog() {
+  const res = await fetch("/api/audit-log");
+  const events = await res.json();
+
+  if (!events.length) {
+    auditLogListEl.className = "runs-empty";
+    auditLogListEl.textContent = "No administrative actions recorded yet.";
+    return;
+  }
+
+  auditLogListEl.className = "runs-table";
+  auditLogListEl.innerHTML = events
+    .map(
+      (e) => `
+      <div class="schedule-row">
+        <div class="schedule-row-main">
+          <strong>${escapeHtml(AUDIT_ACTION_LABELS[e.action] || e.action)}</strong>
+          <span class="schedule-row-meta">${escapeHtml(e.detail)}</span>
+        </div>
+        <span class="schedule-row-meta">${new Date(e.created_at).toLocaleString()}</span>
+      </div>`
+    )
+    .join("");
+}
+
+auditLogRefreshBtn.addEventListener("click", async () => {
+  await loadAuditLog();
+  showToast("Recent actions refreshed.", "success");
 });
 
 // ---- Regex tester ----
@@ -3493,6 +3750,7 @@ document.addEventListener("keydown", (event) => {
 renderSkeletonSections();
 loadModules();
 loadSavedPipelines();
+loadPipelineTemplates();
 loadHealth();
 refreshTelemetry();
 loadArtifacts();
@@ -3501,3 +3759,4 @@ renderNotificationsPanel();
 loadSchedules();
 loadMemory();
 loadEnvironment();
+loadAuditLog();
