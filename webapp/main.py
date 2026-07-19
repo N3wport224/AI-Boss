@@ -201,10 +201,11 @@ class ScheduleCreate(BaseModel):
     tier: Optional[str] = None  # required when kind == "module"
     name: str  # module name, or saved pipeline slug
     inputs: dict[str, Any] = {}  # only used when kind == "module"
-    schedule_type: str = "interval"  # "interval", "daily", or "weekly"
+    schedule_type: str = "interval"  # "interval", "daily", "weekly", or "once"
     interval_seconds: Optional[float] = None  # required when schedule_type == "interval"
     daily_time: Optional[str] = None  # "HH:MM" (local time), required when schedule_type in ("daily", "weekly")
     day_of_week: Optional[int] = None  # 0=Monday..6=Sunday, required when schedule_type == "weekly"
+    run_at: Optional[str] = None  # ISO 8601 datetime (local, with offset or naive-local), required when schedule_type == "once"
 
 
 class ScheduleUpdate(BaseModel):
@@ -1171,8 +1172,8 @@ def list_schedules():
 def create_schedule(payload: ScheduleCreate):
     if payload.kind not in ("module", "pipeline"):
         raise HTTPException(status_code=400, detail="kind must be 'module' or 'pipeline'")
-    if payload.schedule_type not in ("interval", "daily", "weekly"):
-        raise HTTPException(status_code=400, detail="schedule_type must be 'interval', 'daily', or 'weekly'")
+    if payload.schedule_type not in ("interval", "daily", "weekly", "once"):
+        raise HTTPException(status_code=400, detail="schedule_type must be 'interval', 'daily', 'weekly', or 'once'")
 
     now = datetime.now(timezone.utc)
     if payload.schedule_type == "interval":
@@ -1186,12 +1187,23 @@ def create_schedule(payload: ScheduleCreate):
         if not payload.daily_time or not DAILY_TIME_RE.match(payload.daily_time):
             raise HTTPException(status_code=400, detail="daily_time must be in 'HH:MM' 24-hour format")
         next_run_at = next_daily_run_at(payload.daily_time, now).isoformat()
-    else:
+    elif payload.schedule_type == "weekly":
         if not payload.daily_time or not DAILY_TIME_RE.match(payload.daily_time):
             raise HTTPException(status_code=400, detail="daily_time must be in 'HH:MM' 24-hour format")
         if payload.day_of_week is None or not (0 <= payload.day_of_week <= 6):
             raise HTTPException(status_code=400, detail="day_of_week must be an integer from 0 (Monday) to 6 (Sunday)")
         next_run_at = next_weekly_run_at(payload.day_of_week, payload.daily_time, now).isoformat()
+    else:
+        if not payload.run_at:
+            raise HTTPException(status_code=400, detail="run_at is required for a one-time schedule")
+        try:
+            parsed = datetime.fromisoformat(payload.run_at)
+        except ValueError:
+            raise HTTPException(status_code=400, detail="run_at must be a valid ISO 8601 datetime")
+        run_at_utc = parsed.astimezone(timezone.utc)
+        if run_at_utc <= now:
+            raise HTTPException(status_code=400, detail="run_at must be in the future")
+        next_run_at = run_at_utc.isoformat()
 
     if payload.kind == "module":
         if not payload.tier:
@@ -1624,6 +1636,24 @@ def list_notifications(unread_only: bool = False, limit: int = 200):
     return store.list_notifications(unread_only=unread_only, limit=limit)
 
 
+@app.get("/api/notifications.csv")
+def notifications_csv(limit: int = 1000):
+    """Same alert/notification history as the bell-icon dropdown, as a
+    downloadable CSV -- mirrors the audit-log CSV export pattern
+    (GET /api/audit-log.csv)."""
+    buffer = io.StringIO()
+    writer = csv.DictWriter(buffer, fieldnames=["id", "kind", "message", "created_at", "read"])
+    writer.writeheader()
+    for notification in store.list_notifications(limit=limit):
+        writer.writerow(notification)
+
+    return StreamingResponse(
+        iter([buffer.getvalue()]),
+        media_type="text/csv",
+        headers={"Content-Disposition": "attachment; filename=notifications.csv"},
+    )
+
+
 @app.get("/api/notifications/unread-count")
 def notifications_unread_count():
     return {"count": store.unread_notification_count()}
@@ -1929,6 +1959,81 @@ def bulk_untag_artifacts(payload: ArtifactBulkTag):
         store.set_artifact_tags(safe_name, sorted(current))
         untagged.append(safe_name)
     return {"tag": tag, "untagged": untagged}
+
+
+class ArtifactTagRename(BaseModel):
+    old_tag: str
+    new_tag: str
+
+
+@app.post("/api/artifacts/rename-tag")
+def rename_artifact_tag(payload: ArtifactTagRename):
+    """Rename a tag everywhere it's used in one action (e.g. a typo like
+    "reviewd" -> "reviewed") instead of removing it from and re-adding it to
+    every file individually. If a file already carries `new_tag` too, the
+    rename just merges into that (no duplicate, same as any other tag set
+    which is stored as a de-duplicated, sorted list)."""
+    old_tag = payload.old_tag.strip()
+    new_tag = payload.new_tag.strip()
+    if not old_tag or not new_tag:
+        raise HTTPException(status_code=400, detail="Both old_tag and new_tag are required.")
+    if old_tag == new_tag:
+        raise HTTPException(status_code=400, detail="new_tag must be different from old_tag.")
+
+    renamed = []
+    for filename, tags in store.all_artifact_tags().items():
+        if old_tag not in tags:
+            continue
+        current = set(tags)
+        current.discard(old_tag)
+        current.add(new_tag)
+        store.set_artifact_tags(filename, sorted(current))
+        renamed.append(filename)
+    return {"old_tag": old_tag, "new_tag": new_tag, "renamed": renamed}
+
+
+@app.get("/api/artifacts/compare-schema")
+def compare_artifact_schemas(a: str, b: str):
+    """Column-by-column schema diff between two table-shaped artifacts (CSV
+    or a .json record list) -- which columns are unique to each side, and
+    which shared columns disagree on inferred type. Mirrors the existing
+    run-compare/pipeline-compare pattern, just for artifact schemas."""
+    safe_a = Path(a).name
+    safe_b = Path(b).name
+
+    def _schema_for(safe_name: str) -> dict:
+        try:
+            content = ingestion.read_artifact_content(safe_name)
+        except FileNotFoundError:
+            raise HTTPException(status_code=404, detail=f"No artifact named '{safe_name}'.")
+        if content.get("kind") != "table" or not content.get("schema"):
+            raise HTTPException(status_code=400, detail=f"'{safe_name}' isn't a table-shaped artifact with an inferable schema.")
+        return content["schema"]
+
+    schema_a = _schema_for(safe_a)
+    schema_b = _schema_for(safe_b)
+
+    types_a = {col["name"]: col["type"] for col in schema_a["columns"]}
+    types_b = {col["name"]: col["type"] for col in schema_b["columns"]}
+
+    only_in_a = sorted(set(types_a) - set(types_b))
+    only_in_b = sorted(set(types_b) - set(types_a))
+    common = sorted(set(types_a) & set(types_b))
+    matching = [col for col in common if types_a[col] == types_b[col]]
+    type_mismatches = [
+        {"column": col, "a_type": types_a[col], "b_type": types_b[col]}
+        for col in common
+        if types_a[col] != types_b[col]
+    ]
+
+    return {
+        "a": {"filename": safe_a, "schema": schema_a},
+        "b": {"filename": safe_b, "schema": schema_b},
+        "only_in_a": only_in_a,
+        "only_in_b": only_in_b,
+        "matching": matching,
+        "type_mismatches": type_mismatches,
+    }
 
 
 @app.get("/api/artifacts/{filename}/content")

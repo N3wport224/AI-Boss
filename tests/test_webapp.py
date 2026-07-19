@@ -328,6 +328,65 @@ def test_weekly_schedule_requires_a_valid_day_of_week():
     assert res_missing.status_code == 400
 
 
+def test_once_schedule_create_and_shows_next_run_in_the_future():
+    from datetime import datetime, timedelta, timezone as tz
+
+    run_at = (datetime.now(tz.utc) + timedelta(hours=2)).isoformat()
+    res = client.post(
+        "/api/schedules",
+        json={
+            "kind": "module",
+            "tier": "automation",
+            "name": "fetch_raw_metrics",
+            "inputs": {"signups": 1, "churn": 1, "revenue": 1},
+            "schedule_type": "once",
+            "run_at": run_at,
+        },
+    )
+    assert res.status_code == 200
+    schedule = res.json()
+    assert schedule["schedule_type"] == "once"
+    assert datetime.fromisoformat(schedule["next_run_at"]) > datetime.now(timezone.utc)
+
+    client.delete(f"/api/schedules/{schedule['id']}")
+
+
+def test_once_schedule_rejects_a_past_run_at():
+    from datetime import datetime, timedelta, timezone as tz
+
+    run_at = (datetime.now(tz.utc) - timedelta(hours=1)).isoformat()
+    res = client.post(
+        "/api/schedules",
+        json={
+            "kind": "module", "tier": "automation", "name": "fetch_raw_metrics", "inputs": {},
+            "schedule_type": "once", "run_at": run_at,
+        },
+    )
+    assert res.status_code == 400
+
+
+def test_once_schedule_requires_run_at():
+    res = client.post(
+        "/api/schedules",
+        json={
+            "kind": "module", "tier": "automation", "name": "fetch_raw_metrics", "inputs": {},
+            "schedule_type": "once",
+        },
+    )
+    assert res.status_code == 400
+
+
+def test_once_schedule_rejects_a_malformed_run_at():
+    res = client.post(
+        "/api/schedules",
+        json={
+            "kind": "module", "tier": "automation", "name": "fetch_raw_metrics", "inputs": {},
+            "schedule_type": "once", "run_at": "not-a-real-datetime",
+        },
+    )
+    assert res.status_code == 400
+
+
 def test_schedule_rejects_unknown_schedule_type():
     res = client.post(
         "/api/schedules",

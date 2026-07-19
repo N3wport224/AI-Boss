@@ -13,6 +13,7 @@
   --accent-favorite: #fb7185;
   --accent-ingestion: #2dd4bf;
   --accent-templates: #fb923c;
+  --accent-recently-viewed: #818cf8;
   --ready: #34d399;
   --running: #38bdf8;
   --error: #f87171;
@@ -219,6 +220,12 @@ h1 {
   align-items: center;
   justify-content: space-between;
   gap: 8px;
+}
+
+.notification-section-actions {
+  display: flex;
+  align-items: center;
+  gap: 6px;
 }
 
 .notification-pref-row {
@@ -585,6 +592,7 @@ main {
 .tier-agent .bar { background: var(--accent-agent); }
 .tier-pipeline .bar { background: var(--accent-pipeline); }
 .tier-favorites .bar { background: var(--accent-favorite); }
+.tier-recently-viewed .bar { background: var(--accent-recently-viewed); }
 .tier-runs .bar { background: var(--text-dim); }
 .tier-env .bar { background: var(--accent-pipeline); }
 
@@ -684,6 +692,7 @@ body.density-compact .tier-section {
 .tier-agent .card { --border-accent: var(--accent-agent); }
 .tier-pipeline .card { --border-accent: var(--accent-pipeline); }
 .tier-favorites .card { --border-accent: var(--accent-favorite); }
+.tier-recently-viewed .card { --border-accent: var(--accent-recently-viewed); }
 .tier-templates .card { --border-accent: var(--accent-templates); }
 
 .favorite-toggle {
@@ -2355,6 +2364,32 @@ body.density-compact .tier-section {
 .tag-directory-count {
   color: var(--text-dim);
   font-size: 0.7rem;
+}
+
+.tag-directory-entry {
+  display: inline-flex;
+  align-items: center;
+  gap: 2px;
+}
+
+.tag-directory-rename-btn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  background: var(--bg-elevated);
+  border: 1px solid var(--border);
+  border-radius: 999px;
+  width: 22px;
+  height: 22px;
+  padding: 0;
+  font-size: 0.7rem;
+  color: var(--text-dim);
+  cursor: pointer;
+}
+
+.tag-directory-rename-btn:hover {
+  border-color: var(--accent-automation);
+  color: var(--text);
 }
 
 .tag-chip-list {

@@ -150,8 +150,10 @@
           <input type="text" id="artifact-bulk-tag-input" class="artifact-search-input" placeholder="Tag to apply to selected…" />
           <button id="artifact-bulk-tag-btn" class="btn btn-secondary btn-small" type="button" disabled>Apply tag to selected</button>
           <button id="artifact-bulk-untag-btn" class="btn btn-secondary btn-small" type="button" disabled title="Remove this tag from every selected file">Remove tag from selected</button>
+          <button id="artifact-compare-btn" class="btn btn-secondary btn-small" type="button" disabled title="Select exactly two table-shaped files to compare their schemas">Compare schemas</button>
         </div>
         <div id="artifact-tag-directory" class="tag-directory hidden"></div>
+        <div id="artifact-compare-result" class="hidden"></div>
         <div id="artifact-search-results" class="hidden"></div>
         <div id="artifacts-list" class="runs-table"></div>
 
@@ -174,6 +176,17 @@
         </div>
       </div>
       <div class="card-grid" id="favorites-grid"></div>
+    </section>
+
+    <section class="tier-section tier-recently-viewed hidden" id="recently-viewed-section">
+      <div class="tier-heading">
+        <span class="bar"></span>
+        <h2>Recently Viewed</h2>
+        <div class="tier-heading-actions">
+          <button class="collapse-toggle" type="button" data-collapse-key="recently-viewed">▾</button>
+        </div>
+      </div>
+      <div class="card-grid" id="recently-viewed-grid"></div>
     </section>
 
     <section class="tier-section tier-templates" id="pipeline-templates-section">
@@ -245,6 +258,7 @@
               <option value="interval">Every N seconds</option>
               <option value="daily">Daily at a time</option>
               <option value="weekly">Weekly on a day</option>
+              <option value="once">Once at a date/time</option>
             </select>
           </div>
           <div class="field" id="schedule-interval-field">
@@ -268,6 +282,10 @@
             </select>
             <label for="schedule-weekly-time">At (local time)</label>
             <input type="time" id="schedule-weekly-time" value="09:00" />
+          </div>
+          <div class="field hidden" id="schedule-once-field">
+            <label for="schedule-run-at">Run once at</label>
+            <input type="datetime-local" id="schedule-run-at" />
           </div>
         </div>
         <p id="schedule-error" class="builder-error hidden"></p>

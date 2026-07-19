@@ -702,6 +702,27 @@ A few things live in the header/subheader on every page load:
   from growing unbounded (distinct from mark-all-read, which just flips
   the read flag).
 
+## One-time scheduling, tag renaming, schema comparison, notification export, and recently viewed
+
+- **One-time future-scheduled run** — a fourth schedule type, alongside
+  interval/daily/weekly: pick "Once at a date/time" and it fires exactly
+  once at that instant, then disables itself automatically.
+- **Rename a tag across all artifacts at once** — a ✎ button next to each
+  chip in the artifact tag directory renames that tag everywhere it's
+  used in one action, merging into an existing tag rather than
+  duplicating it if the target name is already present on some file.
+- **Compare two artifacts' schemas** — select exactly two table-shaped
+  files (CSV or ingested JSON) and a new **Compare schemas** button shows
+  which columns are unique to each side and which shared columns
+  disagree on inferred type.
+- **Export notifications/alerts to CSV** — an **Export CSV** link in the
+  bell icon's Alerts section downloads the full alert history, mirroring
+  the existing audit-log CSV export.
+- **Recently Viewed quick-access strip** — a new section tracks the last
+  8 modules run, pipelines run, or artifacts opened, most-recent-first,
+  entirely in `localStorage` — no server round trip, and it hides itself
+  automatically once empty.
+
 ## Tech stack
 
 - **Language:** Python 3.11+ — first-class async/sync support and native SDKs

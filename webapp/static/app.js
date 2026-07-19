@@ -28,6 +28,8 @@ const CONDITION_OPERATOR_LABELS = {
 const THEME_STORAGE_KEY = "aiboss-theme";
 const COLLAPSE_STORAGE_KEY = "aiboss-collapsed-sections";
 const FAVORITES_STORAGE_KEY = "aiboss-favorites";
+const RECENTLY_VIEWED_STORAGE_KEY = "aiboss-recently-viewed";
+const RECENTLY_VIEWED_MAX = 8;
 
 const sectionsEl = document.getElementById("sections");
 const pipelineResultEl = document.getElementById("pipeline-result");
@@ -60,6 +62,8 @@ const resourceWarningBannerEl = document.getElementById("resource-warning-banner
 
 const favoritesSection = document.getElementById("favorites-section");
 const favoritesGrid = document.getElementById("favorites-grid");
+const recentlyViewedSection = document.getElementById("recently-viewed-section");
+const recentlyViewedGrid = document.getElementById("recently-viewed-grid");
 const recentRunsTableEl = document.getElementById("recent-runs-table");
 
 const builderToggleBtn = document.getElementById("builder-toggle");
@@ -98,6 +102,8 @@ const scheduleIntervalEl = document.getElementById("schedule-interval");
 const scheduleDailyTimeEl = document.getElementById("schedule-daily-time");
 const scheduleDayOfWeekEl = document.getElementById("schedule-day-of-week");
 const scheduleWeeklyTimeEl = document.getElementById("schedule-weekly-time");
+const scheduleOnceFieldEl = document.getElementById("schedule-once-field");
+const scheduleRunAtEl = document.getElementById("schedule-run-at");
 const scheduleErrorEl = document.getElementById("schedule-error");
 const scheduleCreateBtn = document.getElementById("schedule-create-btn");
 const schedulesListEl = document.getElementById("schedules-list");
@@ -339,7 +345,10 @@ function renderNotificationsPanel() {
   notificationsPanel.innerHTML = `
     <div class="notification-section-head">
       <h4>Alerts</h4>
-      ${hasReadAlerts ? `<button class="btn btn-secondary btn-small" id="notifications-clear-read-btn" type="button">Clear read</button>` : ""}
+      <div class="notification-section-actions">
+        <a class="btn btn-secondary btn-small" href="/api/notifications.csv" download>Export CSV</a>
+        ${hasReadAlerts ? `<button class="btn btn-secondary btn-small" id="notifications-clear-read-btn" type="button">Clear read</button>` : ""}
+      </div>
     </div>
     ${alertsHtml}
     <h4>Recent activity</h4>
@@ -1199,6 +1208,62 @@ function runFavorite(key) {
   }
 }
 
+// ---- Recently viewed (implicit, recency-based, capped) ----
+
+function loadRecentlyViewedKeys() {
+  try {
+    const parsed = JSON.parse(localStorage.getItem(RECENTLY_VIEWED_STORAGE_KEY) || "[]");
+    return Array.isArray(parsed) ? parsed : [];
+  } catch {
+    return [];
+  }
+}
+
+let recentlyViewedKeys = loadRecentlyViewedKeys();
+
+function saveRecentlyViewedKeys() {
+  localStorage.setItem(RECENTLY_VIEWED_STORAGE_KEY, JSON.stringify(recentlyViewedKeys));
+}
+
+function recordRecentlyViewed(key) {
+  recentlyViewedKeys = recentlyViewedKeys.filter((k) => k !== key);
+  recentlyViewedKeys.unshift(key);
+  recentlyViewedKeys = recentlyViewedKeys.slice(0, RECENTLY_VIEWED_MAX);
+  saveRecentlyViewedKeys();
+  renderRecentlyViewedSection();
+}
+
+function renderRecentlyViewedSection() {
+  const entries = [];
+  for (const key of recentlyViewedKeys) {
+    if (key.startsWith("module::")) {
+      const [, tier, name] = key.split("::");
+      const module = (currentModulesByTier[tier] || []).find((m) => m.name === name);
+      if (module) entries.push({ key, label: module.name, description: module.description, action: "run" });
+    } else if (key.startsWith("pipeline::")) {
+      const slug = key.slice("pipeline::".length);
+      const pipeline = currentPipelines.find((p) => p.slug === slug);
+      if (pipeline) entries.push({ key, label: pipeline.name, description: pipeline.description, action: "run" });
+    } else if (key.startsWith("artifact::")) {
+      const filename = key.slice("artifact::".length);
+      const artifact = currentArtifacts.find((f) => f.name === filename);
+      if (artifact) entries.push({ key, label: artifact.name, description: formatBytes(artifact.size_bytes), action: "view" });
+    }
+  }
+
+  if (!entries.length) {
+    recentlyViewedSection.classList.add("hidden");
+    return;
+  }
+
+  recentlyViewedSection.classList.remove("hidden");
+  recentlyViewedGrid.innerHTML = entries.map(renderFavoriteChip).join("");
+  wireFavoriteToggles(recentlyViewedGrid);
+  recentlyViewedGrid.querySelectorAll("[data-fav-run]").forEach((btn) => {
+    btn.addEventListener("click", () => runFavorite(btn.dataset.favRun));
+  });
+}
+
 // ---- Skeleton loaders ----
 
 function skeletonCardHtml() {
@@ -1850,6 +1915,7 @@ async function loadModules() {
   currentModulesByTier = modulesByTier;
   renderSections(modulesByTier);
   renderFavoritesSection();
+  renderRecentlyViewedSection();
   return modulesByTier;
 }
 
@@ -1863,6 +1929,7 @@ async function runModule(tier, name) {
   const cardId = `card__${tier}__${name}`;
   const card = document.getElementById(cardId);
   card.scrollIntoView({ behavior: "smooth", block: "center" });
+  recordRecentlyViewed(`module::${tier}::${name}`);
 
   const button = card.querySelector(".btn-run");
   const resultPanel = card.querySelector(".result-panel");
@@ -3026,6 +3093,7 @@ function renderSavedPipelines(pipelinesList) {
   populatePipelineCompareSelects(pipelinesList);
   applySearchFilter();
   renderFavoritesSection();
+  renderRecentlyViewedSection();
 }
 
 // ---- Pipeline comparison ----
@@ -3473,6 +3541,7 @@ async function clonePipeline(slug) {
 async function runSavedPipeline(slug, name, pipelinesList) {
   const card = document.getElementById(`pipeline-card__${slug}`);
   card.scrollIntoView({ behavior: "smooth", block: "center" });
+  recordRecentlyViewed(`pipeline::${slug}`);
 
   const button = card.querySelector(".btn-run");
   const tracker = card.querySelector(".tracker");
@@ -3534,6 +3603,8 @@ const artifactTagDirectoryEl = document.getElementById("artifact-tag-directory")
 const artifactBulkTagInput = document.getElementById("artifact-bulk-tag-input");
 const artifactBulkTagBtn = document.getElementById("artifact-bulk-tag-btn");
 const artifactBulkUntagBtn = document.getElementById("artifact-bulk-untag-btn");
+const artifactCompareBtn = document.getElementById("artifact-compare-btn");
+const artifactCompareResultEl = document.getElementById("artifact-compare-result");
 
 const selectedArtifactNames = new Set();
 
@@ -3561,6 +3632,7 @@ function updateArtifactBulkTagBtn() {
   artifactBulkUntagBtn.textContent = selectedArtifactNames.size
     ? `Remove tag from selected (${selectedArtifactNames.size})`
     : "Remove tag from selected";
+  artifactCompareBtn.disabled = selectedArtifactNames.size !== 2;
 }
 
 async function loadArtifactTagDirectory() {
@@ -3576,8 +3648,11 @@ async function loadArtifactTagDirectory() {
   artifactTagDirectoryEl.classList.remove("hidden");
   artifactTagDirectoryEl.innerHTML = summary
     .map(
-      (entry) =>
-        `<button type="button" class="tag-directory-chip" data-tag="${escapeHtml(entry.tag)}">${escapeHtml(entry.tag)} <span class="tag-directory-count">${entry.count}</span></button>`
+      (entry) => `
+      <span class="tag-directory-entry">
+        <button type="button" class="tag-directory-chip" data-tag="${escapeHtml(entry.tag)}">${escapeHtml(entry.tag)} <span class="tag-directory-count">${entry.count}</span></button>
+        <button type="button" class="tag-directory-rename-btn" data-tag="${escapeHtml(entry.tag)}" title="Rename this tag everywhere it's used">✎</button>
+      </span>`
     )
     .join("");
 
@@ -3585,6 +3660,27 @@ async function loadArtifactTagDirectory() {
     chip.addEventListener("click", () => {
       artifactTagFilterInput.value = chip.dataset.tag;
       loadArtifacts();
+    });
+  });
+
+  artifactTagDirectoryEl.querySelectorAll(".tag-directory-rename-btn").forEach((btn) => {
+    btn.addEventListener("click", async () => {
+      const oldTag = btn.dataset.tag;
+      const newTag = prompt(`Rename tag "${oldTag}" to:`, oldTag);
+      if (!newTag || !newTag.trim() || newTag.trim() === oldTag) return;
+      try {
+        const res = await fetch("/api/artifacts/rename-tag", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ old_tag: oldTag, new_tag: newTag.trim() }),
+        });
+        const body = await res.json();
+        if (!res.ok) throw new Error(body.detail || `HTTP ${res.status}`);
+        showToast(`Renamed "${oldTag}" to "${newTag.trim()}" on ${body.renamed.length} file(s).`, "success");
+        await loadArtifacts();
+      } catch (err) {
+        showToast(`Could not rename tag: ${err}`, "error");
+      }
     });
   });
 }
@@ -3608,6 +3704,7 @@ async function loadArtifacts() {
     }</div>`;
     updateArtifactBulkTagBtn();
     renderFavoritesSection();
+    renderRecentlyViewedSection();
     return;
   }
 
@@ -3672,6 +3769,7 @@ async function loadArtifacts() {
   updateArtifactBulkTagBtn();
   wireFavoriteToggles(artifactsListEl);
   renderFavoritesSection();
+  renderRecentlyViewedSection();
 
   artifactsListEl.querySelectorAll(".artifact-view-btn").forEach((btn) => {
     btn.addEventListener("click", () => toggleArtifactContent(btn.dataset.artifact));
@@ -3748,6 +3846,7 @@ async function toggleArtifactContent(filename) {
   }
 
   row.classList.remove("hidden");
+  recordRecentlyViewed(`artifact::${filename}`);
   cell.innerHTML = `<p class="card-desc">Loading…</p>`;
   try {
     const res = await fetch(`/api/artifacts/${encodeURIComponent(filename)}/content`);
@@ -4016,6 +4115,47 @@ artifactBulkUntagBtn.addEventListener("click", async () => {
   }
 });
 
+artifactCompareBtn.addEventListener("click", async () => {
+  if (selectedArtifactNames.size !== 2) return;
+  const [a, b] = [...selectedArtifactNames];
+
+  artifactCompareResultEl.classList.remove("hidden");
+  artifactCompareResultEl.innerHTML = `<div class="runs-empty">Comparing…</div>`;
+
+  try {
+    const res = await fetch(`/api/artifacts/compare-schema?a=${encodeURIComponent(a)}&b=${encodeURIComponent(b)}`);
+    const body = await res.json();
+    if (!res.ok) {
+      artifactCompareResultEl.innerHTML = `<div class="runs-empty">${escapeHtml(body.detail || "Could not compare these artifacts.")}</div>`;
+      return;
+    }
+
+    const rows = [];
+    body.only_in_a.forEach((col) => rows.push({ label: col, meta: `Only in ${body.a.filename}` }));
+    body.only_in_b.forEach((col) => rows.push({ label: col, meta: `Only in ${body.b.filename}` }));
+    body.type_mismatches.forEach((m) =>
+      rows.push({ label: m.column, meta: `${body.a.filename}: ${m.a_type} vs. ${body.b.filename}: ${m.b_type}` })
+    );
+
+    artifactCompareResultEl.innerHTML = rows.length
+      ? rows
+          .map(
+            (row) => `
+            <div class="schedule-row">
+              <div class="schedule-row-main">
+                <strong>${escapeHtml(row.label)}</strong>
+                <span class="schedule-row-meta">${escapeHtml(row.meta)}</span>
+              </div>
+            </div>`
+          )
+          .join("") +
+        `<div class="schedule-row-meta" style="padding: 6px 0;">${body.matching.length} matching column(s): ${escapeHtml(body.matching.join(", ") || "none")}</div>`
+      : `<div class="runs-empty">These schemas match exactly (${body.matching.length} column(s)).</div>`;
+  } catch (err) {
+    artifactCompareResultEl.innerHTML = `<div class="runs-empty">Compare failed: ${err}</div>`;
+  }
+});
+
 const runsPurgeHoursInput = document.getElementById("runs-purge-hours");
 const runsPurgeBtn = document.getElementById("runs-purge-btn");
 
@@ -4259,7 +4399,9 @@ async function loadSchedules() {
           ? `daily at ${escapeHtml(s.daily_time)}`
           : s.schedule_type === "weekly"
             ? `weekly on ${WEEKDAY_NAMES[s.day_of_week]} at ${escapeHtml(s.daily_time)}`
-            : `every ${formatInterval(s.interval_seconds)}`;
+            : s.schedule_type === "once"
+              ? `once at ${new Date(s.next_run_at).toLocaleString()}`
+              : `every ${formatInterval(s.interval_seconds)}`;
       return `
         <div class="schedule-row">
           <div class="schedule-row-main">
@@ -4310,6 +4452,7 @@ scheduleFrequencyEl.addEventListener("change", () => {
   scheduleIntervalFieldEl.classList.toggle("hidden", frequency !== "interval");
   scheduleDailyFieldEl.classList.toggle("hidden", frequency !== "daily");
   scheduleWeeklyFieldEl.classList.toggle("hidden", frequency !== "weekly");
+  scheduleOnceFieldEl.classList.toggle("hidden", frequency !== "once");
 });
 
 scheduleCreateBtn.addEventListener("click", async () => {
@@ -4330,6 +4473,8 @@ scheduleCreateBtn.addEventListener("click", async () => {
   } else if (scheduleType === "weekly") {
     payload.daily_time = scheduleWeeklyTimeEl.value;
     payload.day_of_week = Number(scheduleDayOfWeekEl.value);
+  } else if (scheduleType === "once") {
+    payload.run_at = scheduleRunAtEl.value;
   } else {
     payload.interval_seconds = Number(scheduleIntervalEl.value);
   }

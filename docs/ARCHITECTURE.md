@@ -1606,6 +1606,80 @@ only a JSON parse error or timeout falls back to an empty issue list.
      read-only deletion and its endpoint round trip. 429 tests total,
      stable across repeated clean full-suite runs.
 
+135. **Add a one-time future-scheduled run** (a fourth `schedule_type`,
+     `"once"`, alongside `interval`/`daily`/`weekly` -- no new columns
+     needed, since the existing nullable `interval_seconds`/`daily_time`/
+     `day_of_week` are all simply unused for this type). `Scheduler._tick()`
+     fires it exactly like any other due schedule but, instead of computing
+     a real next run time, calls `set_schedule_enabled(id, False)` right
+     after so `due_schedules()`'s own `WHERE enabled = 1` filter naturally
+     excludes it from every future tick -- no separate "has this already
+     fired" tracking needed. `POST /api/schedules` accepts a `run_at` ISO
+     8601 datetime for this type, converts it to UTC via
+     `datetime.fromisoformat(...).astimezone(timezone.utc)` (handles both a
+     naive `datetime-local` value, assumed system-local, and an
+     already-tz-aware one), and 400s on a blank, malformed, or
+     already-past `run_at`. A **Once at a date/time** option in the
+     existing schedule-frequency dropdown reveals a `datetime-local` input.
+136. **Add renaming a tag across every artifact at once**
+     (`POST /api/artifacts/rename-tag` -- iterates
+     `store.all_artifact_tags()` once, and for every file carrying
+     `old_tag` swaps it for `new_tag` via the existing per-file
+     `set_artifact_tags()` write path, merging rather than duplicating if
+     that file already has `new_tag` too, since tags are already stored as
+     a de-duplicated sorted list). A small ✎ button next to each chip in
+     the artifact tag directory prompts for the new name and reports how
+     many files it touched.
+137. **Add comparing two artifacts' schemas**
+     (`GET /api/artifacts/compare-schema?a=&b=` -- reuses the existing
+     `infer_schema()`-backed `schema` field from
+     `ingestion.read_artifact_content()` for each side, 404s on an unknown
+     filename and 400s if either side isn't a table-shaped artifact with an
+     inferable schema, then reports columns only in A, only in B, matching
+     columns, and any shared column whose inferred type disagrees).
+     Selecting exactly two files in the artifact list enables a new
+     **Compare schemas** button next to the existing bulk-tag controls,
+     rendering the diff inline, mirroring the run-compare/pipeline-compare
+     UI pattern already used elsewhere.
+138. **Add exporting notifications/alerts to CSV**
+     (`GET /api/notifications.csv` -- the same `csv.DictWriter` +
+     `StreamingResponse` pattern as `GET /api/audit-log.csv`, over
+     `id, kind, message, created_at, read`). An **Export CSV** link sits in
+     the bell-icon dropdown's Alerts section heading, next to the existing
+     conditional **Clear read** button.
+139. **Add a Recently Viewed quick-access strip** (frontend-only,
+     `localStorage`-backed under a new `aiboss-recently-viewed` key --
+     unlike Favorites, which is an explicit unordered `Set` the user
+     curates, this is an implicit most-recent-first array capped at 8
+     entries, sharing the exact same `module::tier::name` /
+     `pipeline::slug` / `artifact::filename` key namespace so it reuses
+     `renderFavoriteChip()` and `wireFavoriteToggles()` unchanged). A key is
+     recorded whenever a module is run, a saved pipeline is run, or an
+     artifact's content is opened; the new **Recently Viewed** section
+     hides itself automatically once its recorded keys resolve to zero
+     still-existing entries, the same self-hiding rule Favorites already
+     follows.
+140. **Add tests for all of Batch 16**: a scheduler test firing a `"once"`
+     schedule exactly once across several poll ticks and then finding it
+     disabled; the `once` schedule create endpoint's future-datetime
+     success case, past-`run_at` rejection, missing-`run_at` rejection, and
+     malformed-`run_at` rejection; tag rename across multiple affected
+     files, merging into an already-present tag without duplicating,
+     a no-op when nothing has the tag, and rejecting blank or identical
+     old/new names; schema-compare's matching-schemas case, unique-column
+     detection on each side, a type-mismatch flag on a shared column, a
+     404 on an unknown filename, and a 400 on a non-table artifact;
+     notifications-CSV containing a just-created row and respecting
+     `limit`. 446 tests total, stable across repeated clean full-suite
+     runs. Live-verified end to end with Playwright against a freshly
+     started server: creating and confirming a real once-schedule in the
+     Schedules list, renaming a tag across two tagged files via the
+     directory's ✎ button, selecting two artifacts and reading a rendered
+     schema diff, exporting notifications to CSV and finding a newly
+     created notification's message inside it, and confirming the
+     Recently Viewed strip appears and updates after both viewing an
+     artifact and running a module.
+
 ## 9. Roadmap
 
 The current engine is intentionally a single-process, synchronous, SQLite-backed

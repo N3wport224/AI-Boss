@@ -308,3 +308,29 @@ def test_clear_read_notifications_via_the_api():
     remaining = client.get("/api/notifications").json()
     assert not any(n["id"] == a["id"] for n in remaining)
     assert any(n["message"] == "stays around" for n in remaining)
+
+
+# ---- Batch 16: export notifications/alerts to CSV ----
+
+def test_notifications_csv_export_contains_header_and_created_rows():
+    unique_message = "csv export marker message 3031"
+    created = client.post("/api/notifications", json={"kind": "info", "message": unique_message}).json()
+
+    res = client.get("/api/notifications.csv")
+    assert res.status_code == 200
+    assert res.headers["content-type"].startswith("text/csv")
+    assert "attachment; filename=notifications.csv" in res.headers["content-disposition"]
+
+    lines = res.text.strip().splitlines()
+    assert lines[0] == "id,kind,message,created_at,read"
+    assert any(str(created["id"]) in line and unique_message in line for line in lines[1:])
+
+
+def test_notifications_csv_export_respects_limit():
+    for i in range(5):
+        client.post("/api/notifications", json={"kind": "info", "message": f"limit test message {3032 + i}"})
+
+    res = client.get("/api/notifications.csv", params={"limit": 2})
+    assert res.status_code == 200
+    lines = res.text.strip().splitlines()
+    assert len(lines) - 1 == 2  # header + exactly 2 data rows

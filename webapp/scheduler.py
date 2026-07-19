@@ -109,10 +109,18 @@ class Scheduler:
                 status = f"error: {exc}"
                 if self.on_error is not None:
                     self.on_error(schedule, str(exc))
-            if schedule.get("schedule_type") == "daily":
+            schedule_type = schedule.get("schedule_type")
+            if schedule_type == "daily":
                 next_run_at = next_daily_run_at(schedule["daily_time"], now)
-            elif schedule.get("schedule_type") == "weekly":
+            elif schedule_type == "weekly":
                 next_run_at = next_weekly_run_at(schedule["day_of_week"], schedule["daily_time"], now)
+            elif schedule_type == "once":
+                # Never recomputed -- disabling it below is what actually
+                # stops it firing again; the exact value left in
+                # next_run_at from here on is never read again.
+                next_run_at = now
             else:
                 next_run_at = now + timedelta(seconds=schedule["interval_seconds"])
             self.state_store.record_schedule_run(schedule["id"], next_run_at.isoformat(), status)
+            if schedule_type == "once":
+                self.state_store.set_schedule_enabled(schedule["id"], False)

@@ -623,3 +623,133 @@ def test_bulk_untag_skips_unknown_filenames_without_failing():
 def test_bulk_untag_rejects_a_blank_tag():
     res = client.post("/api/artifacts/bulk-untag", json={"filenames": [], "tag": "   "})
     assert res.status_code == 400
+
+
+# ---- Batch 16: rename a tag across all artifacts at once ----
+
+def test_rename_tag_renames_across_every_affected_file():
+    client.post("/api/ingest/csv", files={"file": ("rename_a.csv", b"x,y\n1011,1012\n", "text/csv")})
+    client.post("/api/ingest/csv", files={"file": ("rename_b.csv", b"x,y\n1013,1014\n", "text/csv")})
+    files = client.get("/api/artifacts").json()
+    a_name = next(f["name"] for f in files if f["name"].endswith("rename_a.csv"))
+    b_name = next(f["name"] for f in files if f["name"].endswith("rename_b.csv"))
+
+    client.put(f"/api/artifacts/{a_name}/tags", json={"tags": ["reviewd", "keep_me"]})
+    client.put(f"/api/artifacts/{b_name}/tags", json={"tags": ["reviewd"]})
+
+    res = client.post("/api/artifacts/rename-tag", json={"old_tag": "reviewd", "new_tag": "reviewed"})
+    assert res.status_code == 200
+    body = res.json()
+    assert body["old_tag"] == "reviewd"
+    assert body["new_tag"] == "reviewed"
+    assert set(body["renamed"]) == {a_name, b_name}
+
+    updated = client.get("/api/artifacts").json()
+    a_tags = next(f["tags"] for f in updated if f["name"] == a_name)
+    b_tags = next(f["tags"] for f in updated if f["name"] == b_name)
+    assert set(a_tags) == {"reviewed", "keep_me"}
+    assert b_tags == ["reviewed"]
+
+
+def test_rename_tag_merges_without_duplicating_if_new_tag_already_present():
+    client.post("/api/ingest/csv", files={"file": ("rename_c.csv", b"x,y\n1015,1016\n", "text/csv")})
+    c_name = next(f["name"] for f in client.get("/api/artifacts").json() if f["name"].endswith("rename_c.csv"))
+    client.put(f"/api/artifacts/{c_name}/tags", json={"tags": ["old_name", "already_here"]})
+
+    res = client.post("/api/artifacts/rename-tag", json={"old_tag": "old_name", "new_tag": "already_here"})
+    assert res.status_code == 200
+
+    updated = client.get("/api/artifacts").json()
+    c_tags = next(f["tags"] for f in updated if f["name"] == c_name)
+    assert c_tags == ["already_here"]
+
+
+def test_rename_tag_is_a_no_op_when_nothing_has_the_tag():
+    res = client.post("/api/artifacts/rename-tag", json={"old_tag": "zzz_never_used_zzz", "new_tag": "whatever"})
+    assert res.status_code == 200
+    assert res.json()["renamed"] == []
+
+
+def test_rename_tag_rejects_blank_names():
+    res = client.post("/api/artifacts/rename-tag", json={"old_tag": "  ", "new_tag": "whatever"})
+    assert res.status_code == 400
+    res2 = client.post("/api/artifacts/rename-tag", json={"old_tag": "whatever", "new_tag": "   "})
+    assert res2.status_code == 400
+
+
+def test_rename_tag_rejects_identical_old_and_new():
+    res = client.post("/api/artifacts/rename-tag", json={"old_tag": "same", "new_tag": "same"})
+    assert res.status_code == 400
+
+
+# ---- Batch 16: compare two artifacts' schemas ----
+
+def test_compare_schema_reports_matching_columns_when_schemas_agree():
+    client.post("/api/ingest/csv", files={"file": ("cmp_a.csv", b"name,revenue\nRow2001,2002\nRow2003,2004\n", "text/csv")})
+    client.post("/api/ingest/csv", files={"file": ("cmp_b.csv", b"name,revenue\nRow2005,2006\n", "text/csv")})
+    files = client.get("/api/artifacts").json()
+    a_name = next(f["name"] for f in files if f["name"].endswith("cmp_a.csv"))
+    b_name = next(f["name"] for f in files if f["name"].endswith("cmp_b.csv"))
+
+    res = client.get("/api/artifacts/compare-schema", params={"a": a_name, "b": b_name})
+    assert res.status_code == 200
+    body = res.json()
+    assert body["a"]["filename"] == a_name
+    assert body["b"]["filename"] == b_name
+    assert body["only_in_a"] == []
+    assert body["only_in_b"] == []
+    assert set(body["matching"]) == {"name", "revenue"}
+    assert body["type_mismatches"] == []
+
+
+def test_compare_schema_reports_columns_unique_to_each_side():
+    client.post("/api/ingest/csv", files={"file": ("cmp_c.csv", b"name,revenue\nRow2007,2008\n", "text/csv")})
+    client.post("/api/ingest/csv", files={"file": ("cmp_d.csv", b"name,region\nRow2009,West2010\n", "text/csv")})
+    files = client.get("/api/artifacts").json()
+    c_name = next(f["name"] for f in files if f["name"].endswith("cmp_c.csv"))
+    d_name = next(f["name"] for f in files if f["name"].endswith("cmp_d.csv"))
+
+    res = client.get("/api/artifacts/compare-schema", params={"a": c_name, "b": d_name})
+    body = res.json()
+    assert body["only_in_a"] == ["revenue"]
+    assert body["only_in_b"] == ["region"]
+    assert body["matching"] == ["name"]
+
+
+def test_compare_schema_flags_a_type_mismatch_on_a_shared_column():
+    client.post("/api/ingest/csv", files={"file": ("cmp_e.csv", b"id,amount\n2011,2012\n2013,2014\n", "text/csv")})
+    client.post("/api/ingest/csv", files={"file": ("cmp_f.csv", b"id,amount\nrowx2015,cash2016\nrowy2017,card2018\n", "text/csv")})
+    files = client.get("/api/artifacts").json()
+    e_name = next(f["name"] for f in files if f["name"].endswith("cmp_e.csv"))
+    f_name = next(f["name"] for f in files if f["name"].endswith("cmp_f.csv"))
+
+    res = client.get("/api/artifacts/compare-schema", params={"a": e_name, "b": f_name})
+    body = res.json()
+    mismatch_cols = {m["column"] for m in body["type_mismatches"]}
+    assert "amount" in mismatch_cols
+    assert "id" in mismatch_cols  # int vs text
+
+
+def test_compare_schema_404s_on_unknown_filename():
+    client.post("/api/ingest/csv", files={"file": ("cmp_g.csv", b"x,y\n2019,2020\n", "text/csv")})
+    g_name = next(f["name"] for f in client.get("/api/artifacts").json() if f["name"].endswith("cmp_g.csv"))
+
+    res = client.get("/api/artifacts/compare-schema", params={"a": g_name, "b": "does-not-exist.csv"})
+    assert res.status_code == 404
+
+
+def test_compare_schema_rejects_a_non_table_artifact():
+    from pypdf import PdfWriter
+
+    writer = PdfWriter()
+    writer.add_blank_page(width=93, height=93)
+    buf = io.BytesIO()
+    writer.write(buf)
+    client.post("/api/ingest/pdf", files={"file": ("cmp_doc.pdf", buf.getvalue(), "application/pdf")})
+    client.post("/api/ingest/csv", files={"file": ("cmp_h.csv", b"x,y\n2021,2022\n", "text/csv")})
+    files = client.get("/api/artifacts").json()
+    pdf_name = next(f["name"] for f in files if f["name"].endswith(".pdf"))
+    h_name = next(f["name"] for f in files if f["name"].endswith("cmp_h.csv"))
+
+    res = client.get("/api/artifacts/compare-schema", params={"a": pdf_name, "b": h_name})
+    assert res.status_code == 400

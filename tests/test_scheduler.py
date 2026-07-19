@@ -180,6 +180,29 @@ def test_scheduler_fires_a_weekly_schedule_whose_day_and_time_are_already_due(tm
     store.close()
 
 
+def test_scheduler_fires_a_once_schedule_exactly_once_then_disables_it(tmp_path):
+    store = StateStore(str(tmp_path / "once.db"))
+    calls = []
+    scheduler = Scheduler(store, trigger=lambda schedule: calls.append(schedule["id"]), poll_interval=0.05)
+
+    now = datetime.now(timezone.utc)
+    store.create_schedule(
+        kind="module", name="fake_once", interval_seconds=None,
+        next_run_at=now.isoformat(), tier="automation", inputs={},
+        schedule_type="once",
+    )
+
+    scheduler.start()
+    time.sleep(0.3)  # several poll intervals -- a bug here would fire more than once
+    scheduler.stop()
+
+    assert len(calls) == 1
+    updated = store.list_schedules()[0]
+    assert updated["last_status"] == "triggered"
+    assert updated["enabled"] is False
+    store.close()
+
+
 def test_scheduler_pause_stops_all_schedules_from_firing_regardless_of_their_own_enabled_state(tmp_path):
     store = StateStore(str(tmp_path / "paused.db"))
     calls = []
