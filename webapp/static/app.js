@@ -37,6 +37,7 @@ const modulesSelectAllEl = document.getElementById("modules-select-all");
 const modulesBulkEnableBtn = document.getElementById("modules-bulk-enable-btn");
 const modulesBulkDisableBtn = document.getElementById("modules-bulk-disable-btn");
 const modulesBulkResetBreakerBtn = document.getElementById("modules-bulk-reset-breaker-btn");
+const modulesBulkClearThresholdBtn = document.getElementById("modules-bulk-clear-threshold-btn");
 const modulesProblemsFilterEl = document.getElementById("modules-problems-filter");
 const pipelineResultEl = document.getElementById("pipeline-result");
 const runPipelineBtn = document.getElementById("run-pipeline-btn");
@@ -99,6 +100,7 @@ const pipelinesBulkUntagInput = document.getElementById("pipelines-bulk-untag-in
 const pipelinesBulkUntagBtn = document.getElementById("pipelines-bulk-untag-btn");
 const pipelinesBulkTagInput = document.getElementById("pipelines-bulk-tag-input");
 const pipelinesBulkTagBtn = document.getElementById("pipelines-bulk-tag-btn");
+const pipelinesBulkDuplicateBtn = document.getElementById("pipelines-bulk-duplicate-btn");
 
 const selectedPipelineSlugs = new Set();
 
@@ -115,7 +117,32 @@ function updatePipelinesBulkDeleteBtn() {
   pipelinesBulkTagBtn.textContent = selectedPipelineSlugs.size
     ? `Apply tag to selected (${selectedPipelineSlugs.size})`
     : "Apply tag to selected";
+  pipelinesBulkDuplicateBtn.disabled = selectedPipelineSlugs.size === 0;
+  pipelinesBulkDuplicateBtn.textContent = selectedPipelineSlugs.size
+    ? `Duplicate selected (${selectedPipelineSlugs.size})`
+    : "Duplicate selected";
 }
+
+pipelinesBulkDuplicateBtn.addEventListener("click", async () => {
+  if (!selectedPipelineSlugs.size) return;
+  try {
+    const res = await fetch("/api/pipelines/bulk-duplicate", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ slugs: [...selectedPipelineSlugs] }),
+    });
+    const body = await res.json();
+    if (!res.ok) {
+      showToast(body.detail || "Failed to duplicate selected pipelines.", "error");
+      return;
+    }
+    showToast(`Duplicated ${body.duplicated.length} pipeline(s).`, "success");
+    selectedPipelineSlugs.clear();
+    await loadSavedPipelines();
+  } catch (err) {
+    showToast(`Bulk duplicate failed: ${err}`, "error");
+  }
+});
 
 pipelinesBulkTagBtn.addEventListener("click", async () => {
   const tag = pipelinesBulkTagInput.value.trim();
@@ -2083,10 +2110,12 @@ function updateModulesBulkButtons() {
   modulesBulkEnableBtn.disabled = disabled;
   modulesBulkDisableBtn.disabled = disabled;
   modulesBulkResetBreakerBtn.disabled = disabled;
+  modulesBulkClearThresholdBtn.disabled = disabled;
   const suffix = selectedModuleRefs.size ? ` (${selectedModuleRefs.size})` : "";
   modulesBulkEnableBtn.textContent = `Enable selected${suffix}`;
   modulesBulkDisableBtn.textContent = `Disable selected${suffix}`;
   modulesBulkResetBreakerBtn.textContent = `Reset breakers for selected${suffix}`;
+  modulesBulkClearThresholdBtn.textContent = `Clear threshold overrides${suffix}`;
 }
 
 function wireModuleSelectCheckboxes() {
@@ -2152,6 +2181,22 @@ modulesBulkResetBreakerBtn.addEventListener("click", async () => {
     body: JSON.stringify({ modules }),
   });
   showToast(`Reset ${modules.length} circuit breaker(s).`, "success");
+  selectedModuleRefs.clear();
+  await loadModules();
+});
+
+modulesBulkClearThresholdBtn.addEventListener("click", async () => {
+  if (!selectedModuleRefs.size) return;
+  const modules = [...selectedModuleRefs].map((ref) => {
+    const [tier, name] = ref.split("::");
+    return { tier, name };
+  });
+  await fetch("/api/breakers/bulk-clear-threshold", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ modules }),
+  });
+  showToast(`Cleared threshold override for ${modules.length} module(s).`, "success");
   selectedModuleRefs.clear();
   await loadModules();
 });
@@ -4182,6 +4227,7 @@ const artifactBulkUntagBtn = document.getElementById("artifact-bulk-untag-btn");
 const artifactCompareBtn = document.getElementById("artifact-compare-btn");
 const artifactCompareResultEl = document.getElementById("artifact-compare-result");
 const artifactBulkFavoriteBtn = document.getElementById("artifact-bulk-favorite-btn");
+const artifactBulkDownloadBtn = document.getElementById("artifact-bulk-download-btn");
 const artifactBulkDeleteBtn = document.getElementById("artifact-bulk-delete-btn");
 
 const selectedArtifactNames = new Set();
@@ -4215,6 +4261,10 @@ function updateArtifactBulkTagBtn() {
   artifactBulkFavoriteBtn.textContent = selectedArtifactNames.size
     ? `★ Favorite selected (${selectedArtifactNames.size})`
     : "★ Favorite selected";
+  artifactBulkDownloadBtn.disabled = selectedArtifactNames.size === 0;
+  artifactBulkDownloadBtn.textContent = selectedArtifactNames.size
+    ? `⬇ Download selected (${selectedArtifactNames.size})`
+    : "⬇ Download selected";
   artifactBulkDeleteBtn.disabled = selectedArtifactNames.size === 0;
   artifactBulkDeleteBtn.textContent = selectedArtifactNames.size
     ? `Delete selected (${selectedArtifactNames.size})`
@@ -4752,6 +4802,34 @@ artifactBulkFavoriteBtn.addEventListener("click", () => {
   renderFavoritesSection();
   showToast(`Favorited ${selectedArtifactNames.size} artifact(s).`, "success");
   loadArtifacts();
+});
+
+artifactBulkDownloadBtn.addEventListener("click", async () => {
+  if (!selectedArtifactNames.size) return;
+  try {
+    const res = await fetch("/api/artifacts/bulk-download", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ filenames: [...selectedArtifactNames] }),
+    });
+    if (!res.ok) {
+      const body = await res.json();
+      showToast(body.detail || "Failed to download selected artifacts.", "error");
+      return;
+    }
+    const blob = await res.blob();
+    const url = URL.createObjectURL(blob);
+    const link = document.createElement("a");
+    link.href = url;
+    link.download = "artifacts_export.zip";
+    document.body.appendChild(link);
+    link.click();
+    link.remove();
+    URL.revokeObjectURL(url);
+    showToast(`Downloaded ${selectedArtifactNames.size} artifact(s) as a zip.`, "success");
+  } catch (err) {
+    showToast(`Bulk download failed: ${err}`, "error");
+  }
 });
 
 artifactBulkDeleteBtn.addEventListener("click", async () => {

@@ -586,6 +586,31 @@ def list_modules():
     return result
 
 
+@app.get("/api/modules/used-by.csv")
+def modules_used_by_csv():
+    """The module-to-pipeline reverse lookup (see the 'used_by' field on
+    GET /api/modules, and the "Used by" chips shown inline on each module
+    card) as a downloadable CSV -- one row per enabled module, with a
+    semicolon-joined list of the saved pipeline slugs that reference it
+    (a plain comma would collide with the CSV column separator).
+    Mirrors every other CSV export in this app."""
+    buffer = io.StringIO()
+    writer = csv.DictWriter(buffer, fieldnames=["tier", "name", "used_by"])
+    writer.writeheader()
+    for tier, directory in TIER_DIRS.items():
+        for manifest in load_manifests(directory):
+            if not manifest.get("enabled", True):
+                continue
+            used_by = pipeline_store.pipelines_using_module(tier, manifest["name"])
+            writer.writerow({"tier": tier, "name": manifest["name"], "used_by": ";".join(used_by)})
+
+    return StreamingResponse(
+        iter([buffer.getvalue()]),
+        media_type="text/csv",
+        headers={"Content-Disposition": "attachment; filename=modules_used_by.csv"},
+    )
+
+
 class ModuleScaffoldRequest(BaseModel):
     tier: str
     name: str
@@ -815,6 +840,34 @@ def clear_breaker_threshold(tier: str, name: str):
     _manifest_by_name(tier, name)  # 404 for a module that doesn't exist
     store.clear_breaker_threshold_override(tier, name)
     return {"tier": tier, "name": name, "threshold": _breaker_threshold(tier, name)}
+
+
+class BulkClearBreakerThresholds(BaseModel):
+    modules: list[ModuleRef]
+
+
+@app.post("/api/breakers/bulk-clear-threshold")
+def bulk_clear_breaker_thresholds(payload: BulkClearBreakerThresholds):
+    """Revert a user-picked set of modules back to their manifest-declared
+    (or engine-default) breaker threshold in one action -- the bulk
+    counterpart to DELETE /api/breakers/{tier}/{name}/threshold, distinct
+    from POST /api/breakers/bulk-reset which clears the trip *state*
+    (consecutive failures/tripped flag) rather than the threshold
+    *configuration*. An unknown tier/name is skipped rather than failing
+    the whole batch."""
+    cleared = []
+    for ref in payload.modules:
+        try:
+            _manifest_by_name(ref.tier, ref.name)
+        except HTTPException:
+            continue
+        store.clear_breaker_threshold_override(ref.tier, ref.name)
+        cleared.append({"tier": ref.tier, "name": ref.name})
+    store.record_audit_event(
+        "breaker_threshold_bulk_clear",
+        f"Cleared breaker threshold override for {len(cleared)} selected module(s): {cleared}.",
+    )
+    return {"cleared": cleared}
 
 
 class ModuleEnabledUpdate(BaseModel):
@@ -1155,6 +1208,31 @@ def duplicate_pipeline(slug: str):
     except FileNotFoundError:
         raise HTTPException(status_code=404, detail=f"No saved pipeline named '{slug}'.")
     return {"pipeline": duplicated}
+
+
+class BulkDuplicatePipelines(BaseModel):
+    slugs: list[str]
+
+
+@app.post("/api/pipelines/bulk-duplicate")
+def bulk_duplicate_pipelines(payload: BulkDuplicatePipelines):
+    """Clone a user-picked set of saved pipelines in one action -- the
+    finer-grained counterpart to duplicating one at a time, mirroring the
+    existing bulk-delete/bulk-tag patterns for pipelines. Each duplicate
+    gets the same non-colliding '(copy)' naming scheme as the single
+    duplicate action. An unknown slug is skipped rather than failing the
+    whole batch."""
+    duplicated = []
+    for slug in payload.slugs:
+        try:
+            duplicated.append(pipeline_store.duplicate_pipeline(slug, TIER_DIRS))
+        except FileNotFoundError:
+            continue
+    store.record_audit_event(
+        "pipeline_bulk_duplicate",
+        f"Duplicated {len(duplicated)} selected pipeline(s): {[p['slug'] for p in duplicated]}.",
+    )
+    return {"duplicated": duplicated}
 
 
 class PipelineRename(BaseModel):
@@ -2394,6 +2472,41 @@ def bulk_delete_artifacts(payload: BulkDeleteArtifacts):
             deleted.append(safe_name)
     store.record_audit_event("artifact_bulk_delete", f"Deleted {len(deleted)} selected artifact(s): {deleted}.")
     return {"deleted": deleted}
+
+
+class BulkDownloadArtifacts(BaseModel):
+    filenames: list[str]
+
+
+@app.post("/api/artifacts/bulk-download")
+def bulk_download_artifacts(payload: BulkDownloadArtifacts):
+    """A user-picked set of artifacts bundled into a single zip -- the
+    finer-grained counterpart to a hypothetical 'download everything',
+    mirroring how GET /api/pipelines/export-all bundles every saved
+    pipeline; here the selection is a checkbox multi-select rather than
+    'all', so it has to be POST (a filename list doesn't fit cleanly in a
+    GET's query string) with the zip built from disk on demand. An
+    unknown filename is skipped rather than failing the whole batch,
+    same as bulk-delete; 404s only if none of the requested files exist."""
+    included = []
+    buffer = io.BytesIO()
+    with zipfile.ZipFile(buffer, "w", zipfile.ZIP_DEFLATED) as zf:
+        for filename in payload.filenames:
+            safe_name = Path(filename).name
+            path = ingestion.ARTIFACTS_DIR / safe_name
+            if path.is_file():
+                zf.write(path, arcname=safe_name)
+                included.append(safe_name)
+
+    if not included:
+        raise HTTPException(status_code=404, detail="None of the requested artifacts exist.")
+
+    buffer.seek(0)
+    return StreamingResponse(
+        buffer,
+        media_type="application/zip",
+        headers={"Content-Disposition": "attachment; filename=artifacts_export.zip"},
+    )
 
 
 @app.get("/api/artifacts/search")

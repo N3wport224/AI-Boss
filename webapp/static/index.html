@@ -155,6 +155,7 @@
           <button id="artifact-bulk-untag-btn" class="btn btn-secondary btn-small" type="button" disabled title="Remove this tag from every selected file">Remove tag from selected</button>
           <button id="artifact-compare-btn" class="btn btn-secondary btn-small" type="button" disabled title="Select exactly two table-shaped files to compare their schemas">Compare schemas</button>
           <button id="artifact-bulk-favorite-btn" class="btn btn-secondary btn-small" type="button" disabled>★ Favorite selected</button>
+          <button id="artifact-bulk-download-btn" class="btn btn-secondary btn-small" type="button" disabled title="Download every selected artifact as a single zip">⬇ Download selected</button>
           <button id="artifact-bulk-delete-btn" class="btn btn-danger btn-small" type="button" disabled>Delete selected</button>
         </div>
         <div id="artifact-tag-directory" class="tag-directory hidden"></div>
@@ -231,6 +232,7 @@
         <button id="pipelines-bulk-tag-btn" class="btn btn-secondary btn-small" type="button" disabled>Apply tag to selected</button>
         <input type="text" id="pipelines-bulk-untag-input" class="artifact-search-input" placeholder="Tag to remove from selected…" />
         <button id="pipelines-bulk-untag-btn" class="btn btn-secondary btn-small" type="button" disabled title="Remove this tag from every selected pipeline">Remove tag from selected</button>
+        <button id="pipelines-bulk-duplicate-btn" class="btn btn-secondary btn-small" type="button" disabled>Duplicate selected</button>
         <button id="pipelines-bulk-delete-btn" class="btn btn-danger btn-small" type="button" disabled>Delete selected</button>
       </div>
       <div id="pipeline-deep-search-results" class="hidden"></div>
@@ -481,6 +483,7 @@
 
     <div id="pipeline-result" class="pipeline-result hidden"></div>
     <div class="artifacts-bulk-tag-row" id="modules-bulk-row">
+      <a class="btn btn-secondary btn-small" href="/api/modules/used-by.csv" download title="Which saved pipelines use each module, as a CSV">Export used-by CSV</a>
       <label class="schedule-select-all-label">
         <input type="checkbox" id="modules-select-all" />
         Select all modules
@@ -492,6 +495,7 @@
       <button id="modules-bulk-enable-btn" class="btn btn-secondary btn-small" type="button" disabled>Enable selected</button>
       <button id="modules-bulk-disable-btn" class="btn btn-secondary btn-small" type="button" disabled>Disable selected</button>
       <button id="modules-bulk-reset-breaker-btn" class="btn btn-secondary btn-small" type="button" disabled title="Reset the circuit breaker for every selected module">Reset breakers for selected</button>
+      <button id="modules-bulk-clear-threshold-btn" class="btn btn-secondary btn-small" type="button" disabled title="Revert every selected module's breaker threshold to its manifest default">Clear threshold overrides</button>
     </div>
     <div id="sections"></div>
   </main>

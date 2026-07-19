@@ -843,3 +843,48 @@ def test_bulk_delete_artifacts_rejects_path_traversal_in_filenames():
     res = client.post("/api/artifacts/bulk-delete", json={"filenames": ["../../etc/passwd"]})
     assert res.status_code == 200
     assert res.json()["deleted"] == []
+
+
+# ---- Batch 24: bulk download selected artifacts as a zip bundle ----
+
+def test_bulk_download_artifacts_returns_a_zip_containing_every_selected_file():
+    import io
+    import zipfile
+
+    client.post("/api/ingest/csv", files={"file": ("bulkdl_a.csv", b"x,y\n9201,9202\n", "text/csv")})
+    client.post("/api/ingest/csv", files={"file": ("bulkdl_b.csv", b"x,y\n9203,9204\n", "text/csv")})
+    files = client.get("/api/artifacts").json()
+    a_name = next(f["name"] for f in files if f["name"].endswith("bulkdl_a.csv"))
+    b_name = next(f["name"] for f in files if f["name"].endswith("bulkdl_b.csv"))
+
+    res = client.post("/api/artifacts/bulk-download", json={"filenames": [a_name, b_name]})
+    assert res.status_code == 200
+    assert res.headers["content-type"] == "application/zip"
+    assert "attachment; filename=artifacts_export.zip" in res.headers["content-disposition"]
+
+    zf = zipfile.ZipFile(io.BytesIO(res.content))
+    assert set(zf.namelist()) == {a_name, b_name}
+    assert zf.read(a_name) == b"x,y\n9201,9202\n"
+
+
+def test_bulk_download_artifacts_skips_unknown_filenames():
+    import io
+    import zipfile
+
+    client.post("/api/ingest/csv", files={"file": ("bulkdl_solo.csv", b"x,y\n9205,9206\n", "text/csv")})
+    solo_name = next(f["name"] for f in client.get("/api/artifacts").json() if f["name"].endswith("bulkdl_solo.csv"))
+
+    res = client.post("/api/artifacts/bulk-download", json={"filenames": [solo_name, "does-not-exist.csv"]})
+    assert res.status_code == 200
+    zf = zipfile.ZipFile(io.BytesIO(res.content))
+    assert zf.namelist() == [solo_name]
+
+
+def test_bulk_download_artifacts_404s_when_nothing_selected_exists():
+    res = client.post("/api/artifacts/bulk-download", json={"filenames": ["does-not-exist.csv"]})
+    assert res.status_code == 404
+
+
+def test_bulk_download_artifacts_404s_on_an_empty_selection():
+    res = client.post("/api/artifacts/bulk-download", json={"filenames": []})
+    assert res.status_code == 404

@@ -117,7 +117,13 @@ def test_next_daily_run_at_rolls_to_tomorrow_when_time_already_passed():
 
 
 def test_next_weekly_run_at_stays_this_week_when_day_and_time_are_still_ahead():
-    after = datetime.now(timezone.utc)
+    # Anchored to local noon rather than the real current time -- the plain
+    # datetime.now() version of this test was flaky whenever it happened to
+    # run within ~2 hours of local midnight, since adding 2 hours would spill
+    # into the next calendar day while target_day stayed pinned to "today",
+    # making next_weekly_run_at correctly (but unexpectedly, for this test)
+    # roll a full week forward instead of staying "later today".
+    after = datetime.now(timezone.utc).astimezone().replace(hour=12, minute=0, second=0, microsecond=0).astimezone(timezone.utc)
     local_after = after.astimezone()
     # Same weekday, two hours from now -- should fire later today, not roll a week.
     target_time = (local_after + timedelta(hours=2)).strftime("%H:%M")
@@ -130,7 +136,8 @@ def test_next_weekly_run_at_stays_this_week_when_day_and_time_are_still_ahead():
 
 
 def test_next_weekly_run_at_rolls_to_next_week_when_same_day_but_time_already_passed():
-    after = datetime.now(timezone.utc)
+    # Same local-noon anchor as the test above, for the same reason.
+    after = datetime.now(timezone.utc).astimezone().replace(hour=12, minute=0, second=0, microsecond=0).astimezone(timezone.utc)
     local_after = after.astimezone()
     target_time = (local_after - timedelta(hours=1)).strftime("%H:%M")
     target_day = local_after.weekday()

@@ -839,6 +839,21 @@ A few things live in the header/subheader on every page load:
   each pipeline's History panel deletes its older archived versions,
   keeping only the most recent ones.
 
+## Bulk artifact download, bulk breaker threshold clearing, a used-by CSV, and bulk pipeline duplication
+
+- **Bulk download selected artifacts as a zip** — checkbox-select
+  multiple artifacts and download them all as a single zip file, the
+  finer-grained counterpart to the pipeline library's **Export all**.
+- **Bulk clear breaker threshold overrides** — checkbox-select modules
+  and revert their circuit breaker threshold to the manifest default in
+  one click, distinct from bulk-resetting the trip state itself.
+- **Export the module "used by" reverse lookup to CSV** — an **Export
+  used-by CSV** link above the Modules directory downloads which saved
+  pipelines reference each module.
+- **Bulk duplicate selected saved pipelines** — checkbox-select multiple
+  saved pipelines and clone them all at once, each getting the same
+  non-colliding "(copy)" name as the single-pipeline duplicate action.
+
 ## Tech stack
 
 - **Language:** Python 3.11+ — first-class async/sync support and native SDKs

@@ -574,6 +574,46 @@ def test_rename_unknown_pipeline_404s():
     assert res.status_code == 404
 
 
+def test_bulk_duplicate_pipelines_clones_every_selected_pipeline():
+    client.post(
+        "/api/pipelines",
+        json={"name": "Bulk Dup A", "steps": [{"tier": "automation", "name": "fetch_raw_metrics"}]},
+    )
+    client.post(
+        "/api/pipelines",
+        json={"name": "Bulk Dup B", "steps": [{"tier": "automation", "name": "fetch_raw_metrics"}]},
+    )
+
+    res = client.post("/api/pipelines/bulk-duplicate", json={"slugs": ["bulk_dup_a", "bulk_dup_b"]})
+    assert res.status_code == 200
+    duplicated = res.json()["duplicated"]
+    assert {d["slug"] for d in duplicated} == {"bulk_dup_a_copy", "bulk_dup_b_copy"}
+
+    slugs = {p["slug"] for p in client.get("/api/pipelines").json()}
+    assert {"bulk_dup_a", "bulk_dup_a_copy", "bulk_dup_b", "bulk_dup_b_copy"} <= slugs
+
+
+def test_bulk_duplicate_pipelines_skips_unknown_slugs_without_failing():
+    client.post(
+        "/api/pipelines",
+        json={"name": "Bulk Dup C", "steps": [{"tier": "automation", "name": "fetch_raw_metrics"}]},
+    )
+
+    res = client.post(
+        "/api/pipelines/bulk-duplicate",
+        json={"slugs": ["bulk_dup_c", "totally_made_up_slug"]},
+    )
+    assert res.status_code == 200
+    duplicated = res.json()["duplicated"]
+    assert [d["slug"] for d in duplicated] == ["bulk_dup_c_copy"]
+
+
+def test_bulk_duplicate_pipelines_is_a_no_op_on_an_empty_selection():
+    res = client.post("/api/pipelines/bulk-duplicate", json={"slugs": []})
+    assert res.status_code == 200
+    assert res.json() == {"duplicated": []}
+
+
 def test_bulk_tag_pipelines_adds_the_tag_to_every_selected_pipeline():
     client.post(
         "/api/pipelines",

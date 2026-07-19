@@ -1755,3 +1755,26 @@ def test_module_used_by_is_empty_when_no_pipeline_references_it():
     modules = client.get("/api/modules").json()
     escalation_agent = next(m for m in modules["agent"] if m["name"] == "escalation_agent")
     assert escalation_agent["used_by"] == []
+
+
+def test_module_used_by_csv_export_has_a_header_and_a_row_listing_the_using_pipeline():
+    client.post(
+        "/api/pipelines",
+        json={"name": "Csv Uses Fetch Metrics", "steps": [{"tier": "automation", "name": "fetch_raw_metrics"}]},
+    )
+    res = client.get("/api/modules/used-by.csv")
+    assert res.status_code == 200
+    assert res.headers["content-type"].startswith("text/csv")
+    assert "attachment; filename=modules_used_by.csv" in res.headers["content-disposition"]
+
+    lines = res.text.strip().splitlines()
+    assert lines[0] == "tier,name,used_by"
+    fetch_metrics_line = next(line for line in lines[1:] if line.startswith("automation,fetch_raw_metrics,"))
+    assert "csv_uses_fetch_metrics" in fetch_metrics_line
+
+
+def test_module_used_by_csv_export_leaves_used_by_blank_for_an_unused_module():
+    res = client.get("/api/modules/used-by.csv")
+    lines = res.text.strip().splitlines()
+    escalation_line = next(line for line in lines[1:] if line.startswith("agent,escalation_agent,"))
+    assert escalation_line == "agent,escalation_agent,"

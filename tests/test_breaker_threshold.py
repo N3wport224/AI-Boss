@@ -107,6 +107,46 @@ def test_clearing_threshold_reverts_to_manifest_default():
     assert http_module["breaker"]["threshold_overridden"] is False
 
 
+def test_bulk_clear_breaker_thresholds_reverts_every_selected_module():
+    client.patch("/api/breakers/automation/http_request/threshold", json={"threshold": 5})
+    client.patch("/api/breakers/automation/fetch_raw_metrics/threshold", json={"threshold": 7})
+
+    res = client.post(
+        "/api/breakers/bulk-clear-threshold",
+        json={
+            "modules": [
+                {"tier": "automation", "name": "http_request"},
+                {"tier": "automation", "name": "fetch_raw_metrics"},
+            ]
+        },
+    )
+    assert res.status_code == 200
+    assert len(res.json()["cleared"]) == 2
+
+    listed = client.get("/api/modules").json()
+    http_module = next(m for m in listed["automation"] if m["name"] == "http_request")
+    metrics_module = next(m for m in listed["automation"] if m["name"] == "fetch_raw_metrics")
+    assert http_module["breaker"]["threshold_overridden"] is False
+    assert metrics_module["breaker"]["threshold_overridden"] is False
+
+
+def test_bulk_clear_breaker_thresholds_skips_an_unknown_module():
+    client.patch("/api/breakers/automation/http_request/threshold", json={"threshold": 5})
+
+    res = client.post(
+        "/api/breakers/bulk-clear-threshold",
+        json={"modules": [{"tier": "automation", "name": "http_request"}, {"tier": "automation", "name": "does_not_exist"}]},
+    )
+    assert res.status_code == 200
+    assert res.json()["cleared"] == [{"tier": "automation", "name": "http_request"}]
+
+
+def test_bulk_clear_breaker_thresholds_is_a_no_op_on_an_empty_selection():
+    res = client.post("/api/breakers/bulk-clear-threshold", json={"modules": []})
+    assert res.status_code == 200
+    assert res.json() == {"cleared": []}
+
+
 def test_set_threshold_rejects_less_than_one():
     res = client.patch("/api/breakers/automation/http_request/threshold", json={"threshold": 0})
     assert res.status_code == 400

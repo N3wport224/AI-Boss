@@ -2134,6 +2134,81 @@ only a JSON parse error or timeout falls back to an empty issue list.
      versions, then opening its History panel, setting "Keep latest" to
      1, and clicking **Prune older versions** (confirming the dialog)
      left exactly one version behind.
+182. **Add bulk downloading selected artifacts as a zip**
+     (`POST /api/artifacts/bulk-download` -- a zip built from disk on
+     demand from a filename list, mirroring how `GET
+     /api/pipelines/export-all` bundles every saved pipeline, except this
+     has to be POST since a checkbox multi-select doesn't fit cleanly in
+     a GET's query string; an unknown filename is skipped rather than
+     failing the batch, 404 only if none of the requested files exist).
+     The frontend can't use a plain `<a href download>` link the way
+     every other export does, since the file list is dynamic selection
+     state -- it `fetch()`s the zip as a blob, then builds a throwaway
+     `<a>` with `URL.createObjectURL()` and clicks it programmatically to
+     trigger the browser's save dialog, cleaning up the object URL
+     afterward. A **⬇ Download selected** button sits next to the
+     existing **★ Favorite selected** button in the artifacts toolbar.
+183. **Add bulk clearing circuit breaker threshold overrides**
+     (`POST /api/breakers/bulk-clear-threshold` -- reuses the same
+     `ModuleRef` list shape as bulk-enable/disable and bulk-reset,
+     calling `store.clear_breaker_threshold_override()` for each; an
+     unknown tier/name is skipped. Distinct from task 178's bulk-reset,
+     which clears the trip *state* -- this clears the threshold
+     *configuration* back to the manifest default, the bulk counterpart
+     to the existing single-module `DELETE
+     /api/breakers/{tier}/{name}/threshold`). A **Clear threshold
+     overrides** button sits next to **Reset breakers for selected**
+     above the Modules directory, reusing the same `selectedModuleRefs`
+     checkbox selection.
+184. **Add exporting the module "used by" reverse lookup to CSV**
+     (`GET /api/modules/used-by.csv` -- one row per enabled module across
+     every tier, with a semicolon-joined list of the saved pipeline slugs
+     that reference it via `pipeline_store.pipelines_using_module()`; a
+     semicolon rather than a comma since a plain comma would collide with
+     the CSV column separator. A 2-segment literal path, so no conflict
+     with the 3-segment `/api/modules/{tier}/{name}/...` dynamic routes).
+     An **Export used-by CSV** link sits in the bulk-action toolbar above
+     the Modules directory, next to the "Select all modules" checkbox.
+185. **Add bulk duplicating selected saved pipelines**
+     (`POST /api/pipelines/bulk-duplicate` -- calls the existing
+     `pipeline_store.duplicate_pipeline()` for each selected slug, so
+     every clone gets the same non-colliding '(copy)' naming scheme as
+     the single-pipeline duplicate action; an unknown slug is skipped
+     rather than failing the batch). A **Duplicate selected** button
+     sits next to **Delete selected** in the Saved Pipelines toolbar.
+     While verifying this batch, a pre-existing, unrelated flaky test in
+     `tests/test_scheduler.py` surfaced: two weekly-schedule tests built
+     their "2 hours from now" / "1 hour ago" fixture from the real
+     `datetime.now()`, which silently broke whenever the suite happened
+     to run within about 2 hours of local midnight (adding 2 hours would
+     spill into the next calendar day while the test's `target_day`
+     stayed pinned to "today", so `next_weekly_run_at` correctly -- but
+     unexpectedly, for the test's own assumption -- rolled a full week
+     forward instead of staying "later today"). Fixed by anchoring both
+     tests' `after` fixture to local noon instead of the actual current
+     time, eliminating the day-boundary dependency entirely; not a
+     regression from this batch's own changes, just something a clean
+     double full-suite run surfaced along the way.
+186. **Add tests for all of Batch 24**: bulk-downloading artifacts
+     returns a zip containing every selected file and skips unknown
+     filenames, 404ing only when nothing requested exists or the
+     selection is empty; bulk-clearing breaker thresholds reverts every
+     selected module and skips an unknown one; the module used-by CSV
+     export has a header and a row per module, semicolon-joining multiple
+     using pipelines and leaving the column blank for an unused module;
+     bulk-duplicating pipelines clones every selection with the '(copy)'
+     naming scheme and skips unknown slugs. 540 tests total, stable
+     across repeated clean full-suite runs. Live-verified end to end with
+     Playwright against a freshly started server: checkbox-selecting two
+     uploaded artifacts and clicking **⬇ Download selected** triggered a
+     real browser download whose zip contained exactly those two files;
+     overriding a module's breaker threshold, then checkbox-selecting it
+     and clicking **Clear threshold overrides** confirmed
+     `threshold_overridden` flipped back to `false`; downloading
+     `/api/modules/used-by.csv` after saving a pipeline that uses
+     `fetch_raw_metrics` found that pipeline's slug in the matching CSV
+     row; checkbox-selecting a saved pipeline and clicking **Duplicate
+     selected** produced a real `_copy` slug in `GET /api/pipelines`.
 
 ## 9. Roadmap
 
