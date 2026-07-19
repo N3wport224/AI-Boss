@@ -103,6 +103,13 @@ CREATE TABLE IF NOT EXISTS breaker_overrides (
     PRIMARY KEY (tier, name)
 );
 
+CREATE TABLE IF NOT EXISTS rate_limit_override (
+    id INTEGER PRIMARY KEY CHECK (id = 1),
+    max_requests INTEGER NOT NULL,
+    window_seconds REAL NOT NULL,
+    updated_at TEXT NOT NULL
+);
+
 CREATE TABLE IF NOT EXISTS input_presets (
     tier TEXT NOT NULL,
     name TEXT NOT NULL,
@@ -664,6 +671,37 @@ class StateStore:
             rows = self._conn.execute("SELECT tier, name, threshold FROM breaker_overrides").fetchall()
         return {(tier, name): threshold for tier, name, threshold in rows}
 
+    def set_rate_limit_override(self, max_requests: int, window_seconds: float) -> None:
+        """A runtime override for the run-triggering rate limiter's
+        max_requests/window_seconds, independent of the hardcoded default
+        set at process startup -- no restart needed, and it persists
+        across one. A single-row table (id always 1) since there's only
+        ever one rate limiter to configure, unlike the per-module
+        breaker_overrides table."""
+        with self._lock:
+            self._conn.execute(
+                "INSERT INTO rate_limit_override (id, max_requests, window_seconds, updated_at) "
+                "VALUES (1, ?, ?, ?) ON CONFLICT(id) DO UPDATE SET "
+                "max_requests = excluded.max_requests, window_seconds = excluded.window_seconds, "
+                "updated_at = excluded.updated_at",
+                (max_requests, window_seconds, datetime.now(timezone.utc).isoformat()),
+            )
+            self._conn.commit()
+
+    def get_rate_limit_override(self) -> Optional[tuple[int, float]]:
+        """None means no override has ever been set -- the caller should
+        fall back to the hardcoded startup default."""
+        with self._lock:
+            row = self._conn.execute(
+                "SELECT max_requests, window_seconds FROM rate_limit_override WHERE id = 1"
+            ).fetchone()
+        return (row[0], row[1]) if row is not None else None
+
+    def clear_rate_limit_override(self) -> None:
+        with self._lock:
+            self._conn.execute("DELETE FROM rate_limit_override WHERE id = 1")
+            self._conn.commit()
+
     def save_input_preset(self, tier: str, name: str, preset_name: str, inputs: dict) -> dict:
         """A named set of input values for a module's own card, so a user
         can reapply a combination they use often instead of retyping it —
@@ -738,14 +776,25 @@ class StateStore:
         return [{"id": r[0], "action": r[1], "detail": r[2], "created_at": r[3]} for r in rows]
 
     def clear_audit_log(self) -> int:
-        """Delete every audit log entry -- a manual reset, mirroring
-        clear_read_notifications()/clear_favorites() elsewhere in this
-        store. There's no age-based or read/unread distinction for audit
-        events the way there is for notifications, so this clears
-        unconditionally rather than a filtered subset. Returns the number
-        of rows deleted."""
+        """Delete every audit log entry unconditionally -- a manual full
+        reset, mirroring clear_read_notifications()/clear_favorites()
+        elsewhere in this store. See purge_audit_log() for the
+        age-based, partial-trim counterpart. Returns the number of rows
+        deleted."""
         with self._lock:
             cur = self._conn.execute("DELETE FROM audit_log")
+            self._conn.commit()
+        return cur.rowcount
+
+    def purge_audit_log(self, older_than_hours: float) -> int:
+        """Delete audit log entries older than `older_than_hours` -- the
+        age-based, partial-trim counterpart to clear_audit_log()'s
+        unconditional wipe, mirroring prune_runs()/purge_old_artifacts()'s
+        age-based sweep pattern elsewhere in this app. Returns the number
+        of rows deleted."""
+        cutoff = (datetime.now(timezone.utc) - timedelta(hours=older_than_hours)).isoformat()
+        with self._lock:
+            cur = self._conn.execute("DELETE FROM audit_log WHERE created_at < ?", (cutoff,))
             self._conn.commit()
         return cur.rowcount
 

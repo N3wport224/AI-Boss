@@ -99,6 +99,43 @@ def test_memory_csv_export_is_empty_but_valid_with_no_entries():
 
 # ---- Batch 20: search across agent memory ----
 
+def test_import_memory_upserts_every_key_from_the_json_file():
+    from webapp.main import store
+
+    store.clear_memory()
+    store.set_memory("existing_key", "old value")
+
+    payload = json.dumps({"existing_key": "new value", "brand_new_key": {"nested": True}}).encode()
+    res = client.post(
+        "/api/memory/import",
+        files={"file": ("memory_backup.json", payload, "application/json")},
+    )
+    assert res.status_code == 200
+    assert set(res.json()["imported"]) == {"existing_key", "brand_new_key"}
+
+    listed = {entry["key"]: entry["value"] for entry in client.get("/api/memory").json()}
+    assert listed["existing_key"] == "new value"
+    assert listed["brand_new_key"] == {"nested": True}
+
+    store.clear_memory()
+
+
+def test_import_memory_rejects_invalid_json():
+    res = client.post(
+        "/api/memory/import",
+        files={"file": ("bad.json", b"not valid json", "application/json")},
+    )
+    assert res.status_code == 400
+
+
+def test_import_memory_rejects_a_non_object_top_level_value():
+    res = client.post(
+        "/api/memory/import",
+        files={"file": ("list.json", b'["not", "an", "object"]', "application/json")},
+    )
+    assert res.status_code == 400
+
+
 def test_search_memory_finds_a_keyword_in_the_key():
     from webapp.main import store
 

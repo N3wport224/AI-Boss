@@ -854,6 +854,23 @@ A few things live in the header/subheader on every page load:
   saved pipelines and clone them all at once, each getting the same
   non-colliding "(copy)" name as the single-pipeline duplicate action.
 
+## Age-based audit log purging, webhook testing, runtime rate limits, and memory import
+
+- **Purge the audit log by age** — a "Purge older than" control next to
+  the existing full **Clear** button trims old audit entries without
+  wiping the whole log, mirroring the artifact/run-history purge pattern.
+- **Send a test webhook** — a **▶ Send test** button on each saved
+  pipeline card fires a real POST at its own webhook endpoint and shows
+  the live run progress inline, so a webhook integration can be verified
+  without an external tool.
+- **Runtime-configurable rate limit** — the run-triggering rate limiter's
+  max-requests/window can be tuned from the Environment & Config panel
+  without a restart, mirroring the existing circuit breaker threshold
+  override.
+- **Import agent memory from a JSON file** — an **Import…** picker in the
+  Agent Memory panel restores or seeds `{key: value}` pairs, the restore
+  counterpart to the existing memory CSV export.
+
 ## Tech stack
 
 - **Language:** Python 3.11+ — first-class async/sync support and native SDKs

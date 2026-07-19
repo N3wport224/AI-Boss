@@ -2209,6 +2209,87 @@ only a JSON parse error or timeout falls back to an empty issue list.
      `fetch_raw_metrics` found that pipeline's slug in the matching CSV
      row; checkbox-selecting a saved pipeline and clicking **Duplicate
      selected** produced a real `_copy` slug in `GET /api/pipelines`.
+187. **Add age-based audit log purging**
+     (`StateStore.purge_audit_log(older_than_hours)` -- a `DELETE FROM
+     audit_log WHERE created_at < cutoff`, mirroring `prune_runs()`/
+     `purge_old_artifacts()`'s age-based sweep pattern; distinct from
+     `clear_audit_log()`'s unconditional wipe, which stays as the
+     full-reset option. `POST /api/audit-log/purge?older_than_hours=N`,
+     defaulting to 24). A "Purge older than" number input and **Purge**
+     button sit next to the existing **Export CSV**/**Clear** buttons in
+     the Recent Actions heading, matching the run-history purge control's
+     layout exactly.
+188. **Add sending a test webhook from a saved pipeline card**
+     (no new backend endpoint -- reuses the existing `POST
+     /api/pipelines/{slug}/webhook` that already accepts an empty JSON
+     body. `sendTestWebhook()` mirrors `runSavedPipeline()` almost
+     exactly: same tracker/log-tabs UI, same `subscribeToStream()`
+     progress handling, just POSTing to the webhook route instead of the
+     `/run` route so the actual webhook code path -- not just the normal
+     run path -- gets exercised). A **▶ Send test** button sits next to
+     the existing **📋 Copy URL** button in each pipeline card's webhook
+     row.
+189. **Add a runtime-configurable rate limit**
+     (a new single-row `rate_limit_override` table -- `CHECK (id = 1)`
+     enforces there's ever only one row, since there's only one rate
+     limiter to configure, unlike the per-module `breaker_overrides`
+     table. `StateStore.set_rate_limit_override()`/
+     `get_rate_limit_override()`/`clear_rate_limit_override()` mirror the
+     breaker-threshold-override trio exactly. On import, `webapp/main.py`
+     applies any persisted override to the module-level `_run_rate_limiter`
+     singleton immediately, before the first request; `PATCH
+     /api/ratelimit` updates both the persisted override and the live
+     limiter's `max_requests`/`window_seconds` attributes directly so it
+     takes effect immediately (already-recorded sliding-window hits
+     aren't retroactively rescored); `DELETE /api/ratelimit` reverts both
+     to the hardcoded `DEFAULT_RATE_LIMIT_MAX_REQUESTS`/
+     `DEFAULT_RATE_LIMIT_WINDOW_SECONDS` module constants). A small
+     "Run rate limit — max / per (seconds)" control with **Save**/**Use
+     default** buttons sits at the bottom of the Environment & Config
+     panel's Runtime Settings section, which already showed this value
+     read-only. The test suite's autouse rate-limiter-reset fixture
+     (`tests/conftest.py`) was extended to also clear any persisted
+     override and restore the hardcoded default after every test, not
+     just clear in-memory hit counts before it, so a test exercising the
+     new override can never leak a changed limit into whatever runs next.
+190. **Add importing agent memory from a JSON file**
+     (`POST /api/memory/import` -- an `UploadFile` read through the same
+     `ingestion.read_upload_with_limit()` size-capped reader every other
+     file-upload endpoint uses, parsed as a JSON object, then each
+     key/value pair upserted via the same `store.set_memory()` a module
+     itself would call. Additive, not a wholesale replace -- an existing
+     key is overwritten, everything else in memory is left untouched;
+     the restore counterpart to `GET /api/memory.csv`'s export, for
+     seeding memory by hand or restoring a previous export rather than
+     waiting for a module to write it naturally). An **Import…** file
+     picker sits next to the existing **Export CSV**/**Clear all**
+     buttons in the Agent Memory panel heading.
+191. **Add tests for all of Batch 25**: purging the audit log by age
+     removes only entries older than the cutoff and defaults to 24
+     hours; setting the rate limit overrides the live limiter immediately
+     (verified by actually tripping it at the new lower `max_requests`),
+     clearing it reverts to the hardcoded default, and both reject a
+     non-positive `max_requests`/`window_seconds`; importing memory
+     upserts every key from the JSON file, rejects invalid JSON, and
+     rejects a non-object top-level value. 551 tests total, stable across
+     repeated clean full-suite runs (one isolated, non-reproducible
+     failure was observed once during this batch's verification --
+     `test_module_stats_start_at_zero_and_update_after_a_real_run` --
+     which passed instantly in isolation and on every subsequent full-run
+     retry; it touches none of this batch's own code paths and looks like
+     the same category of background-worker-thread timing race already
+     called out in `tests/conftest.py`'s circuit-breaker reset fixture,
+     not a regression from Batch 25). Live-verified end to end with
+     Playwright against a freshly started server: setting the audit-log
+     purge window to 0 hours removed a pre-existing entry from
+     `GET /api/audit-log`; clicking **▶ Send test** on a saved pipeline
+     card actually launched a run that reached `completed` in
+     `GET /api/runs`; saving a rate limit of 5 requests / 30s through the
+     Environment panel and reading it back via `GET /api/ratelimit`
+     confirmed `overridden: true`, then **Use default** reverted it;
+     uploading a small JSON file through the Agent Memory panel's
+     **Import…** picker landed the expected key/value pair in
+     `GET /api/memory`.
 
 ## 9. Roadmap
 

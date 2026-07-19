@@ -392,6 +392,8 @@
         <span class="bar"></span>
         <h2>Agent Memory</h2>
         <div class="tier-heading-actions">
+          <label class="btn btn-secondary btn-small" for="memory-import-input">Import…</label>
+          <input type="file" id="memory-import-input" accept=".json" hidden />
           <a class="btn btn-secondary btn-small" href="/api/memory.csv" download>Export CSV</a>
           <button id="memory-clear-btn" class="btn btn-secondary btn-small" type="button">Clear all</button>
           <button class="collapse-toggle" type="button" data-collapse-key="memory">▾</button>
@@ -423,6 +425,14 @@
       <div id="env-vars-list" class="runs-empty">Loading…</div>
       <h3 class="env-subhead">Runtime settings</h3>
       <div id="env-settings-list" class="runs-empty">Loading…</div>
+      <div class="ratelimit-config-row">
+        <label for="ratelimit-max-requests">Run rate limit — max</label>
+        <input type="number" id="ratelimit-max-requests" min="1" step="1" />
+        <label for="ratelimit-window-seconds">per (seconds)</label>
+        <input type="number" id="ratelimit-window-seconds" min="0.1" step="0.1" />
+        <button id="ratelimit-save-btn" class="btn btn-secondary btn-small" type="button">Save</button>
+        <button id="ratelimit-reset-btn" class="btn btn-secondary btn-small" type="button">Use default</button>
+      </div>
     </section>
 
     <section class="tier-section tier-audit" id="audit-log-section">
@@ -430,6 +440,10 @@
         <span class="bar"></span>
         <h2>Recent Actions</h2>
         <div class="tier-heading-actions">
+          <label for="audit-log-purge-hours" class="runs-purge-label">Purge older than</label>
+          <input type="number" id="audit-log-purge-hours" value="720" min="0" step="1" />
+          <span>hours</span>
+          <button id="audit-log-purge-btn" class="btn btn-secondary btn-small" type="button">Purge</button>
           <a class="btn btn-secondary btn-small" href="/api/audit-log.csv" download>Export CSV</a>
           <button id="audit-log-clear-btn" class="btn btn-danger btn-small" type="button">Clear</button>
           <button id="audit-log-refresh-btn" class="btn btn-secondary btn-small" type="button">Refresh</button>

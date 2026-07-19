@@ -667,6 +667,52 @@ def test_run_endpoints_are_rate_limited_per_client():
     assert "Too many run requests" in over_limit.json()["detail"]
 
 
+def test_get_rate_limit_reports_the_hardcoded_default_when_no_override_exists():
+    res = client.get("/api/ratelimit")
+    assert res.status_code == 200
+    body = res.json()
+    assert body["max_requests"] == 30
+    assert body["window_seconds"] == 10.0
+    assert body["overridden"] is False
+
+
+def test_set_rate_limit_overrides_the_live_limiter_immediately():
+    res = client.patch("/api/ratelimit", json={"max_requests": 2, "window_seconds": 60})
+    assert res.status_code == 200
+    assert res.json() == {"max_requests": 2, "window_seconds": 60}
+
+    listed = client.get("/api/ratelimit").json()
+    assert listed == {"max_requests": 2, "window_seconds": 60, "overridden": True}
+
+    payload = {"inputs": {"signups": 1, "churn": 1, "revenue": 1}, "force_refresh": True}
+    ok1 = client.post("/api/modules/automation/fetch_raw_metrics/run", json=payload)
+    ok2 = client.post("/api/modules/automation/fetch_raw_metrics/run", json=payload)
+    over_limit = client.post("/api/modules/automation/fetch_raw_metrics/run", json=payload)
+    assert ok1.status_code == 200
+    assert ok2.status_code == 200
+    assert over_limit.status_code == 429
+
+
+def test_clear_rate_limit_reverts_to_the_hardcoded_default():
+    client.patch("/api/ratelimit", json={"max_requests": 2, "window_seconds": 60})
+    res = client.delete("/api/ratelimit")
+    assert res.status_code == 200
+    assert res.json() == {"max_requests": 30, "window_seconds": 10.0}
+
+    listed = client.get("/api/ratelimit").json()
+    assert listed["overridden"] is False
+
+
+def test_set_rate_limit_rejects_a_non_positive_max_requests():
+    res = client.patch("/api/ratelimit", json={"max_requests": 0, "window_seconds": 10})
+    assert res.status_code == 400
+
+
+def test_set_rate_limit_rejects_a_non_positive_window():
+    res = client.patch("/api/ratelimit", json={"max_requests": 10, "window_seconds": 0})
+    assert res.status_code == 400
+
+
 def test_run_module_failure_streams_step_failed_then_run_failed(monkeypatch):
     import automations.example_automation as example_automation
 

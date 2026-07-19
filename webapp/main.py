@@ -67,7 +67,14 @@ bus = RunEventBus()
 # Guards every run-triggering endpoint against an accidental request storm —
 # generous enough for normal interactive use, tight enough to catch a stuck
 # retry loop or a misconfigured schedule hammering the thread pool.
-_run_rate_limiter = RateLimiter(max_requests=30, window_seconds=10.0)
+DEFAULT_RATE_LIMIT_MAX_REQUESTS = 30
+DEFAULT_RATE_LIMIT_WINDOW_SECONDS = 10.0
+_run_rate_limiter = RateLimiter(
+    max_requests=DEFAULT_RATE_LIMIT_MAX_REQUESTS, window_seconds=DEFAULT_RATE_LIMIT_WINDOW_SECONDS
+)
+_persisted_rate_limit = store.get_rate_limit_override()
+if _persisted_rate_limit is not None:
+    _run_rate_limiter.max_requests, _run_rate_limiter.window_seconds = _persisted_rate_limit
 
 
 def _enforce_run_rate_limit(request: Request) -> None:
@@ -840,6 +847,51 @@ def clear_breaker_threshold(tier: str, name: str):
     _manifest_by_name(tier, name)  # 404 for a module that doesn't exist
     store.clear_breaker_threshold_override(tier, name)
     return {"tier": tier, "name": name, "threshold": _breaker_threshold(tier, name)}
+
+
+class RateLimitUpdate(BaseModel):
+    max_requests: int
+    window_seconds: float
+
+
+@app.get("/api/ratelimit")
+def get_rate_limit():
+    """The run-triggering rate limiter's live configuration -- whatever is
+    currently enforced, whether that's the hardcoded startup default or a
+    persisted override."""
+    return {
+        "max_requests": _run_rate_limiter.max_requests,
+        "window_seconds": _run_rate_limiter.window_seconds,
+        "overridden": store.get_rate_limit_override() is not None,
+    }
+
+
+@app.patch("/api/ratelimit")
+def set_rate_limit(payload: RateLimitUpdate):
+    """Override the run-triggering rate limiter's max_requests/window_seconds
+    at runtime, independent of the hardcoded startup default -- no restart
+    needed, and it persists across one, mirroring the existing
+    runtime-configurable circuit breaker threshold. Takes effect
+    immediately for every subsequent request; in-flight sliding-window
+    hits already recorded aren't retroactively rescored."""
+    if payload.max_requests < 1:
+        raise HTTPException(status_code=400, detail="max_requests must be at least 1.")
+    if payload.window_seconds <= 0:
+        raise HTTPException(status_code=400, detail="window_seconds must be greater than 0.")
+    store.set_rate_limit_override(payload.max_requests, payload.window_seconds)
+    _run_rate_limiter.max_requests = payload.max_requests
+    _run_rate_limiter.window_seconds = payload.window_seconds
+    return {"max_requests": payload.max_requests, "window_seconds": payload.window_seconds}
+
+
+@app.delete("/api/ratelimit")
+def clear_rate_limit():
+    """Revert the run-triggering rate limiter to its hardcoded startup
+    default instead of a persisted override."""
+    store.clear_rate_limit_override()
+    _run_rate_limiter.max_requests = DEFAULT_RATE_LIMIT_MAX_REQUESTS
+    _run_rate_limiter.window_seconds = DEFAULT_RATE_LIMIT_WINDOW_SECONDS
+    return {"max_requests": _run_rate_limiter.max_requests, "window_seconds": _run_rate_limiter.window_seconds}
 
 
 class BulkClearBreakerThresholds(BaseModel):
@@ -2064,12 +2116,22 @@ def search_audit_log(q: str = ""):
 
 @app.post("/api/audit-log/clear")
 def clear_audit_log():
-    """Delete every audit log entry -- a manual reset for when the trail has
-    grown long and isn't worth keeping, mirroring the existing 'clear all
-    read notifications'/'clear all favorites' controls. Unlike those, this
-    isn't filtered to a read/unread or age-based subset since the audit
-    log has no such distinction -- it's everything or nothing."""
+    """Delete every audit log entry unconditionally -- a manual full reset
+    for when the trail isn't worth keeping at all, mirroring the existing
+    'clear all read notifications'/'clear all favorites' controls. See
+    POST /api/audit-log/purge for the age-based, partial-trim
+    counterpart."""
     deleted = store.clear_audit_log()
+    return {"deleted": deleted}
+
+
+@app.post("/api/audit-log/purge")
+def purge_audit_log(older_than_hours: float = 24):
+    """Delete audit log entries older than `older_than_hours` -- the
+    age-based, partial-trim counterpart to POST /api/audit-log/clear's
+    unconditional wipe, mirroring the existing artifact-purge and
+    run-history-retention controls elsewhere in this app."""
+    deleted = store.purge_audit_log(older_than_hours)
     return {"deleted": deleted}
 
 
@@ -2273,6 +2335,36 @@ def memory_csv():
         media_type="text/csv",
         headers={"Content-Disposition": "attachment; filename=memory.csv"},
     )
+
+
+@app.post("/api/memory/import")
+async def import_memory(file: UploadFile = File(...)):
+    """Restore/seed agent memory from a JSON file of `{key: value}` pairs --
+    the import counterpart to GET /api/memory.csv's export, for restoring a
+    previous export or hand-seeding memory before a run rather than waiting
+    for a module to write it naturally. Upserts each key via the same
+    `store.set_memory()` a module itself would call, so an existing key is
+    overwritten and everything else in memory is left untouched -- this is
+    additive, not a wholesale replace. Values are used as-is, not
+    redacted, since importing IS the user deliberately writing that value
+    back into their own memory store."""
+    try:
+        data = await ingestion.read_upload_with_limit(file)
+    except ingestion.UploadTooLargeError as exc:
+        raise HTTPException(status_code=413, detail=str(exc))
+    try:
+        entries = json.loads(data)
+    except json.JSONDecodeError as exc:
+        raise HTTPException(status_code=400, detail=f"Could not parse memory JSON: {exc}")
+    if not isinstance(entries, dict):
+        raise HTTPException(status_code=400, detail="Memory JSON must describe a single object of key/value pairs.")
+
+    imported = []
+    for key, value in entries.items():
+        store.set_memory(key, value)
+        imported.append(key)
+    store.record_audit_event("memory_import", f"Imported {len(imported)} memory key(s): {imported}.")
+    return {"imported": imported}
 
 
 @app.delete("/api/memory/{key}")

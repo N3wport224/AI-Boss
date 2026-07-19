@@ -3463,6 +3463,7 @@ function renderSavedPipelines(pipelinesList) {
             <div class="webhook-row">
               <code class="webhook-url" title="POST a JSON body here to launch this pipeline — it overrides step 1's own inputs">POST /api/pipelines/${p.slug}/webhook</code>
               <button class="btn btn-secondary btn-small webhook-copy-btn" data-slug="${p.slug}" type="button">📋 Copy URL</button>
+              <button class="btn btn-secondary btn-small webhook-test-btn" data-slug="${p.slug}" data-name="${escapeHtml(p.name)}" type="button" title="Send an empty test POST to this pipeline's own webhook endpoint">▶ Send test</button>
             </div>
             <div class="pipeline-card-actions">
               <button class="btn btn-run" data-slug="${p.slug}" data-name="${p.name}">Run</button>
@@ -3535,6 +3536,9 @@ function renderSavedPipelines(pipelinesList) {
           showToast(`Copy failed: ${err}`, "error");
         }
       });
+    });
+    savedPipelinesGrid.querySelectorAll(".webhook-test-btn").forEach((btn) => {
+      btn.addEventListener("click", () => sendTestWebhook(btn.dataset.slug, btn.dataset.name, pipelinesList));
     });
     wireFavoriteToggles(savedPipelinesGrid);
 
@@ -4206,6 +4210,61 @@ async function runSavedPipeline(slug, name, pipelinesList) {
   } catch (err) {
     button.disabled = false;
     showToast(`${name} failed: ${err}`, "error");
+  }
+}
+
+async function sendTestWebhook(slug, name, pipelinesList) {
+  const card = document.getElementById(`pipeline-card__${slug}`);
+  card.scrollIntoView({ behavior: "smooth", block: "center" });
+
+  const button = card.querySelector(".webhook-test-btn");
+  const tracker = card.querySelector(".tracker");
+  const logContainer = card.querySelector(".log-tabs-wrap");
+
+  const definition = pipelinesList.find((p) => p.slug === slug);
+  const trackerSteps = (definition?.steps || []).map((s) =>
+    s.type === "parallel"
+      ? { parallel: true, name: s.name || "", branches: (s.branches || []).map((b) => ({ tier: b.tier, name: b.name })) }
+      : { tier: s.tier, name: s.name }
+  );
+
+  button.disabled = true;
+  renderTracker(tracker, trackerSteps);
+  tracker.classList.remove("hidden");
+  logContainer.classList.remove("hidden");
+  const log = createRunLog();
+  renderRunLogTabs(logContainer, log, null);
+
+  try {
+    const { stream_id } = await fetchRunTrigger(`/api/pipelines/${slug}/webhook`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: "{}",
+    });
+
+    subscribeToStream(stream_id, {
+      onEvent: (event) => {
+        handleTrackerEvent(tracker, event);
+        logSystemEvent(log, event);
+        renderRunLogTabs(logContainer, log, null);
+      },
+      onDone: async (event) => {
+        button.disabled = false;
+        const success = event.kind === "run_completed";
+        renderRunLogTabs(logContainer, log, event.context ?? {});
+        highlightSlowestStep(tracker);
+        showToast(
+          success
+            ? `Test webhook for "${name}" completed successfully.`
+            : `Test webhook for "${name}" failed: ${event.error}`,
+          success ? "success" : "error"
+        );
+        await refreshTelemetry();
+      },
+    });
+  } catch (err) {
+    button.disabled = false;
+    showToast(`Test webhook for "${name}" failed: ${err}`, "error");
   }
 }
 
@@ -5422,6 +5481,27 @@ memoryClearBtn.addEventListener("click", async () => {
   showToast("Agent memory cleared.", "success");
 });
 
+document.getElementById("memory-import-input").addEventListener("change", async (e) => {
+  const file = e.target.files[0];
+  if (!file) return;
+
+  const formData = new FormData();
+  formData.append("file", file);
+  try {
+    const res = await fetch("/api/memory/import", { method: "POST", body: formData });
+    const body = await res.json();
+    if (!res.ok) {
+      showToast(`Import failed: ${body.detail || "unknown error"}`, "error");
+      return;
+    }
+    showToast(`Imported ${body.imported.length} memory key(s).`, "success");
+    await loadMemory();
+  } catch (err) {
+    showToast(`Import failed: ${err}`, "error");
+  }
+  e.target.value = "";
+});
+
 setInterval(loadMemory, 5000);
 
 // ---- Per-module performance stats ----
@@ -5504,11 +5584,50 @@ envRefreshBtn.addEventListener("click", async () => {
   showToast("Environment view refreshed.", "success");
 });
 
+const ratelimitMaxRequestsInput = document.getElementById("ratelimit-max-requests");
+const ratelimitWindowSecondsInput = document.getElementById("ratelimit-window-seconds");
+const ratelimitSaveBtn = document.getElementById("ratelimit-save-btn");
+const ratelimitResetBtn = document.getElementById("ratelimit-reset-btn");
+
+async function loadRateLimitConfig() {
+  const res = await fetch("/api/ratelimit");
+  const body = await res.json();
+  ratelimitMaxRequestsInput.value = body.max_requests;
+  ratelimitWindowSecondsInput.value = body.window_seconds;
+}
+
+ratelimitSaveBtn.addEventListener("click", async () => {
+  const max_requests = Number(ratelimitMaxRequestsInput.value);
+  const window_seconds = Number(ratelimitWindowSecondsInput.value);
+  const res = await fetch("/api/ratelimit", {
+    method: "PATCH",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ max_requests, window_seconds }),
+  });
+  const body = await res.json();
+  if (!res.ok) {
+    showToast(body.detail || "Failed to update the rate limit.", "error");
+    return;
+  }
+  showToast(`Rate limit set to ${body.max_requests} requests / ${body.window_seconds}s.`, "success");
+  await loadEnvironment();
+});
+
+ratelimitResetBtn.addEventListener("click", async () => {
+  const res = await fetch("/api/ratelimit", { method: "DELETE" });
+  const body = await res.json();
+  showToast(`Reverted to the default rate limit: ${body.max_requests} requests / ${body.window_seconds}s.`, "success");
+  await loadRateLimitConfig();
+  await loadEnvironment();
+});
+
 // ---- Recent actions audit trail ----
 
 const auditLogListEl = document.getElementById("audit-log-list");
 const auditLogRefreshBtn = document.getElementById("audit-log-refresh-btn");
 const auditLogClearBtn = document.getElementById("audit-log-clear-btn");
+const auditLogPurgeHoursInput = document.getElementById("audit-log-purge-hours");
+const auditLogPurgeBtn = document.getElementById("audit-log-purge-btn");
 
 const AUDIT_ACTION_LABELS = {
   run_purge: "Run purge",
@@ -5580,6 +5699,14 @@ auditLogClearBtn.addEventListener("click", async () => {
   const res = await fetch("/api/audit-log/clear", { method: "POST" });
   const body = await res.json();
   showToast(`Cleared ${body.deleted} audit log entr${body.deleted === 1 ? "y" : "ies"}.`, "success");
+  await loadAuditLog();
+});
+
+auditLogPurgeBtn.addEventListener("click", async () => {
+  const hours = Number(auditLogPurgeHoursInput.value) || 0;
+  const res = await fetch(`/api/audit-log/purge?older_than_hours=${hours}`, { method: "POST" });
+  const body = await res.json();
+  showToast(`Purged ${body.deleted} audit log entr${body.deleted === 1 ? "y" : "ies"} older than ${hours}h.`, "success");
   await loadAuditLog();
 });
 
@@ -5901,4 +6028,5 @@ loadSchedules();
 loadMemory();
 loadModuleStats();
 loadEnvironment();
+loadRateLimitConfig();
 loadAuditLog();

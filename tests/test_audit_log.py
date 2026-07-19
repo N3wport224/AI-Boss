@@ -225,3 +225,38 @@ def test_clear_audit_log_is_a_no_op_when_already_empty():
     res = client.post("/api/audit-log/clear")
     assert res.status_code == 200
     assert res.json() == {"deleted": 0}
+
+
+def test_purge_audit_log_removes_only_entries_older_than_cutoff():
+    from datetime import datetime, timedelta, timezone
+
+    old_event = store.record_audit_event("test_old_event", "This one should be purged.")
+    now = datetime.now(timezone.utc)
+    old_cutoff = (now - timedelta(hours=1)).isoformat()
+    store._conn.execute("UPDATE audit_log SET created_at = ? WHERE id = ?", (old_cutoff, old_event["id"]))
+    store._conn.commit()
+
+    recent_event = store.record_audit_event("test_recent_event", "This one should survive.")
+
+    res = client.post("/api/audit-log/purge", params={"older_than_hours": 0.01})
+    assert res.status_code == 200
+    assert res.json()["deleted"] >= 1
+
+    events = client.get("/api/audit-log?limit=1000").json()
+    ids = {e["id"] for e in events}
+    assert old_event["id"] not in ids
+    assert recent_event["id"] in ids
+
+
+def test_purge_audit_log_defaults_to_24_hours():
+    res = client.post("/api/audit-log/purge")
+    assert res.status_code == 200
+    assert "deleted" in res.json()
+
+
+def test_purge_audit_log_is_a_no_op_when_nothing_is_old_enough():
+    client.post("/api/audit-log/clear")
+    store.record_audit_event("test_fresh_event", "Just created.")
+    res = client.post("/api/audit-log/purge", params={"older_than_hours": 999999})
+    assert res.status_code == 200
+    assert res.json()["deleted"] == 0
