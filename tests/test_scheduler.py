@@ -1,8 +1,8 @@
 import time
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 
 from engine.state_store import StateStore
-from webapp.scheduler import Scheduler
+from webapp.scheduler import Scheduler, next_daily_run_at
 
 
 def test_scheduler_fires_due_schedules_and_reschedules_next_run(tmp_path):
@@ -43,6 +43,53 @@ def test_scheduler_records_trigger_errors_without_crashing(tmp_path):
 
     updated = store.list_schedules()[0]
     assert "trigger failed" in updated["last_status"]
+    store.close()
+
+
+def test_next_daily_run_at_stays_today_when_time_is_still_ahead():
+    after = datetime.now(timezone.utc)
+    local_after = after.astimezone()
+    target = (local_after + timedelta(hours=2)).strftime("%H:%M")
+
+    result = next_daily_run_at(target, after)
+
+    delta = result - after
+    assert timedelta(hours=1, minutes=58) <= delta <= timedelta(hours=2, minutes=1)
+
+
+def test_next_daily_run_at_rolls_to_tomorrow_when_time_already_passed():
+    after = datetime.now(timezone.utc)
+    local_after = after.astimezone()
+    target = (local_after - timedelta(hours=1)).strftime("%H:%M")
+
+    result = next_daily_run_at(target, after)
+
+    delta = result - after
+    assert timedelta(hours=22, minutes=58) <= delta <= timedelta(hours=23, minutes=1)
+
+
+def test_scheduler_reschedules_daily_schedule_about_24h_out(tmp_path):
+    store = StateStore(str(tmp_path / "daily.db"))
+    calls = []
+    scheduler = Scheduler(store, trigger=lambda s: calls.append(s["id"]), poll_interval=0.05)
+
+    now = datetime.now(timezone.utc)
+    due_time = now.astimezone().strftime("%H:%M")  # "now", so it's already due
+    store.create_schedule(
+        kind="module", name="fake", interval_seconds=None,
+        next_run_at=now.isoformat(), tier="automation", inputs={},
+        schedule_type="daily", daily_time=due_time,
+    )
+
+    scheduler.start()
+    time.sleep(0.3)
+    scheduler.stop()
+
+    assert len(calls) == 1  # fires once; the rescheduled next_run_at is ~24h out
+    updated = store.list_schedules()[0]
+    assert updated["schedule_type"] == "daily"
+    next_run = datetime.fromisoformat(updated["next_run_at"])
+    assert next_run - now >= timedelta(hours=23)
     store.close()
 
 

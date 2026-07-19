@@ -861,6 +861,101 @@ only a JSON parse error or timeout falls back to an empty issue list.
     opening a pre-existing database that predates the `inputs` column, and
     end-to-end rerun of both a single-module run and a full 3-step
     pipeline run. 184 tests total.
+80. **Add agent-to-agent delegation** (`agents/escalation_agent.py`, a new
+    Tier 3 module): `churn_response_agent` now writes a `handoff` dict
+    (`requested`/`reason`/`priority`/`risk_level`/`churn_rate`) into its
+    output whenever risk is high and its `enable_handoff` toggle (default
+    on) is set; `escalation_agent` reads that same key straight out of
+    shared context — no explicit field mapping needed for the implicit
+    read, since the builder only renders mapping selects for a module's
+    *declared* inputs, and `escalation_agent` declares `inputs: []`
+    deliberately. It declines cleanly (`status: "skipped"`) if no handoff
+    is waiting, otherwise picks a specialist by priority and drafts a
+    retention plan. This is genuine agent-to-agent delegation — one agent
+    deciding *another agent* should take the case — distinct from the
+    usual upstream-tier handoff every other module already does.
+    `include_in_full_pipeline: false` keeps it out of the fixed 3-step demo
+    (same mechanism as `http_request`, entry 64), since it only makes sense
+    chained after `churn_response_agent` in a real saved pipeline.
+81. **Add a run history trend sparkline** (`renderRunsTrend()` in
+    `app.js`, inline SVG, no charting dependency): one bar per run, oldest
+    to newest left-to-right, height encoding duration and color encoding
+    status — reusing the app's existing reserved status colors
+    (`--ready`/`--running`/`--error`) rather than inventing per-chart hues,
+    with a legend (dot + label, never color-alone) and a hover tooltip
+    (duration leads as the bold value, run id/status/timestamp follow).
+    Each bar is a custom rounded-top/square-bottom SVG path (not a plain
+    `<rect>`) to get the 4px data-end radius without rounding the baseline
+    corners. Sits above the Recent Runs table, reusing the same `/api/runs`
+    data already fetched for the table — no new endpoint.
+82. **Add time-of-day (daily-at-HH:MM) scheduling** (`schedule_type` +
+    `daily_time` columns on `schedules`, migrated via `_migrate_locked()`;
+    `next_daily_run_at()` in `webapp/scheduler.py`): the existing
+    interval-only scheduler (entry 39) now supports a second mode picked
+    per schedule. `HH:MM` is interpreted in the *machine's local timezone*
+    (what a user typing "09:00" actually means) via `datetime.astimezone()`,
+    then converted back to UTC for storage so it compares directly against
+    every other `next_run_at`, interval or daily alike, without the
+    scheduler's due-check needing to know which kind it's looking at. The
+    schedule-creation form gained a Frequency dropdown that swaps the
+    seconds-interval field for an `<input type="time">` field.
+83. **Add artifact tagging + tag-based filtering** (`artifact_tags` table
+    keyed by filename — the on-disk name is already unique thanks to its
+    millisecond-timestamp prefix, so no synthetic id was needed;
+    `PUT /api/artifacts/{filename}/tags` replaces a file's whole tag set,
+    `GET /api/artifacts?tag=` filters case-insensitively): each artifact row
+    gets tag chips plus an inline "+ tag" input (Enter to add, click a
+    chip's × to remove), and a second filter box next to the existing
+    keyword-search box narrows the list by tag. Every chip shares one
+    neutral style rather than a per-tag hue, since tags are free-text with
+    unbounded cardinality — assigning a fixed categorical color per tag
+    would mean an ever-growing, eventually-repeating palette, exactly what
+    the project's charting conventions (established for the trend
+    sparkline, entry 81) rule out for open-ended categories.
+84. **Add a keyboard-driven command palette** (Ctrl/Cmd+K, `app.js`'s
+    "Command palette" section; a new full-screen overlay in `index.html`):
+    lists every module ("Run"), every saved pipeline ("Pipeline" — jumps to
+    and flash-highlights its card rather than running it, a deliberately
+    lighter action than a module command), plus three fixed actions (open
+    the builder, toggle theme, toggle density). Typing filters by
+    title+description; arrow keys move the active row; Enter runs the
+    active command. Reuses `runModule()` unchanged for the "Run" commands
+    (it already scrolls to and runs a module's card with whatever inputs
+    are currently set) and adds one small new primitive, `flashHighlight()`
+    (a CSS animation class toggled on/off), for the pipeline-jump case that
+    had no prior equivalent.
+85. **Add bulk selection and bulk purge for Recent Runs**
+    (`StateStore.delete_runs(run_ids)`, `POST /api/runs/bulk-delete`): a
+    checkbox per row plus a header "select all" checkbox, with a "Delete
+    selected (N)" button that stays disabled until at least one row is
+    checked. This is the fine-grained counterpart to the existing
+    age-based purge (entry 60) — pick specific runs rather than "older
+    than X hours". Checkbox clicks call `stopPropagation()` so selecting a
+    row never also triggers its click-to-expand drill-down (entry 75);
+    `delete_runs` silently ignores any id that no longer exists rather than
+    erroring, since a run could finish disappearing (purged, or deleted by
+    a concurrent bulk-delete) between the checkbox being rendered and the
+    button being clicked.
+86. **Add tests for all of Batch 8**: unit + API-level tests for the
+    churn-response/escalation handoff across three risk scenarios (high,
+    low, toggle-disabled) plus confirming `escalation_agent` is listed but
+    excluded from the fixed full pipeline; `next_daily_run_at()` staying
+    same-day when the target time is still ahead vs. rolling to tomorrow
+    when it's passed, plus a live `Scheduler` tick proving a daily
+    schedule reschedules itself ~24h out; daily-schedule creation,
+    malformed-time and missing-time-field rejection, and
+    unknown-schedule-type rejection through the API; artifact tag
+    set/replace/dedupe-and-sort/blank-entry-dropping, unknown-filename
+    rejection, and case-insensitive tag filtering; and
+    `delete_runs`/`/api/runs/bulk-delete` removing only the chosen ids,
+    ignoring unknown ids, and no-op on an empty selection. The trend
+    sparkline and command palette are pure frontend features with no new
+    backend surface to unit-test (consistent with how earlier
+    frontend-only features like the theme toggle and keyboard shortcuts
+    were verified) — both were live-verified in a real browser instead,
+    including a Ctrl+K open/filter/Escape-close/jump-to-pipeline/run-a-
+    module/toggle-density round trip and a bulk-select-then-delete round
+    trip confirming rows actually disappear. 212 tests total.
 
 ## 9. Roadmap
 

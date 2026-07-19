@@ -1,4 +1,5 @@
 import json
+from datetime import datetime, timezone
 
 from fastapi.testclient import TestClient
 
@@ -211,6 +212,63 @@ def test_schedule_rejects_unknown_pipeline():
         json={"kind": "pipeline", "name": "does-not-exist", "inputs": {}, "interval_seconds": 30},
     )
     assert res.status_code == 404
+
+
+def test_daily_schedule_create_and_shows_next_run_in_the_future():
+    res = client.post(
+        "/api/schedules",
+        json={
+            "kind": "module",
+            "tier": "automation",
+            "name": "fetch_raw_metrics",
+            "inputs": {"signups": 1, "churn": 1, "revenue": 1},
+            "schedule_type": "daily",
+            "daily_time": "09:30",
+        },
+    )
+    assert res.status_code == 200
+    schedule = res.json()
+    assert schedule["schedule_type"] == "daily"
+    assert schedule["daily_time"] == "09:30"
+    assert datetime.fromisoformat(schedule["next_run_at"]) > datetime.now(timezone.utc)
+
+    listed = client.get("/api/schedules").json()
+    assert any(s["id"] == schedule["id"] and s["daily_time"] == "09:30" for s in listed)
+
+    client.delete(f"/api/schedules/{schedule['id']}")
+
+
+def test_daily_schedule_rejects_malformed_time():
+    res = client.post(
+        "/api/schedules",
+        json={
+            "kind": "module", "tier": "automation", "name": "fetch_raw_metrics", "inputs": {},
+            "schedule_type": "daily", "daily_time": "25:99",
+        },
+    )
+    assert res.status_code == 400
+
+
+def test_daily_schedule_requires_daily_time():
+    res = client.post(
+        "/api/schedules",
+        json={
+            "kind": "module", "tier": "automation", "name": "fetch_raw_metrics", "inputs": {},
+            "schedule_type": "daily",
+        },
+    )
+    assert res.status_code == 400
+
+
+def test_schedule_rejects_unknown_schedule_type():
+    res = client.post(
+        "/api/schedules",
+        json={
+            "kind": "module", "tier": "automation", "name": "fetch_raw_metrics", "inputs": {},
+            "schedule_type": "weekly", "interval_seconds": 30,
+        },
+    )
+    assert res.status_code == 400
 
 
 def test_run_detail_and_compare_endpoints():

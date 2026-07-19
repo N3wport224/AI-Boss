@@ -17,6 +17,12 @@ inputs:
     label: Custom note (use {signups}, {churn}, {revenue} to interpolate)
     type: template
     default: "Based on {signups} signups and {churn} churn events this period."
+  - name: enable_handoff
+    label: Hand off high-risk cases to escalation_agent
+    type: toggle
+    default: true
 outputs:
   - name: agent_decision
     label: Agent Decision
+  - name: handoff
+    label: Escalation Handoff

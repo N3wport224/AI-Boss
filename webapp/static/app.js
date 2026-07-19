@@ -79,7 +79,11 @@ const scheduleAddToggleBtn = document.getElementById("schedule-add-toggle");
 const scheduleFormEl = document.getElementById("schedule-form");
 const scheduleKindEl = document.getElementById("schedule-kind");
 const scheduleTargetEl = document.getElementById("schedule-target");
+const scheduleFrequencyEl = document.getElementById("schedule-frequency");
+const scheduleIntervalFieldEl = document.getElementById("schedule-interval-field");
+const scheduleDailyFieldEl = document.getElementById("schedule-daily-field");
 const scheduleIntervalEl = document.getElementById("schedule-interval");
+const scheduleDailyTimeEl = document.getElementById("schedule-daily-time");
 const scheduleErrorEl = document.getElementById("schedule-error");
 const scheduleCreateBtn = document.getElementById("schedule-create-btn");
 const schedulesListEl = document.getElementById("schedules-list");
@@ -382,13 +386,26 @@ async function loadMetrics() {
 
 // ---- Recent runs table ----
 
+const selectedRunIds = new Set();
+
+function updateBulkDeleteButton() {
+  runsBulkDeleteBtn.disabled = selectedRunIds.size === 0;
+  runsBulkDeleteBtn.textContent = selectedRunIds.size ? `Delete selected (${selectedRunIds.size})` : "Delete selected";
+}
+
 async function loadRecentRuns() {
   const res = await fetch("/api/runs?limit=15");
   const runs = await res.json();
 
+  const liveIds = new Set(runs.map((r) => r.id));
+  [...selectedRunIds].forEach((id) => {
+    if (!liveIds.has(id)) selectedRunIds.delete(id);
+  });
+
   if (!runs.length) {
     recentRunsTableEl.innerHTML = `<div class="runs-empty">No runs yet — click any Run button below.</div>`;
     populateCompareSelects([]);
+    updateBulkDeleteButton();
     return;
   }
 
@@ -398,30 +415,150 @@ async function loadRecentRuns() {
         r.started_at && r.finished_at
           ? `${((new Date(r.finished_at) - new Date(r.started_at)) / 1000).toFixed(2)}s`
           : "–";
+      const checked = selectedRunIds.has(r.id) ? "checked" : "";
       return `
         <tr class="history-row" data-run-id="${r.id}">
+          <td class="run-select-cell"><input type="checkbox" class="run-select-checkbox" data-run-id="${r.id}" ${checked} /></td>
           <td><span class="run-expand-chevron">▸</span> #${r.id}</td>
           <td class="status-${r.status}">${r.status}</td>
           <td>${new Date(r.started_at).toLocaleString()}</td>
           <td>${duration}</td>
         </tr>
         <tr class="run-detail-row hidden" data-run-id="${r.id}">
-          <td colspan="4"></td>
+          <td colspan="5"></td>
         </tr>`;
     })
     .join("");
 
+  const allSelected = runs.every((r) => selectedRunIds.has(r.id));
   recentRunsTableEl.innerHTML = `
     <table>
-      <thead><tr><th>Run</th><th>Status</th><th>Started</th><th>Duration</th></tr></thead>
+      <thead><tr>
+        <th class="run-select-cell"><input type="checkbox" id="run-select-all" ${allSelected ? "checked" : ""} /></th>
+        <th>Run</th><th>Status</th><th>Started</th><th>Duration</th>
+      </tr></thead>
       <tbody>${rows}</tbody>
     </table>`;
 
   recentRunsTableEl.querySelectorAll(".history-row").forEach((row) => {
-    row.addEventListener("click", () => toggleRunDetail(row.dataset.runId));
+    row.addEventListener("click", (e) => {
+      if (e.target.closest(".run-select-cell")) return;
+      toggleRunDetail(row.dataset.runId);
+    });
   });
 
+  recentRunsTableEl.querySelectorAll(".run-select-checkbox").forEach((checkbox) => {
+    checkbox.addEventListener("click", (e) => e.stopPropagation());
+    checkbox.addEventListener("change", () => {
+      const runId = Number(checkbox.dataset.runId);
+      if (checkbox.checked) selectedRunIds.add(runId);
+      else selectedRunIds.delete(runId);
+      updateBulkDeleteButton();
+      const selectAllCheckbox = document.getElementById("run-select-all");
+      if (selectAllCheckbox) selectAllCheckbox.checked = runs.every((r) => selectedRunIds.has(r.id));
+    });
+  });
+
+  const selectAllCheckbox = document.getElementById("run-select-all");
+  selectAllCheckbox.addEventListener("click", (e) => e.stopPropagation());
+  selectAllCheckbox.addEventListener("change", () => {
+    if (selectAllCheckbox.checked) runs.forEach((r) => selectedRunIds.add(r.id));
+    else runs.forEach((r) => selectedRunIds.delete(r.id));
+    loadRecentRuns();
+  });
+
+  updateBulkDeleteButton();
+
   populateCompareSelects(runs);
+  renderRunsTrend(runs);
+}
+
+// ---- Run history trend sparkline ----
+// One bar per run (oldest -> newest, left to right): height encodes duration,
+// color encodes status (the app's existing reserved status colors — never
+// invented per-chart). A hover tooltip and the legend below carry the values
+// a glance can't, so nothing here is color-only.
+const STATUS_TREND_COLOR = { completed: "var(--ready)", failed: "var(--error)", running: "var(--running)" };
+
+function runDurationSeconds(run) {
+  if (!run.started_at || !run.finished_at) return null;
+  return (new Date(run.finished_at) - new Date(run.started_at)) / 1000;
+}
+
+function renderRunsTrend(runs) {
+  const trendEl = document.getElementById("runs-trend");
+  if (!trendEl) return;
+  if (!runs.length) {
+    trendEl.innerHTML = "";
+    return;
+  }
+
+  // API returns newest-first; a trend reads left (older) -> right (newer).
+  const ordered = [...runs].reverse();
+  const durations = ordered.map(runDurationSeconds);
+  const maxDuration = Math.max(0.05, ...durations.filter((d) => d != null));
+
+  const plotHeight = 32;
+  const svgHeight = 40;
+  const gap = 2;
+  const containerWidth = trendEl.clientWidth || ordered.length * 14;
+  const barWidth = Math.max(3, Math.min(24, Math.floor((containerWidth - (ordered.length - 1) * gap) / ordered.length)));
+  const svgWidth = ordered.length * barWidth + (ordered.length - 1) * gap;
+
+  const bars = ordered
+    .map((run, i) => {
+      const duration = durations[i];
+      const barHeight = duration == null ? 4 : Math.max(3, Math.round((duration / maxDuration) * plotHeight));
+      const x = i * (barWidth + gap);
+      const yTop = plotHeight - barHeight;
+      const r = Math.min(4, barHeight / 2, barWidth / 2);
+      const color = STATUS_TREND_COLOR[run.status] || "var(--text-dim)";
+      const path =
+        `M ${x} ${yTop + r} ` +
+        `Q ${x} ${yTop} ${x + r} ${yTop} ` +
+        `L ${x + barWidth - r} ${yTop} ` +
+        `Q ${x + barWidth} ${yTop} ${x + barWidth} ${yTop + r} ` +
+        `L ${x + barWidth} ${plotHeight} ` +
+        `L ${x} ${plotHeight} Z`;
+      const durationLabel = duration == null ? "in progress" : `${duration.toFixed(2)}s`;
+      return `<path class="trend-bar" d="${path}" fill="${color}"
+        data-run-id="${run.id}" data-status="${escapeHtml(run.status)}"
+        data-duration="${escapeHtml(durationLabel)}" data-started="${escapeHtml(run.started_at || "")}"></path>`;
+    })
+    .join("");
+
+  trendEl.innerHTML = `
+    <div class="runs-trend-chart-wrap">
+      <svg class="runs-trend-svg" viewBox="0 0 ${svgWidth} ${svgHeight}" width="${svgWidth}" height="${svgHeight}" preserveAspectRatio="xMinYMax meet">
+        ${bars}
+      </svg>
+    </div>
+    <div class="runs-trend-legend">
+      <span class="dot dot-ready"></span><span>Success</span>
+      <span class="dot dot-running"></span><span>Running</span>
+      <span class="dot dot-error"></span><span>Failed</span>
+    </div>
+    <div class="runs-trend-tooltip hidden" id="runs-trend-tooltip"></div>`;
+
+  const tooltip = document.getElementById("runs-trend-tooltip");
+  trendEl.querySelectorAll(".trend-bar").forEach((bar) => {
+    bar.addEventListener("pointerenter", (e) => showTrendTooltip(e, bar, tooltip));
+    bar.addEventListener("pointermove", (e) => showTrendTooltip(e, bar, tooltip));
+    bar.addEventListener("pointerleave", () => tooltip.classList.add("hidden"));
+  });
+}
+
+function showTrendTooltip(event, bar, tooltip) {
+  const { runId, status, duration, started } = bar.dataset;
+  const startedLabel = started ? new Date(started).toLocaleString() : "–";
+  tooltip.innerHTML = `
+    <strong>${escapeHtml(duration)}</strong>
+    <span>Run #${escapeHtml(runId)} · ${escapeHtml(status)}</span>
+    <span>${escapeHtml(startedLabel)}</span>`;
+  tooltip.classList.remove("hidden");
+  const wrapRect = tooltip.parentElement.getBoundingClientRect();
+  tooltip.style.left = `${event.clientX - wrapRect.left + 12}px`;
+  tooltip.style.top = `${event.clientY - wrapRect.top - 10}px`;
 }
 
 // ---- Run detail drill-down ----
@@ -2300,6 +2437,7 @@ const purgeHoursInput = document.getElementById("purge-hours");
 const purgeBtn = document.getElementById("purge-btn");
 const artifactSearchInput = document.getElementById("artifact-search");
 const artifactSearchResultsEl = document.getElementById("artifact-search-results");
+const artifactTagFilterInput = document.getElementById("artifact-tag-filter");
 
 function formatBytes(bytes) {
   if (bytes < 1024) return `${bytes} B`;
@@ -2307,31 +2445,87 @@ function formatBytes(bytes) {
   return `${(bytes / 1024 / 1024).toFixed(1)} MB`;
 }
 
+async function saveArtifactTags(filename, tags) {
+  const res = await fetch(`/api/artifacts/${encodeURIComponent(filename)}/tags`, {
+    method: "PUT",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ tags }),
+  });
+  return res.json();
+}
+
 async function loadArtifacts() {
-  const res = await fetch("/api/artifacts");
+  const tagFilter = artifactTagFilterInput.value.trim();
+  const url = tagFilter ? `/api/artifacts?tag=${encodeURIComponent(tagFilter)}` : "/api/artifacts";
+  const res = await fetch(url);
   const files = await res.json();
 
   if (!files.length) {
-    artifactsListEl.innerHTML = `<div class="runs-empty">No artifacts yet — upload a CSV or PDF above.</div>`;
+    artifactsListEl.innerHTML = `<div class="runs-empty">${
+      tagFilter ? `No artifacts tagged "${escapeHtml(tagFilter)}".` : "No artifacts yet — upload a CSV or PDF above."
+    }</div>`;
     return;
   }
 
   const rows = files
-    .map(
-      (f) => `
+    .map((f) => {
+      const tagChips = (f.tags || [])
+        .map(
+          (t) => `
+          <span class="tag-chip">
+            <span class="tag-chip-label">${escapeHtml(t)}</span>
+            <button type="button" class="tag-chip-remove" data-artifact="${escapeHtml(f.name)}" data-tag="${escapeHtml(t)}" title="Remove tag">×</button>
+          </span>`
+        )
+        .join("");
+      return `
       <tr>
-        <td>${f.name}</td>
+        <td>${escapeHtml(f.name)}</td>
         <td>${formatBytes(f.size_bytes)}</td>
         <td>${new Date(f.modified_at * 1000).toLocaleString()}</td>
-      </tr>`
-    )
+        <td class="artifact-tags-cell">
+          <span class="tag-chip-list">${tagChips}</span>
+          <input type="text" class="tag-add-input" data-artifact="${escapeHtml(f.name)}" placeholder="+ tag" />
+        </td>
+      </tr>`;
+    })
     .join("");
   artifactsListEl.innerHTML = `
     <table>
-      <thead><tr><th>File</th><th>Size</th><th>Modified</th></tr></thead>
+      <thead><tr><th>File</th><th>Size</th><th>Modified</th><th>Tags</th></tr></thead>
       <tbody>${rows}</tbody>
     </table>`;
+
+  artifactsListEl.querySelectorAll(".tag-chip-remove").forEach((btn) => {
+    btn.addEventListener("click", async () => {
+      const filename = btn.dataset.artifact;
+      const removeTag = btn.dataset.tag;
+      const file = files.find((f) => f.name === filename);
+      const nextTags = (file.tags || []).filter((t) => t !== removeTag);
+      await saveArtifactTags(filename, nextTags);
+      await loadArtifacts();
+    });
+  });
+
+  artifactsListEl.querySelectorAll(".tag-add-input").forEach((input) => {
+    input.addEventListener("keydown", async (e) => {
+      if (e.key !== "Enter") return;
+      const filename = input.dataset.artifact;
+      const newTag = input.value.trim();
+      if (!newTag) return;
+      const file = files.find((f) => f.name === filename);
+      const nextTags = Array.from(new Set([...(file.tags || []), newTag]));
+      await saveArtifactTags(filename, nextTags);
+      await loadArtifacts();
+    });
+  });
 }
+
+let artifactTagFilterDebounce = null;
+artifactTagFilterInput.addEventListener("input", () => {
+  clearTimeout(artifactTagFilterDebounce);
+  artifactTagFilterDebounce = setTimeout(() => loadArtifacts(), 250);
+});
 
 let artifactSearchDebounce = null;
 
@@ -2472,6 +2666,22 @@ runsPurgeBtn.addEventListener("click", async () => {
   const res = await fetch(`/api/runs/purge?older_than_hours=${hours}`, { method: "POST" });
   const body = await res.json();
   showToast(`Purged ${body.removed_count} old run(s) from history.`, "success");
+  await refreshTelemetry();
+});
+
+const runsBulkDeleteBtn = document.getElementById("runs-bulk-delete-btn");
+
+runsBulkDeleteBtn.addEventListener("click", async () => {
+  if (!selectedRunIds.size) return;
+  const runIds = [...selectedRunIds];
+  const res = await fetch("/api/runs/bulk-delete", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ run_ids: runIds }),
+  });
+  const body = await res.json();
+  selectedRunIds.clear();
+  showToast(`Deleted ${body.removed_count} selected run(s).`, "success");
   await refreshTelemetry();
 });
 
@@ -2629,11 +2839,12 @@ async function loadSchedules() {
       const status = s.last_status
         ? `last: ${escapeHtml(s.last_status)}${s.last_run_at ? ` @ ${new Date(s.last_run_at).toLocaleTimeString()}` : ""}`
         : "never run yet";
+      const cadence = s.schedule_type === "daily" ? `daily at ${escapeHtml(s.daily_time)}` : `every ${formatInterval(s.interval_seconds)}`;
       return `
         <div class="schedule-row">
           <div class="schedule-row-main">
             <strong>${escapeHtml(label)}</strong>
-            <span class="schedule-row-meta">every ${formatInterval(s.interval_seconds)} · next ${s.enabled ? timeUntil(s.next_run_at) : "paused"} · ${status}</span>
+            <span class="schedule-row-meta">${cadence} · next ${s.enabled ? timeUntil(s.next_run_at) : "paused"} · ${status}</span>
           </div>
           <div class="schedule-row-actions">
             <button class="btn btn-secondary btn-small" data-schedule-toggle="${s.id}" data-enabled="${s.enabled}">
@@ -2674,11 +2885,17 @@ scheduleAddToggleBtn.addEventListener("click", () => {
 
 scheduleKindEl.addEventListener("change", populateScheduleTargets);
 
+scheduleFrequencyEl.addEventListener("change", () => {
+  const isDaily = scheduleFrequencyEl.value === "daily";
+  scheduleIntervalFieldEl.classList.toggle("hidden", isDaily);
+  scheduleDailyFieldEl.classList.toggle("hidden", !isDaily);
+});
+
 scheduleCreateBtn.addEventListener("click", async () => {
   scheduleErrorEl.classList.add("hidden");
   const kind = scheduleKindEl.value;
   const target = scheduleTargetEl.value;
-  const intervalSeconds = Number(scheduleIntervalEl.value);
+  const scheduleType = scheduleFrequencyEl.value;
 
   if (!target) {
     scheduleErrorEl.textContent = "No target available to schedule yet.";
@@ -2686,7 +2903,12 @@ scheduleCreateBtn.addEventListener("click", async () => {
     return;
   }
 
-  const payload = { kind, interval_seconds: intervalSeconds, inputs: {} };
+  const payload = { kind, schedule_type: scheduleType, inputs: {} };
+  if (scheduleType === "daily") {
+    payload.daily_time = scheduleDailyTimeEl.value;
+  } else {
+    payload.interval_seconds = Number(scheduleIntervalEl.value);
+  }
   if (kind === "module") {
     const [tier, name] = target.split("::");
     payload.tier = tier;
@@ -2858,12 +3080,174 @@ function runRegexTest() {
 [regexPatternEl, regexFlagsEl, regexTestStringEl].forEach((el) => el.addEventListener("input", runRegexTest));
 runRegexTest();
 
+// ---- Command palette (Ctrl/Cmd+K) ----
+
+const commandPaletteOverlay = document.getElementById("command-palette-overlay");
+const commandPaletteInput = document.getElementById("command-palette-input");
+const commandPaletteResultsEl = document.getElementById("command-palette-results");
+
+let commandPaletteItems = [];
+let commandPaletteActiveIndex = 0;
+
+function flashHighlight(el) {
+  el.classList.remove("jump-highlight");
+  void el.offsetWidth; // force reflow so the animation restarts if it just ran
+  el.classList.add("jump-highlight");
+  setTimeout(() => el.classList.remove("jump-highlight"), 1500);
+}
+
+function buildCommandPaletteCommands() {
+  const commands = [];
+
+  TIER_ORDER.forEach((tier) => {
+    (currentModulesByTier[tier] || []).forEach((m) => {
+      commands.push({
+        kind: "Run",
+        title: m.name,
+        desc: `[${tier}] ${m.description || ""}`,
+        action: () => {
+          closeCommandPalette();
+          runModule(tier, m.name);
+        },
+      });
+    });
+  });
+
+  currentPipelines.forEach((p) => {
+    commands.push({
+      kind: "Pipeline",
+      title: p.name,
+      desc: p.description || "Jump to this saved pipeline",
+      action: () => {
+        closeCommandPalette();
+        const card = document.getElementById(`pipeline-card__${p.slug}`);
+        if (card) {
+          card.scrollIntoView({ behavior: "smooth", block: "center" });
+          flashHighlight(card);
+        }
+      },
+    });
+  });
+
+  commands.push({
+    kind: "Action",
+    title: "Open pipeline builder",
+    desc: "Start building a new pipeline",
+    action: () => {
+      closeCommandPalette();
+      if (builderPanelEl.classList.contains("hidden")) openBuilder();
+      builderPanelEl.scrollIntoView({ behavior: "smooth", block: "start" });
+    },
+  });
+
+  commands.push({
+    kind: "Action",
+    title: "Toggle theme",
+    desc: "Switch between light and dark mode",
+    action: () => {
+      closeCommandPalette();
+      themeToggleBtn.click();
+    },
+  });
+
+  commands.push({
+    kind: "Action",
+    title: "Toggle density",
+    desc: "Switch between comfortable and compact card view",
+    action: () => {
+      closeCommandPalette();
+      densityToggleBtn.click();
+    },
+  });
+
+  return commands;
+}
+
+function setCommandPaletteActive(index) {
+  commandPaletteActiveIndex = index;
+  commandPaletteResultsEl.querySelectorAll(".command-palette-item").forEach((el) => {
+    el.classList.toggle("active", Number(el.dataset.index) === index);
+  });
+  const activeEl = commandPaletteResultsEl.querySelector(".command-palette-item.active");
+  if (activeEl) activeEl.scrollIntoView({ block: "nearest" });
+}
+
+function renderCommandPaletteResults(query) {
+  const all = buildCommandPaletteCommands();
+  const q = query.trim().toLowerCase();
+  const filtered = q ? all.filter((c) => `${c.title} ${c.desc}`.toLowerCase().includes(q)) : all;
+
+  commandPaletteItems = filtered.slice(0, 30);
+  commandPaletteActiveIndex = 0;
+
+  if (!commandPaletteItems.length) {
+    commandPaletteResultsEl.innerHTML = `<div class="command-palette-empty">No matching commands.</div>`;
+    return;
+  }
+
+  commandPaletteResultsEl.innerHTML = commandPaletteItems
+    .map(
+      (c, i) => `
+      <div class="command-palette-item ${i === 0 ? "active" : ""}" data-index="${i}">
+        <div class="command-palette-item-label">
+          <span class="command-palette-item-title">${escapeHtml(c.title)}</span>
+          <span class="command-palette-item-desc">${escapeHtml(c.desc)}</span>
+        </div>
+        <span class="command-palette-kind">${escapeHtml(c.kind)}</span>
+      </div>`
+    )
+    .join("");
+
+  commandPaletteResultsEl.querySelectorAll(".command-palette-item").forEach((el) => {
+    el.addEventListener("click", () => commandPaletteItems[Number(el.dataset.index)].action());
+    el.addEventListener("mouseenter", () => setCommandPaletteActive(Number(el.dataset.index)));
+  });
+}
+
+function openCommandPalette() {
+  commandPaletteOverlay.classList.remove("hidden");
+  commandPaletteInput.value = "";
+  renderCommandPaletteResults("");
+  commandPaletteInput.focus();
+}
+
+function closeCommandPalette() {
+  commandPaletteOverlay.classList.add("hidden");
+}
+
+commandPaletteInput.addEventListener("input", () => renderCommandPaletteResults(commandPaletteInput.value));
+
+commandPaletteInput.addEventListener("keydown", (e) => {
+  if (e.key === "ArrowDown") {
+    e.preventDefault();
+    if (commandPaletteItems.length) setCommandPaletteActive((commandPaletteActiveIndex + 1) % commandPaletteItems.length);
+  } else if (e.key === "ArrowUp") {
+    e.preventDefault();
+    if (commandPaletteItems.length) setCommandPaletteActive((commandPaletteActiveIndex - 1 + commandPaletteItems.length) % commandPaletteItems.length);
+  } else if (e.key === "Enter") {
+    e.preventDefault();
+    const item = commandPaletteItems[commandPaletteActiveIndex];
+    if (item) item.action();
+  } else if (e.key === "Escape") {
+    e.preventDefault();
+    closeCommandPalette();
+  }
+});
+
+commandPaletteOverlay.addEventListener("click", (e) => {
+  if (e.target === commandPaletteOverlay) closeCommandPalette();
+});
+
 // ---- Keyboard shortcuts ----
 
 document.addEventListener("keydown", (event) => {
   const isTyping = ["INPUT", "TEXTAREA", "SELECT"].includes(document.activeElement.tagName);
 
-  if (event.key === "/" && !isTyping) {
+  if ((event.metaKey || event.ctrlKey) && event.key.toLowerCase() === "k") {
+    event.preventDefault();
+    if (commandPaletteOverlay.classList.contains("hidden")) openCommandPalette();
+    else closeCommandPalette();
+  } else if (event.key === "/" && !isTyping) {
     event.preventDefault();
     searchOmnibar.focus();
   } else if (event.key === "Escape") {
@@ -2871,7 +3255,7 @@ document.addEventListener("keydown", (event) => {
     notificationsPanel.classList.add("hidden");
     healthPanel.classList.add("hidden");
   } else if (event.key === "?" && !isTyping) {
-    showToast("Shortcuts: “/” search · Esc close panels · “?” this help", "success");
+    showToast("Shortcuts: “Ctrl/Cmd+K” command palette · “/” search · Esc close panels · “?” this help", "success");
   }
 });
 

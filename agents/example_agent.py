@@ -4,6 +4,13 @@ Wire a real LLM call here (e.g. the Anthropic API) in place of the stubbed reaso
 the context object is already carrying everything upstream tiers produced. The context.emit()
 calls below stand in for what a real agent would stream: its intermediate reasoning and the
 tools it decides to call, so a watching dashboard has something to show mid-run.
+
+On a high-risk case this agent also writes a `handoff` output — a structured
+request for a second, specialized agent (`escalation_agent`, in this same
+package) to pick up. This is genuine agent-to-agent delegation, not just the
+usual tier-1 -> tier-2 -> tier-3 handoff: one agent deciding *another agent*
+should take over, and handing it just enough context to act without redoing
+the upstream analysis. See `escalation_agent.py` for the receiving side.
 """
 import time
 
@@ -28,6 +35,7 @@ class ChurnResponseAgent(BaseModule):
         churn_rate = insight.get("churn_rate", 0)
         tone = context.get("tone", "professional")
         notify_slack = context.get("notify_slack", False)
+        enable_handoff = context.get("enable_handoff", True)
         # Already interpolated (e.g. "{signups} signups, {churn} churn events" ->
         # "128 signups, 14 churn events") before this module ever sees it — the
         # orchestrator resolves `template`-type fields against the shared context
@@ -69,4 +77,16 @@ class ChurnResponseAgent(BaseModule):
             message += f" Note: {custom_note}"
 
         context.emit("thought", "Drafting final response.")
-        return {"agent_decision": {"action": action, "message": message}}
+
+        handoff_requested = enable_handoff and risk_level == "high"
+        if handoff_requested:
+            context.emit("thought", "Risk is high — handing this off to escalation_agent for retention follow-through.")
+        handoff = {
+            "requested": handoff_requested,
+            "reason": f"churn rate {churn_rate:.2%} is in the {risk_level}-risk band" if handoff_requested else "",
+            "priority": "high" if handoff_requested else "normal",
+            "risk_level": risk_level,
+            "churn_rate": churn_rate,
+        }
+
+        return {"agent_decision": {"action": action, "message": message}, "handoff": handoff}

@@ -1,10 +1,11 @@
 """In-process recurring-run scheduler.
 
 Deliberately not a real cron-expression engine (no croniter dependency, no
-external job queue) — this is a single-process local tool, so a plain "run
-every N seconds, starting now" timer covers the actual use case (rerun this
-module or pipeline on a recurring interval) without pretending to support
-minute/hour/day-of-week cron syntax nothing here would ever parse correctly.
+external job queue) — this is a single-process local tool, so two schedule
+kinds cover the actual use cases: "run every N seconds, starting now" for a
+recurring interval, and "run once a day at HH:MM" for automations that should
+fire at a particular time of day rather than on a fixed cadence. Neither
+pretends to support full minute/hour/day-of-week cron syntax.
 
 A background thread polls the schedules table every `poll_interval` seconds
 and fires anything whose `next_run_at` has passed. Firing calls back into a
@@ -16,6 +17,20 @@ from datetime import datetime, timedelta, timezone
 from typing import Callable
 
 from engine.state_store import StateStore
+
+
+def next_daily_run_at(daily_time: str, after: datetime) -> datetime:
+    """Next UTC instant a "HH:MM" daily schedule should fire, strictly after
+    `after`. HH:MM is interpreted in the machine's local timezone (the one a
+    user picking "09:00" actually means), then converted back to UTC so it
+    compares directly against every other `next_run_at` in the schedules
+    table — those are always UTC regardless of schedule kind."""
+    hour, minute = (int(part) for part in daily_time.split(":"))
+    local_after = after.astimezone()
+    candidate = local_after.replace(hour=hour, minute=minute, second=0, microsecond=0)
+    if candidate <= local_after:
+        candidate += timedelta(days=1)
+    return candidate.astimezone(timezone.utc)
 
 
 class Scheduler:
@@ -48,5 +63,8 @@ class Scheduler:
                 status = "triggered"
             except Exception as exc:
                 status = f"error: {exc}"
-            next_run_at = now + timedelta(seconds=schedule["interval_seconds"])
+            if schedule.get("schedule_type") == "daily":
+                next_run_at = next_daily_run_at(schedule["daily_time"], now)
+            else:
+                next_run_at = now + timedelta(seconds=schedule["interval_seconds"])
             self.state_store.record_schedule_run(schedule["id"], next_run_at.isoformat(), status)

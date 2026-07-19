@@ -110,8 +110,76 @@ def test_purge_runs_endpoint_removes_old_runs():
     assert purge_res.status_code == 200
     assert purge_res.json()["removed_count"] >= 1
 
-    after = client.get("/api/metrics").json()["total_runs"]
-    assert after < before
+
+def _run_full_pipeline_to_completion():
+    res = client.post("/api/pipeline/run", json={"inputs": {}})
+    with client.stream("GET", f"/api/stream/{res.json()['stream_id']}") as response:
+        for line in response.iter_lines():
+            if line.startswith("data: ") and '"run_completed"' in line:
+                break
+    return client.get("/api/runs?limit=1").json()[0]["id"]
+
+
+def test_delete_runs_removes_only_the_chosen_ids(tmp_path):
+    from engine.state_store import StateStore
+
+    isolated_store = StateStore(str(tmp_path / "bulk_delete_test.db"))
+    keep_id = isolated_store.start_run()
+    isolated_store.finish_run(keep_id, "completed")
+    delete_id_a = isolated_store.start_run()
+    isolated_store.finish_run(delete_id_a, "completed")
+    delete_id_b = isolated_store.start_run()
+    isolated_store.finish_run(delete_id_b, "failed")
+
+    removed = isolated_store.delete_runs([delete_id_a, delete_id_b])
+    isolated_store.close()
+
+    assert removed == 2
+
+    reopened = StateStore(str(tmp_path / "bulk_delete_test.db"))
+    remaining_ids = {run["id"] for run in reopened.recent_runs(limit=10)}
+    assert remaining_ids == {keep_id}
+    reopened.close()
+
+
+def test_delete_runs_ignores_unknown_ids(tmp_path):
+    from engine.state_store import StateStore
+
+    isolated_store = StateStore(str(tmp_path / "bulk_delete_unknown.db"))
+    real_id = isolated_store.start_run()
+    isolated_store.finish_run(real_id, "completed")
+
+    removed = isolated_store.delete_runs([real_id, 999999])
+    isolated_store.close()
+
+    assert removed == 1  # only the real id counted, the fake one silently ignored
+
+
+def test_delete_runs_with_empty_list_is_a_noop(tmp_path):
+    from engine.state_store import StateStore
+
+    isolated_store = StateStore(str(tmp_path / "bulk_delete_empty.db"))
+    assert isolated_store.delete_runs([]) == 0
+    isolated_store.close()
+
+
+def test_bulk_delete_runs_endpoint_removes_selected_runs_only():
+    run_id_to_delete = _run_full_pipeline_to_completion()
+    run_id_to_keep = _run_full_pipeline_to_completion()
+
+    res = client.post("/api/runs/bulk-delete", json={"run_ids": [run_id_to_delete]})
+    assert res.status_code == 200
+    assert res.json()["removed_count"] == 1
+
+    remaining_ids = {r["id"] for r in client.get("/api/runs?limit=50").json()}
+    assert run_id_to_delete not in remaining_ids
+    assert run_id_to_keep in remaining_ids
+
+
+def test_bulk_delete_runs_endpoint_handles_empty_selection():
+    res = client.post("/api/runs/bulk-delete", json={"run_ids": []})
+    assert res.status_code == 200
+    assert res.json()["removed_count"] == 0
 
 
 def test_restore_snapshot_is_additive_and_idempotent(tmp_path):

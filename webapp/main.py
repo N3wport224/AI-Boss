@@ -14,6 +14,7 @@ import contextlib
 import csv
 import io
 import json
+import re
 import threading
 from datetime import datetime, timezone
 from pathlib import Path
@@ -40,7 +41,7 @@ from engine.registry import instantiate, load_manifests
 from . import cache, graph, health, ingestion, linting, perf, pipelines as pipeline_store
 from .events import RunEventBus
 from .ratelimit import RateLimiter
-from .scheduler import Scheduler
+from .scheduler import Scheduler, next_daily_run_at
 from .watcher import FilesystemWatcher, WATCH_DIR, ensure_watch_dir
 
 ROOT = Path(__file__).resolve().parent.parent
@@ -182,6 +183,7 @@ class PipelineDefinition(BaseModel):
 
 
 MIN_SCHEDULE_INTERVAL_SECONDS = 10.0
+DAILY_TIME_RE = re.compile(r"^([01]\d|2[0-3]):([0-5]\d)$")
 
 
 class ScheduleCreate(BaseModel):
@@ -189,7 +191,9 @@ class ScheduleCreate(BaseModel):
     tier: Optional[str] = None  # required when kind == "module"
     name: str  # module name, or saved pipeline slug
     inputs: dict[str, Any] = {}  # only used when kind == "module"
-    interval_seconds: float
+    schedule_type: str = "interval"  # "interval" or "daily"
+    interval_seconds: Optional[float] = None  # required when schedule_type == "interval"
+    daily_time: Optional[str] = None  # "HH:MM" (local time), required when schedule_type == "daily"
 
 
 class ScheduleUpdate(BaseModel):
@@ -719,11 +723,21 @@ def list_schedules():
 def create_schedule(payload: ScheduleCreate):
     if payload.kind not in ("module", "pipeline"):
         raise HTTPException(status_code=400, detail="kind must be 'module' or 'pipeline'")
-    if payload.interval_seconds < MIN_SCHEDULE_INTERVAL_SECONDS:
-        raise HTTPException(
-            status_code=400,
-            detail=f"interval_seconds must be at least {MIN_SCHEDULE_INTERVAL_SECONDS}",
-        )
+    if payload.schedule_type not in ("interval", "daily"):
+        raise HTTPException(status_code=400, detail="schedule_type must be 'interval' or 'daily'")
+
+    now = datetime.now(timezone.utc)
+    if payload.schedule_type == "interval":
+        if payload.interval_seconds is None or payload.interval_seconds < MIN_SCHEDULE_INTERVAL_SECONDS:
+            raise HTTPException(
+                status_code=400,
+                detail=f"interval_seconds must be at least {MIN_SCHEDULE_INTERVAL_SECONDS}",
+            )
+        next_run_at = now.isoformat()
+    else:
+        if not payload.daily_time or not DAILY_TIME_RE.match(payload.daily_time):
+            raise HTTPException(status_code=400, detail="daily_time must be in 'HH:MM' 24-hour format")
+        next_run_at = next_daily_run_at(payload.daily_time, now).isoformat()
 
     if payload.kind == "module":
         if not payload.tier:
@@ -735,7 +749,6 @@ def create_schedule(payload: ScheduleCreate):
         except FileNotFoundError:
             raise HTTPException(status_code=404, detail=f"No saved pipeline named '{payload.name}'.")
 
-    next_run_at = datetime.now(timezone.utc).isoformat()
     schedule = store.create_schedule(
         kind=payload.kind,
         name=payload.name,
@@ -743,6 +756,8 @@ def create_schedule(payload: ScheduleCreate):
         next_run_at=next_run_at,
         tier=payload.tier,
         inputs=payload.inputs,
+        schedule_type=payload.schedule_type,
+        daily_time=payload.daily_time,
     )
     return schedule
 
@@ -865,6 +880,18 @@ def purge_runs(older_than_hours: float = 24 * 30):
     — mirrors artifact purge, but for run history instead of uploaded files.
     Defaults to 30 days; never touches a run that's still in progress."""
     removed = store.prune_runs(older_than_hours)
+    return {"removed_count": removed}
+
+
+class BulkDeleteRuns(BaseModel):
+    run_ids: list[int]
+
+
+@app.post("/api/runs/bulk-delete")
+def bulk_delete_runs(payload: BulkDeleteRuns):
+    """Delete a user-picked set of runs — the finer-grained counterpart to
+    /api/runs/purge's age-based sweep, for a checkbox multi-select in the UI."""
+    removed = store.delete_runs(payload.run_ids)
     return {"removed_count": removed}
 
 
@@ -1120,8 +1147,15 @@ async def ingest_json(file: UploadFile = File(...)):
 
 
 @app.get("/api/artifacts")
-def list_artifacts():
-    return ingestion.list_artifacts()
+def list_artifacts(tag: Optional[str] = None):
+    files = ingestion.list_artifacts()
+    tags_by_file = store.all_artifact_tags()
+    for f in files:
+        f["tags"] = tags_by_file.get(f["name"], [])
+    if tag and tag.strip():
+        tag_lower = tag.strip().lower()
+        files = [f for f in files if tag_lower in (t.lower() for t in f["tags"])]
+    return files
 
 
 @app.post("/api/artifacts/purge")
@@ -1133,6 +1167,20 @@ def purge_artifacts(older_than_hours: float = 24):
 @app.get("/api/artifacts/search")
 def search_artifacts(q: str = ""):
     return {"query": q, "results": ingestion.search_artifacts(q)}
+
+
+class ArtifactTagsUpdate(BaseModel):
+    tags: list[str]
+
+
+@app.put("/api/artifacts/{filename}/tags")
+def set_artifact_tags(filename: str, payload: ArtifactTagsUpdate):
+    safe_name = Path(filename).name  # strip any path components — filenames only, never a traversal target
+    path = ingestion.ARTIFACTS_DIR / safe_name
+    if not path.is_file():
+        raise HTTPException(status_code=404, detail=f"No artifact named '{safe_name}'.")
+    cleaned = sorted({t.strip() for t in payload.tags if t.strip()})
+    return {"filename": safe_name, "tags": store.set_artifact_tags(safe_name, cleaned)}
 
 
 @app.get("/api/watcher/status")

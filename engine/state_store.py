@@ -52,7 +52,9 @@ CREATE TABLE IF NOT EXISTS schedules (
     next_run_at TEXT NOT NULL,
     last_run_at TEXT,
     last_status TEXT,
-    created_at TEXT NOT NULL
+    created_at TEXT NOT NULL,
+    schedule_type TEXT NOT NULL DEFAULT 'interval',
+    daily_time TEXT
 );
 
 CREATE TABLE IF NOT EXISTS memory (
@@ -68,6 +70,12 @@ CREATE TABLE IF NOT EXISTS module_health (
     tripped INTEGER NOT NULL DEFAULT 0,
     updated_at TEXT NOT NULL,
     PRIMARY KEY (tier, name)
+);
+
+CREATE TABLE IF NOT EXISTS artifact_tags (
+    filename TEXT PRIMARY KEY,
+    tags TEXT NOT NULL,
+    updated_at TEXT NOT NULL
 );
 """
 
@@ -98,6 +106,12 @@ class StateStore:
         columns = {row[1] for row in self._conn.execute("PRAGMA table_info(steps)").fetchall()}
         if "inputs" not in columns:
             self._conn.execute("ALTER TABLE steps ADD COLUMN inputs TEXT NOT NULL DEFAULT '{}'")
+
+        schedule_columns = {row[1] for row in self._conn.execute("PRAGMA table_info(schedules)").fetchall()}
+        if "schedule_type" not in schedule_columns:
+            self._conn.execute("ALTER TABLE schedules ADD COLUMN schedule_type TEXT NOT NULL DEFAULT 'interval'")
+        if "daily_time" not in schedule_columns:
+            self._conn.execute("ALTER TABLE schedules ADD COLUMN daily_time TEXT")
 
     def start_run(self) -> int:
         with self._lock:
@@ -255,6 +269,27 @@ class StateStore:
                 self._conn.execute(f"DELETE FROM runs WHERE id IN ({placeholders})", run_ids)
                 self._conn.commit()
         return len(run_ids)
+
+    def delete_runs(self, run_ids: list[int]) -> int:
+        """Delete a caller-chosen set of runs (and their steps) by id — the
+        fine-grained counterpart to `prune_runs`'s age-based sweep. Silently
+        ignores ids that don't exist; returns how many runs were actually
+        removed. A run still in progress is deleted too if explicitly asked
+        for by id (unlike `prune_runs`, which never touches one)."""
+        if not run_ids:
+            return 0
+        with self._lock:
+            placeholders = ",".join("?" * len(run_ids))
+            existing = self._conn.execute(
+                f"SELECT id FROM runs WHERE id IN ({placeholders})", run_ids
+            ).fetchall()
+            existing_ids = [row[0] for row in existing]
+            if existing_ids:
+                existing_placeholders = ",".join("?" * len(existing_ids))
+                self._conn.execute(f"DELETE FROM steps WHERE run_id IN ({existing_placeholders})", existing_ids)
+                self._conn.execute(f"DELETE FROM runs WHERE id IN ({existing_placeholders})", existing_ids)
+                self._conn.commit()
+        return len(existing_ids)
 
     def search_steps(self, query: str, limit: int = 20) -> list[dict]:
         """Case-insensitive keyword search across every recorded step's output
@@ -462,6 +497,7 @@ class StateStore:
     _SCHEDULE_COLUMNS = (
         "id", "kind", "tier", "name", "inputs", "interval_seconds",
         "enabled", "next_run_at", "last_run_at", "last_status", "created_at",
+        "schedule_type", "daily_time",
     )
 
     def _schedule_row_to_dict(self, row) -> dict:
@@ -471,16 +507,17 @@ class StateStore:
         return record
 
     def create_schedule(
-        self, kind: str, name: str, interval_seconds: float, next_run_at: str,
+        self, kind: str, name: str, interval_seconds: Optional[float], next_run_at: str,
         tier: Optional[str] = None, inputs: Optional[dict] = None,
+        schedule_type: str = "interval", daily_time: Optional[str] = None,
     ) -> dict:
         with self._lock:
             cur = self._conn.execute(
                 "INSERT INTO schedules (kind, tier, name, inputs, interval_seconds, enabled, "
-                "next_run_at, created_at) VALUES (?, ?, ?, ?, ?, 1, ?, ?)",
+                "next_run_at, created_at, schedule_type, daily_time) VALUES (?, ?, ?, ?, ?, 1, ?, ?, ?, ?)",
                 (
-                    kind, tier, name, json.dumps(inputs or {}), interval_seconds,
-                    next_run_at, datetime.now(timezone.utc).isoformat(),
+                    kind, tier, name, json.dumps(inputs or {}), interval_seconds or 0.0,
+                    next_run_at, datetime.now(timezone.utc).isoformat(), schedule_type, daily_time,
                 ),
             )
             self._conn.commit()
@@ -529,6 +566,33 @@ class StateStore:
         with self._lock:
             self._conn.execute("DELETE FROM schedules WHERE id = ?", (schedule_id,))
             self._conn.commit()
+
+    def set_artifact_tags(self, filename: str, tags: list[str]) -> list[str]:
+        """Replace the full tag set for an artifact (keyed by its on-disk
+        filename, which is unique per upload thanks to the timestamp prefix
+        `save_artifact` gives it). An empty list clears tagging entirely."""
+        with self._lock:
+            self._conn.execute(
+                "INSERT INTO artifact_tags (filename, tags, updated_at) VALUES (?, ?, ?) "
+                "ON CONFLICT(filename) DO UPDATE SET tags = excluded.tags, updated_at = excluded.updated_at",
+                (filename, json.dumps(tags), datetime.now(timezone.utc).isoformat()),
+            )
+            self._conn.commit()
+        return tags
+
+    def get_artifact_tags(self, filename: str) -> list[str]:
+        with self._lock:
+            row = self._conn.execute(
+                "SELECT tags FROM artifact_tags WHERE filename = ?", (filename,)
+            ).fetchone()
+        return json.loads(row[0]) if row else []
+
+    def all_artifact_tags(self) -> dict[str, list[str]]:
+        """Every tagged artifact's tags in one query, for list endpoints that
+        join tags onto every file without a query per row."""
+        with self._lock:
+            rows = self._conn.execute("SELECT filename, tags FROM artifact_tags").fetchall()
+        return {filename: json.loads(tags) for filename, tags in rows}
 
     def export_snapshot(self) -> dict:
         """A full, human-readable JSON snapshot of everything this store has
@@ -612,12 +676,13 @@ class StateStore:
             for schedule in snapshot.get("schedules", []):
                 cur = self._conn.execute(
                     "INSERT OR IGNORE INTO schedules (id, kind, tier, name, inputs, interval_seconds, enabled, "
-                    "next_run_at, last_run_at, last_status, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                    "next_run_at, last_run_at, last_status, created_at, schedule_type, daily_time) "
+                    "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
                     (
                         schedule["id"], schedule["kind"], schedule.get("tier"), schedule["name"],
                         json.dumps(schedule["inputs"]), schedule["interval_seconds"], int(schedule["enabled"]),
                         schedule["next_run_at"], schedule.get("last_run_at"), schedule.get("last_status"),
-                        schedule["created_at"],
+                        schedule["created_at"], schedule.get("schedule_type", "interval"), schedule.get("daily_time"),
                     ),
                 )
                 if cur.rowcount > 0:

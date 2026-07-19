@@ -502,6 +502,35 @@ A few things live in the header/subheader on every page load:
   are. A secret-shaped input is redacted before it's ever logged, so a
   re-run can't recover or resend the real secret value.
 
+## Agent delegation, trends, scheduling, tagging, and the command palette
+
+- **Agent-to-agent delegation** — `churn_response_agent` can hand a
+  high-risk case off to a second, specialized agent (`escalation_agent`)
+  by writing a `handoff` dict into shared context; the receiving agent
+  reads it straight out of context (no field mapping needed) and either
+  declines cleanly or picks a specialist and drafts a plan. This is
+  genuine agent-to-agent delegation — one agent deciding *another agent*
+  should take over — not just the usual tier-to-tier handoff every module
+  already does.
+- **Run history trend sparkline** — an inline SVG bar chart above Recent
+  Runs shows the last 15 runs' duration (bar height) and outcome (bar
+  color, reusing the same reserved status colors as everywhere else in
+  the app) at a glance, with a legend and a hover tooltip. No charting
+  library added.
+- **Daily-at-a-time scheduling** — schedules can now fire once a day at a
+  specific `HH:MM` (local time), alongside the existing every-N-seconds
+  interval mode. Pick the mode from a Frequency dropdown when creating a
+  schedule.
+- **Artifact tagging** — assign free-text tags to an ingested artifact
+  (an inline "+ tag" chip input, click a chip's × to remove) and filter
+  the artifact list by tag, alongside the existing keyword search.
+- **Command palette** — press **Ctrl/Cmd+K** to open a searchable overlay
+  that runs a module, jumps to a saved pipeline, opens the builder, or
+  toggles theme/density, all from the keyboard.
+- **Bulk run selection** — checkboxes on Recent Runs rows (plus a
+  select-all checkbox) enable a "Delete selected" action, for pruning
+  specific runs rather than everything older than a cutoff.
+
 ## Tech stack
 
 - **Language:** Python 3.11+ — first-class async/sync support and native SDKs

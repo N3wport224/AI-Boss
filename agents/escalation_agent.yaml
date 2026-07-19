@@ -1,0 +1,10 @@
+name: escalation_agent
+tier: agent
+entrypoint: agents.escalation_agent:EscalationAgent
+description: Picks up a case another agent hands off, and drafts a retention plan for it.
+enabled: true
+include_in_full_pipeline: false  # only meaningful chained after churn_response_agent's handoff; the fixed demo pipeline runs one module per tier
+inputs: []
+outputs:
+  - name: escalation_result
+    label: Escalation Result

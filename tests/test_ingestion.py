@@ -197,6 +197,60 @@ def test_list_and_purge_artifacts():
     assert client.get("/api/artifacts").json() == []
 
 
+def test_artifacts_list_untagged_by_default():
+    client.post("/api/ingest/csv", files={"file": ("untagged.csv", b"x,y\n101,201\n", "text/csv")})
+    files = client.get("/api/artifacts").json()
+    assert all(f["tags"] == [] for f in files)
+
+
+def test_set_and_replace_artifact_tags():
+    client.post("/api/ingest/csv", files={"file": ("tagme.csv", b"x,y\n111,211\n", "text/csv")})
+    csv_filename = next(f["name"] for f in client.get("/api/artifacts").json() if f["name"].endswith(".csv"))
+
+    res = client.put(f"/api/artifacts/{csv_filename}/tags", json={"tags": ["finance", "Q3", "finance"]})
+    assert res.status_code == 200
+    assert res.json()["tags"] == ["Q3", "finance"]  # deduped + sorted
+
+    files = client.get("/api/artifacts").json()
+    tagged = next(f for f in files if f["name"] == csv_filename)
+    assert tagged["tags"] == ["Q3", "finance"]
+
+    # a second PUT replaces the set rather than appending
+    res2 = client.put(f"/api/artifacts/{csv_filename}/tags", json={"tags": ["archived"]})
+    assert res2.json()["tags"] == ["archived"]
+
+
+def test_artifact_tags_reject_unknown_filename():
+    res = client.put("/api/artifacts/does-not-exist.csv/tags", json={"tags": ["x"]})
+    assert res.status_code == 404
+
+
+def test_artifact_tags_blank_entries_are_dropped():
+    client.post("/api/ingest/csv", files={"file": ("blanktags.csv", b"x,y\n121,221\n", "text/csv")})
+    csv_filename = next(f["name"] for f in client.get("/api/artifacts").json() if f["name"].endswith(".csv"))
+
+    res = client.put(f"/api/artifacts/{csv_filename}/tags", json={"tags": ["  ", "kept", ""]})
+    assert res.json()["tags"] == ["kept"]
+
+
+def test_filter_artifacts_by_tag():
+    client.post("/api/ingest/csv", files={"file": ("filterme_a.csv", b"x,y\n131,231\n", "text/csv")})
+    client.post("/api/ingest/csv", files={"file": ("filterme_b.csv", b"x,y\n141,241\n", "text/csv")})
+    files = client.get("/api/artifacts").json()
+    csv_files = [f["name"] for f in files if f["name"].endswith(".csv")]
+    assert len(csv_files) == 2
+
+    client.put(f"/api/artifacts/{csv_files[0]}/tags", json={"tags": ["important"]})
+
+    filtered = client.get("/api/artifacts", params={"tag": "important"}).json()
+    assert [f["name"] for f in filtered] == [csv_files[0]]
+
+    filtered_case_insensitive = client.get("/api/artifacts", params={"tag": "IMPORTANT"}).json()
+    assert [f["name"] for f in filtered_case_insensitive] == [csv_files[0]]
+
+    assert client.get("/api/artifacts", params={"tag": "no-such-tag"}).json() == []
+
+
 def test_purge_never_touches_state_store_or_pipelines(tmp_path):
     from webapp import pipelines as pipeline_store
 
