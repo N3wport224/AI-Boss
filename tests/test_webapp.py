@@ -286,3 +286,75 @@ def test_run_module_failure_streams_step_failed_then_run_failed(monkeypatch):
     kinds = [e["kind"] for e in events]
     assert kinds == ["step_started", "step_failed", "run_failed"]
     assert "simulated failure" in events[1]["error"]
+
+
+def test_module_stats_start_at_zero_and_update_after_a_real_run():
+    # The module-level store is shared across this whole test file, so other
+    # tests may have already recorded runs (including failures) for this
+    # same module — assert the *delta* a fresh success adds, not an absolute
+    # count or rate.
+    res = client.get("/api/modules")
+    fetch = next(m for m in res.json()["automation"] if m["name"] == "fetch_raw_metrics")
+    before_runs = fetch["stats"]["total_runs"]
+    before_successes = round((fetch["stats"]["success_rate"] or 0) * before_runs)
+
+    launch = client.post(
+        "/api/modules/automation/fetch_raw_metrics/run",
+        json={"inputs": {"signups": 5, "churn": 1, "revenue": 10}, "force_refresh": True},
+    )
+    _collect_stream(launch.json()["stream_id"])
+
+    after = client.get("/api/modules").json()
+    fetch_after = next(m for m in after["automation"] if m["name"] == "fetch_raw_metrics")
+    assert fetch_after["stats"]["total_runs"] == before_runs + 1
+    after_successes = round(fetch_after["stats"]["success_rate"] * fetch_after["stats"]["total_runs"])
+    assert after_successes == before_successes + 1
+    assert fetch_after["stats"]["avg_duration_seconds"] is not None
+
+
+def test_module_stats_endpoint_reports_per_tier_and_name():
+    client.post(
+        "/api/modules/automation/fetch_raw_metrics/run",
+        json={"inputs": {"signups": 1, "churn": 1, "revenue": 1}, "force_refresh": True},
+    )
+    res = client.get("/api/modules/stats")
+    assert res.status_code == 200
+
+    entries = res.json()
+    fetch_entry = next(e for e in entries if e["tier"] == "automation" and e["name"] == "fetch_raw_metrics")
+    assert fetch_entry["total_runs"] >= 1
+    assert 0 <= fetch_entry["success_rate"] <= 1
+    assert fetch_entry["avg_duration_seconds"] >= 0
+    assert fetch_entry["success_count"] <= fetch_entry["total_runs"]
+
+
+def test_module_stats_reflect_failures_alongside_successes():
+    import tempfile
+    from datetime import datetime, timezone
+
+    from engine.context import StepRecord
+    from engine.state_store import StateStore
+
+    isolated = StateStore(f"{tempfile.mkdtemp()}/stats_test.db")
+    now = datetime.now(timezone.utc)
+    run_id = isolated.start_run()
+    isolated.log_step(run_id, StepRecord("thing", "automation", now, now, True, {}))
+    isolated.log_step(run_id, StepRecord("thing", "automation", now, now, False, {}, "boom"))
+    isolated.finish_run(run_id, "failed")
+
+    stats = isolated.module_stats()
+    entry = next(s for s in stats if s["name"] == "thing")
+    assert entry["total_runs"] == 2
+    assert entry["success_count"] == 1
+    assert entry["success_rate"] == 0.5
+    isolated.close()
+
+
+def test_module_with_no_runs_reports_zero_stats_not_an_error():
+    res = client.get("/api/modules")
+    for tier_modules in res.json().values():
+        for module in tier_modules:
+            assert "stats" in module
+            if module["stats"]["total_runs"] == 0:
+                assert module["stats"]["success_rate"] is None
+                assert module["stats"]["avg_duration_seconds"] is None

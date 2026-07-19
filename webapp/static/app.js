@@ -11,6 +11,7 @@ const STEP_ICON = {
   done: "🟢",
   failed: "🔴",
   skipped: "⏭️",
+  retrying: "🔁",
 };
 
 const CONDITION_OPERATORS = ["equals", "not_equals", "contains", "gt", "lt", "truthy", "falsy"];
@@ -67,6 +68,9 @@ const builderLaunchBtn = document.getElementById("builder-launch");
 const builderErrorEl = document.getElementById("builder-error");
 const builderTrackerEl = document.getElementById("builder-tracker");
 const builderResultEl = document.getElementById("builder-result");
+const builderEditingBannerEl = document.getElementById("builder-editing-banner");
+const builderEditingNameEl = document.getElementById("builder-editing-name");
+const builderCancelEditBtn = document.getElementById("builder-cancel-edit");
 
 const savedPipelinesSection = document.getElementById("saved-pipelines-section");
 const savedPipelinesGrid = document.getElementById("saved-pipelines-grid");
@@ -83,6 +87,7 @@ const schedulesListEl = document.getElementById("schedules-list");
 let currentModulesByTier = {};
 let currentPipelines = [];
 let builderSteps = [];
+let editingPipelineSlug = null; // non-null while the builder holds a loaded saved pipeline
 let toastHistory = [];
 let unreadNotifications = 0;
 
@@ -394,11 +399,14 @@ async function loadRecentRuns() {
           ? `${((new Date(r.finished_at) - new Date(r.started_at)) / 1000).toFixed(2)}s`
           : "–";
       return `
-        <tr>
-          <td>#${r.id}</td>
+        <tr class="history-row" data-run-id="${r.id}">
+          <td><span class="run-expand-chevron">▸</span> #${r.id}</td>
           <td class="status-${r.status}">${r.status}</td>
           <td>${new Date(r.started_at).toLocaleString()}</td>
           <td>${duration}</td>
+        </tr>
+        <tr class="run-detail-row hidden" data-run-id="${r.id}">
+          <td colspan="4"></td>
         </tr>`;
     })
     .join("");
@@ -409,7 +417,133 @@ async function loadRecentRuns() {
       <tbody>${rows}</tbody>
     </table>`;
 
+  recentRunsTableEl.querySelectorAll(".history-row").forEach((row) => {
+    row.addEventListener("click", () => toggleRunDetail(row.dataset.runId));
+  });
+
   populateCompareSelects(runs);
+}
+
+// ---- Run detail drill-down ----
+// Steps recorded against a run are immutable once the run finishes, so
+// caching by run id never goes stale — only a purge removes the row
+// entirely, at which point there's nothing left to look up anyway.
+const runDetailCache = {};
+
+function renderRunDetailSteps(runId, steps) {
+  if (!steps.length) return `<div class="runs-empty">No recorded steps for this run.</div>`;
+  const stepsHtml = steps
+    .map(
+      (s, i) => `
+      <div class="run-detail-step ${s.success ? "" : "run-detail-step-failed"}">
+        <div class="run-detail-step-head">
+          <strong>Step ${i + 1}: [${s.tier}] ${s.name}</strong>
+          <span class="run-detail-step-status">${s.success ? "✅ success" : "❌ failed"}</span>
+          <span class="run-detail-step-timing">${new Date(s.started_at).toLocaleTimeString()} → ${new Date(s.finished_at).toLocaleTimeString()}</span>
+        </div>
+        ${s.error ? `<div class="run-detail-step-error">${escapeHtml(s.error)}</div>` : ""}
+        <pre class="run-detail-step-output">${escapeHtml(JSON.stringify(s.output, null, 2))}</pre>
+      </div>`
+    )
+    .join("");
+
+  return `
+    <div class="run-detail-toolbar">
+      <button class="btn btn-secondary btn-small rerun-btn" data-run-id="${runId}" type="button">↻ Re-run with these inputs</button>
+    </div>
+    ${stepsHtml}
+    <div class="tracker hidden rerun-tracker" data-run-id="${runId}"></div>
+    <div class="log-tabs-wrap hidden rerun-log" data-run-id="${runId}"></div>`;
+}
+
+async function rerunHistoricalRun(runId, steps) {
+  const btn = recentRunsTableEl.querySelector(`.rerun-btn[data-run-id="${runId}"]`);
+  const tracker = recentRunsTableEl.querySelector(`.rerun-tracker[data-run-id="${runId}"]`);
+  const logWrap = recentRunsTableEl.querySelector(`.rerun-log[data-run-id="${runId}"]`);
+  if (!btn || !tracker || !logWrap) return;
+
+  btn.disabled = true;
+  btn.textContent = "Launching...";
+
+  try {
+    const res = await fetch(`/api/runs/${runId}/rerun`, { method: "POST" });
+    const body = await res.json();
+    if (!res.ok) {
+      showToast(`Re-run failed: ${body.detail || "unknown error"}`, "error");
+      btn.disabled = false;
+      btn.textContent = "↻ Re-run with these inputs";
+      return;
+    }
+
+    tracker.classList.remove("hidden");
+    logWrap.classList.remove("hidden");
+    const trackerSteps = steps.map((s) => ({ tier: s.tier, name: s.name }));
+    renderTracker(tracker, trackerSteps);
+    const log = createRunLog();
+    renderRunLogTabs(logWrap, log, null);
+
+    subscribeToStream(body.stream_id, {
+      onEvent: (event) => {
+        handleTrackerEvent(tracker, event);
+        logSystemEvent(log, event);
+        renderRunLogTabs(logWrap, log, null);
+      },
+      onDone: async (event) => {
+        const success = event.kind === "run_completed";
+        renderRunLogTabs(logWrap, log, event.context ?? {});
+        showToast(success ? "Re-run completed." : `Re-run failed: ${event.error}`, success ? "success" : "error");
+
+        // Rebuilding the table collapses whatever row was expanded (this one
+        // included) — re-open the fresh replay's own row afterward so the
+        // result the user was just watching doesn't just vanish.
+        await loadRecentRuns();
+        await refreshTelemetry();
+        const runs = await (await fetch("/api/runs?limit=1")).json();
+        if (runs.length) await toggleRunDetail(String(runs[0].id));
+      },
+    });
+  } catch (err) {
+    btn.disabled = false;
+    btn.textContent = "↻ Re-run with these inputs";
+    showToast(`Re-run failed: ${err}`, "error");
+  }
+}
+
+async function toggleRunDetail(runId) {
+  const detailRow = recentRunsTableEl.querySelector(`.run-detail-row[data-run-id="${runId}"]`);
+  const mainRow = recentRunsTableEl.querySelector(`.history-row[data-run-id="${runId}"]`);
+  if (!detailRow || !mainRow) return;
+
+  const alreadyOpen = !detailRow.classList.contains("hidden");
+
+  // Only one run's detail open at a time — keeps the table from growing
+  // unboundedly tall as someone clicks through several runs.
+  recentRunsTableEl.querySelectorAll(".run-detail-row").forEach((row) => row.classList.add("hidden"));
+  recentRunsTableEl.querySelectorAll(".history-row").forEach((row) => row.classList.remove("expanded"));
+
+  if (alreadyOpen) return;
+
+  detailRow.classList.remove("hidden");
+  mainRow.classList.add("expanded");
+  const cell = detailRow.querySelector("td");
+
+  if (!runDetailCache[runId]) {
+    cell.innerHTML = `<div class="runs-empty">Loading step detail…</div>`;
+    try {
+      const res = await fetch(`/api/runs/${runId}`);
+      const body = await res.json();
+      if (!res.ok) {
+        cell.innerHTML = `<div class="runs-empty">${escapeHtml(body.detail || "Could not load run detail.")}</div>`;
+        return;
+      }
+      runDetailCache[runId] = body.steps;
+    } catch (err) {
+      cell.innerHTML = `<div class="runs-empty">Failed to load run detail: ${err}</div>`;
+      return;
+    }
+  }
+  cell.innerHTML = renderRunDetailSteps(runId, runDetailCache[runId]);
+  cell.querySelector(".rerun-btn").addEventListener("click", () => rerunHistoricalRun(runId, runDetailCache[runId]));
 }
 
 // ---- Run comparison ----
@@ -695,6 +829,10 @@ function logSystemEvent(log, event) {
   } else if (event.kind === "step_skipped") {
     const why = event.condition ? ` (condition not met: ${event.condition})` : "";
     log.system.push(`[${ts}] ${stepLabel} (${event.tier}: ${event.name}) skipped${why}`);
+  } else if (event.kind === "step_retrying") {
+    log.system.push(
+      `[${ts}] ${stepLabel} (${event.tier}: ${event.name}) failed (${event.error}) — retrying ${event.attempt}/${event.max_retries} in ${event.delay_seconds.toFixed(1)}s`
+    );
   } else if (event.kind === "group_started") {
     log.system.push(`[${ts}] Step ${event.index + 1}: parallel group "${event.name}" started (${event.branch_count} branches)`);
   } else if (event.kind === "group_completed") {
@@ -813,9 +951,10 @@ function setStepStatus(container, index, status, error) {
   if (!row) return;
   const icon = row.querySelector(".tracker-icon");
   icon.textContent = STEP_ICON[status];
-  icon.classList.toggle("spin", status === "running");
+  icon.classList.toggle("spin", status === "running" || status === "retrying");
   row.classList.toggle("failed", status === "failed");
   row.classList.toggle("skipped", status === "skipped");
+  row.classList.toggle("retrying", status === "retrying");
   if (error) row.title = error;
 
   if (row.dataset.tier === "agent" && status === "running") {
@@ -847,6 +986,13 @@ function handleTrackerEvent(container, event) {
     recordStepDuration(container, key, event.duration_ms);
   } else if (event.kind === "step_skipped") {
     setStepStatus(container, key, "skipped", event.condition ? `Skipped — condition not met: ${event.condition}` : "Skipped");
+  } else if (event.kind === "step_retrying") {
+    setStepStatus(
+      container,
+      key,
+      "retrying",
+      `Failed (${event.error}) — retrying ${event.attempt}/${event.max_retries} in ${event.delay_seconds.toFixed(1)}s`
+    );
   } else if (event.kind === "thought" || event.kind === "tool_call") {
     appendThought(container, event.index, event.kind, event.message);
   }
@@ -912,6 +1058,11 @@ function subscribeToStream(streamId, { onEvent, onDone }) {
 
 // ---- Cards ----
 
+function formatDurationSeconds(seconds) {
+  if (seconds == null) return "–";
+  return seconds < 1 ? `${Math.round(seconds * 1000)}ms` : `${seconds.toFixed(2)}s`;
+}
+
 function renderCard(module) {
   const cardId = `card__${module.tier}__${module.name}`;
   const favKey = `module::${module.tier}::${module.name}`;
@@ -939,6 +1090,11 @@ function renderCard(module) {
         </div>
       </div>
       <p class="card-desc">${module.description}</p>
+      <p class="card-stats">${
+        module.stats.total_runs
+          ? `${module.stats.total_runs} run${module.stats.total_runs === 1 ? "" : "s"} · ${Math.round(module.stats.success_rate * 100)}% success · avg ${formatDurationSeconds(module.stats.avg_duration_seconds)}`
+          : "No runs recorded yet."
+      }</p>
       ${breakerHtml}
       <div class="code-panel hidden"></div>
       ${fieldsHtml}
@@ -1199,11 +1355,11 @@ runPipelineBtn.addEventListener("click", runFullPipeline);
 // ---- No-code visual pipeline builder ----
 
 function blankBuilderStep() {
-  return { tier: "", name: "", module: null, fieldSources: {}, condition: null };
+  return { tier: "", name: "", module: null, fieldSources: {}, condition: null, retry: null };
 }
 
 function blankBuilderBranch() {
-  return { tier: "", name: "", module: null, fieldSources: {} };
+  return { tier: "", name: "", module: null, fieldSources: {}, retry: null };
 }
 
 function blankBuilderGroup() {
@@ -1391,6 +1547,7 @@ function renderBuilderGroup(index, step) {
             <select class="module-select" data-index="${key}">${moduleOptionsHtml(branch.tier, branch.name)}</select>
             ${canRemoveBranch ? `<button class="remove-branch-btn" data-index="${key}" type="button" title="Remove branch">×</button>` : ""}
           </div>
+          ${branch.module ? renderBuilderRetry(key, branch.retry) : ""}
           <div class="builder-step-fields">${fieldsHtml}</div>
         </div>`;
     })
@@ -1426,6 +1583,7 @@ function renderBuilderStep(index, step) {
         ${stepControlsHtml(index)}
       </div>
       ${step.module ? renderBuilderCondition(index, step) : ""}
+      ${step.module ? renderBuilderRetry(index, step.retry) : ""}
       <div class="builder-step-fields">${fieldsHtml}</div>
     </div>`;
 }
@@ -1455,6 +1613,30 @@ function renderBuilderCondition(index, step) {
       <label class="condition-enable-label">
         <input type="checkbox" class="condition-enable" data-index="${index}" ${enabled ? "checked" : ""} />
         Run only if…
+      </label>
+      ${controls}
+    </div>`;
+}
+
+// The optional retry-on-failure row for one step or branch. Backoff doubles
+// each attempt (attempt N waits backoff_seconds * 2**N), same as the engine.
+function renderBuilderRetry(key, retry) {
+  const enabled = retry !== null && retry !== undefined;
+  const maxRetries = retry?.max_retries ?? 2;
+  const backoffSeconds = retry?.backoff_seconds ?? 1;
+
+  const controls = enabled
+    ? `<input type="number" class="retry-max" data-index="${key}" min="1" step="1" value="${maxRetries}" title="Max retries" />
+       <span class="retry-label-inline">retries, backoff</span>
+       <input type="number" class="retry-backoff" data-index="${key}" min="0" step="0.5" value="${backoffSeconds}" title="Backoff seconds" />
+       <span class="retry-label-inline">s (doubles each attempt)</span>`
+    : "";
+
+  return `
+    <div class="builder-retry ${enabled ? "active" : ""}">
+      <label class="retry-enable-label">
+        <input type="checkbox" class="retry-enable" data-index="${key}" ${enabled ? "checked" : ""} />
+        Retry on failure
       </label>
       ${controls}
     </div>`;
@@ -1492,16 +1674,19 @@ function attachBuilderStepListeners() {
       const module = tier && name ? (currentModulesByTier[tier] || []).find((m) => m.name === name) : null;
 
       if (branchStr !== undefined) {
+        const oldBranch = builderSteps[slot].branches[Number(branchStr)];
         builderSteps[slot].branches[Number(branchStr)] = module
-          ? { tier, name, module, fieldSources: defaultFieldSources(module) }
+          ? { tier, name, module, fieldSources: defaultFieldSources(module), retry: oldBranch?.retry ?? null }
           : blankBuilderBranch();
       } else if (!module) {
         builderSteps[slot] = blankBuilderStep();
       } else {
-        // A condition references context keys, not the module itself, so it
-        // survives swapping which module the step runs.
+        // A condition/retry policy references context keys or failure
+        // behavior, not the module itself, so both survive swapping which
+        // module the step runs.
         const condition = builderSteps[slot]?.condition ?? null;
-        builderSteps[slot] = { tier, name, module, fieldSources: defaultFieldSources(module), condition };
+        const retry = builderSteps[slot]?.retry ?? null;
+        builderSteps[slot] = { tier, name, module, fieldSources: defaultFieldSources(module), condition, retry };
       }
 
       resetMappingsAfterSlot(slot);
@@ -1618,6 +1803,26 @@ function attachBuilderStepListeners() {
       builderSteps[Number(e.target.dataset.index)].condition.value = e.target.value;
     });
   });
+
+  builderStepsEl.querySelectorAll(".retry-enable").forEach((box) => {
+    box.addEventListener("change", (e) => {
+      const ref = getBuilderStepRef(e.target.dataset.index);
+      ref.retry = e.target.checked ? { max_retries: 2, backoff_seconds: 1 } : null;
+      renderBuilder();
+    });
+  });
+
+  builderStepsEl.querySelectorAll(".retry-max").forEach((input) => {
+    input.addEventListener("input", (e) => {
+      getBuilderStepRef(e.target.dataset.index).retry.max_retries = Math.max(0, parseInt(e.target.value, 10) || 0);
+    });
+  });
+
+  builderStepsEl.querySelectorAll(".retry-backoff").forEach((input) => {
+    input.addEventListener("input", (e) => {
+      getBuilderStepRef(e.target.dataset.index).retry.backoff_seconds = Math.max(0, parseFloat(e.target.value) || 0);
+    });
+  });
 }
 
 function openBuilder() {
@@ -1633,6 +1838,101 @@ function closeBuilder() {
   builderPanelEl.classList.add("hidden");
   builderToggleBtn.textContent = "+ New Pipeline";
 }
+
+function updateBuilderEditingUI() {
+  builderNameEl.disabled = editingPipelineSlug !== null;
+  builderEditingBannerEl.classList.toggle("hidden", editingPipelineSlug === null);
+  if (editingPipelineSlug !== null) {
+    builderEditingNameEl.textContent = builderNameEl.value;
+  }
+}
+
+// Rebuild one saved-pipeline module step (or parallel branch) into the
+// builder's internal shape: every field the module declares gets a
+// fieldSources entry — mapped fields resolved back into {step, output,
+// nestedPath} from the saved dotted-path string, everything else falling
+// back to its saved static value or the manifest default.
+function moduleStepToBuilderStep(step) {
+  const module = (currentModulesByTier[step.tier] || []).find((m) => m.name === step.name);
+  const fieldSources = {};
+  if (module) {
+    for (const field of module.inputs) {
+      const mapping = (step.mappings || {})[field.name];
+      if (mapping) {
+        const [base, ...rest] = mapping.output.split(".");
+        fieldSources[field.name] = { type: "mapping", step: mapping.step, output: base, nestedPath: rest.join(".") };
+      } else {
+        fieldSources[field.name] = { type: "static", value: (step.inputs || {})[field.name] ?? field.default };
+      }
+    }
+  }
+  return {
+    tier: step.tier,
+    name: step.name,
+    module,
+    fieldSources,
+    condition: step.condition || null,
+    retry: step.retry || null,
+  };
+}
+
+function definitionToBuilderSteps(definition) {
+  return (definition.steps || []).map((step) =>
+    step.type === "parallel"
+      ? { parallel: true, name: step.name || "", branches: (step.branches || []).map(moduleStepToBuilderStep) }
+      : moduleStepToBuilderStep(step)
+  );
+}
+
+// Loads a saved pipeline's full definition back into the builder for
+// modification. Renaming is disabled while editing (see updateBuilderEditingUI)
+// so "Save & Launch" always overwrites the same slug/file rather than risking
+// an orphaned duplicate under a new name — clone the pipeline first if a
+// genuinely new, differently-named copy is what's wanted.
+function openPipelineForEditing(slug) {
+  const definition = currentPipelines.find((p) => p.slug === slug);
+  if (!definition) return;
+
+  builderSteps = definitionToBuilderSteps(definition);
+  builderNameEl.value = definition.name;
+  builderDescriptionEl.value = definition.description || "";
+  editingPipelineSlug = slug;
+
+  openBuilder();
+  renderBuilder();
+  updateBuilderEditingUI();
+  builderPanelEl.scrollIntoView({ behavior: "smooth", block: "start" });
+}
+
+builderCancelEditBtn.addEventListener("click", () => {
+  editingPipelineSlug = null;
+  builderSteps = [blankBuilderStep()];
+  builderNameEl.value = "";
+  builderDescriptionEl.value = "";
+  renderBuilder();
+  updateBuilderEditingUI();
+});
+
+document.getElementById("pipeline-import-input").addEventListener("change", async (e) => {
+  const file = e.target.files[0];
+  if (!file) return;
+
+  const formData = new FormData();
+  formData.append("file", file);
+  try {
+    const res = await fetch("/api/pipelines/import", { method: "POST", body: formData });
+    const body = await res.json();
+    if (!res.ok) {
+      showToast(`Import failed: ${body.detail || "unknown error"}`, "error");
+      return;
+    }
+    showToast(`Imported pipeline "${body.pipeline.name}".`, "success");
+    await loadSavedPipelines();
+  } catch (err) {
+    showToast(`Import failed: ${err}`, "error");
+  }
+  e.target.value = "";
+});
 
 builderToggleBtn.addEventListener("click", () => {
   if (builderPanelEl.classList.contains("hidden")) openBuilder();
@@ -1685,6 +1985,7 @@ builderLaunchBtn.addEventListener("click", async () => {
     }
     const spec = { tier: step.tier, name: step.name, inputs, mappings };
     if (step.condition) spec.condition = step.condition;
+    if (step.retry) spec.retry = step.retry;
     return spec;
   };
 
@@ -1776,10 +2077,16 @@ function renderSavedPipelines(pipelinesList) {
             </div>
             <p class="card-desc">${p.description || "No description."}</p>
             <p class="card-desc pipeline-chain">${chain}</p>
+            <div class="webhook-row">
+              <code class="webhook-url" title="POST a JSON body here to launch this pipeline — it overrides step 1's own inputs">POST /api/pipelines/${p.slug}/webhook</code>
+              <button class="btn btn-secondary btn-small webhook-copy-btn" data-slug="${p.slug}" type="button">📋 Copy URL</button>
+            </div>
             <div class="pipeline-card-actions">
               <button class="btn btn-run" data-slug="${p.slug}" data-name="${p.name}">Run</button>
+              <button class="btn btn-secondary btn-small" data-edit-slug="${p.slug}" type="button">Edit</button>
               <button class="btn btn-secondary btn-small" data-clone-slug="${p.slug}" type="button">Clone</button>
               <button class="btn btn-secondary btn-small" data-graph-slug="${p.slug}" type="button">Graph</button>
+              <a class="btn btn-secondary btn-small" href="/api/pipelines/${p.slug}/export" download="${p.slug}.yaml">Export</a>
             </div>
             <div class="tracker hidden"></div>
             <div class="log-tabs-wrap hidden"></div>
@@ -1794,8 +2101,22 @@ function renderSavedPipelines(pipelinesList) {
     savedPipelinesGrid.querySelectorAll("[data-clone-slug]").forEach((btn) => {
       btn.addEventListener("click", () => clonePipeline(btn.dataset.cloneSlug));
     });
+    savedPipelinesGrid.querySelectorAll("[data-edit-slug]").forEach((btn) => {
+      btn.addEventListener("click", () => openPipelineForEditing(btn.dataset.editSlug));
+    });
     savedPipelinesGrid.querySelectorAll("[data-graph-slug]").forEach((btn) => {
       btn.addEventListener("click", () => togglePipelineGraph(btn.dataset.graphSlug));
+    });
+    savedPipelinesGrid.querySelectorAll(".webhook-copy-btn").forEach((btn) => {
+      btn.addEventListener("click", async () => {
+        const url = `${window.location.origin}/api/pipelines/${btn.dataset.slug}/webhook`;
+        try {
+          await navigator.clipboard.writeText(url);
+          showToast("Webhook URL copied to clipboard.", "success");
+        } catch (err) {
+          showToast(`Copy failed: ${err}`, "error");
+        }
+      });
     });
     wireFavoriteToggles(savedPipelinesGrid);
   }

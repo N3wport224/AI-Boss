@@ -88,6 +88,13 @@ def _validate_module_step(step: dict, index: int, steps: list, lookup: dict, lab
                 f"{label}: unknown condition operator '{condition.get('operator')}'."
             )
 
+    retry = step.get("retry")
+    if retry:
+        if not isinstance(retry.get("max_retries"), int) or retry["max_retries"] < 0:
+            raise PipelineValidationError(f"{label}: retry max_retries must be a non-negative integer.")
+        if not isinstance(retry.get("backoff_seconds"), (int, float)) or retry["backoff_seconds"] < 0:
+            raise PipelineValidationError(f"{label}: retry backoff_seconds must be a non-negative number.")
+
 
 def _normalize_module_step(step: dict) -> dict:
     normalized = {
@@ -98,6 +105,8 @@ def _normalize_module_step(step: dict) -> dict:
     }
     if step.get("condition"):
         normalized["condition"] = step["condition"]
+    if step.get("retry") and step["retry"].get("max_retries"):
+        normalized["retry"] = step["retry"]
     return normalized
 
 

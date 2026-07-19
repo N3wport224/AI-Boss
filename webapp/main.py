@@ -19,6 +19,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Callable, Optional
 
+import yaml
 from fastapi import FastAPI, File, HTTPException, Request, UploadFile
 from fastapi.responses import FileResponse, StreamingResponse
 from fastapi.staticfiles import StaticFiles
@@ -153,6 +154,11 @@ class ConditionSpec(BaseModel):
     value: Any = None  # literal to compare against (unused for truthy/falsy)
 
 
+class RetrySpec(BaseModel):
+    max_retries: int = 0
+    backoff_seconds: float = 1.0
+
+
 class PipelineStepSpec(BaseModel):
     # A module step ({tier, name, ...}) or, when type == "parallel", a group
     # of branches run concurrently in this slot ({type, branches, name?}).
@@ -161,6 +167,7 @@ class PipelineStepSpec(BaseModel):
     inputs: dict[str, Any] = {}
     mappings: dict[str, MappingSpec] = {}
     condition: Optional[ConditionSpec] = None
+    retry: Optional[RetrySpec] = None
     type: Optional[str] = None
     branches: Optional[list["PipelineStepSpec"]] = None
 
@@ -374,21 +381,48 @@ def _module_step_to_spec(step: dict) -> StepSpec:
 
         condition_label = f"{source} {operator}" + ("" if operator in ("truthy", "falsy") else f" {value}")
 
+    raw_retry = step.get("retry") or {}
+
     return StepSpec(
         module=module,
         seed=seed,
         timeout_seconds=DEFAULT_STEP_TIMEOUT_SECONDS,
         condition=condition_fn,
         condition_label=condition_label,
+        max_retries=int(raw_retry.get("max_retries", 0)),
+        retry_backoff_seconds=float(raw_retry.get("backoff_seconds", 1.0)),
     )
 
 
-def _build_steps_from_definition(definition: dict) -> list:
+def _apply_entry_overrides(step: dict, overrides: dict) -> dict:
+    """Merge `overrides` into a top-level step's own input dict (every
+    branch's, for a parallel group) — used by the webhook trigger to let an
+    inbound call's JSON body feed pipeline step 1 directly. Unknown keys are
+    harmless: `_coerce_inputs` already ignores anything that isn't one of
+    the target module's declared input fields."""
+    if pipeline_store.is_parallel_step(step):
+        return {
+            **step,
+            "branches": [
+                {**branch, "inputs": {**(branch.get("inputs") or {}), **overrides}}
+                for branch in step.get("branches") or []
+            ],
+        }
+    return {**step, "inputs": {**(step.get("inputs") or {}), **overrides}}
+
+
+def _build_steps_from_definition(definition: dict, entry_overrides: Optional[dict] = None) -> list:
     """Turn a saved pipeline definition into the orchestrator's step list —
     StepSpecs for module steps, ParallelGroups (of branch StepSpecs) for
-    `type: "parallel"` steps."""
+    `type: "parallel"` steps. `entry_overrides`, if given, is merged into
+    the *first* step's own inputs (see `_apply_entry_overrides`) — how the
+    webhook trigger passes an inbound call's JSON body into the pipeline."""
+    raw_steps = definition["steps"]
+    if entry_overrides and raw_steps:
+        raw_steps = [_apply_entry_overrides(raw_steps[0], entry_overrides), *raw_steps[1:]]
+
     steps = []
-    for step in definition["steps"]:
+    for step in raw_steps:
         if pipeline_store.is_parallel_step(step):
             branches = [_module_step_to_spec(branch) for branch in step.get("branches") or []]
             steps.append(ParallelGroup(steps=branches, name=step.get("name") or "parallel_group"))
@@ -397,10 +431,10 @@ def _build_steps_from_definition(definition: dict) -> list:
     return steps
 
 
-def _launch_steps(steps: list[StepSpec]) -> int:
+def _launch_steps(steps: list[StepSpec], inputs: Optional[dict] = None) -> int:
     orchestrator = Orchestrator(steps, state_store=store, stop_on_error=False)
     stream_id = bus.create()
-    _run_in_background(orchestrator, {}, stream_id)
+    _run_in_background(orchestrator, inputs or {}, stream_id)
     return stream_id
 
 
@@ -450,6 +484,7 @@ _scheduler.start()
 
 @app.get("/api/modules")
 def list_modules():
+    stats_by_key = {(s["tier"], s["name"]): s for s in store.module_stats()}
     result = {}
     for tier, directory in TIER_DIRS.items():
         modules = []
@@ -458,6 +493,7 @@ def list_modules():
                 continue
             last_success = store.latest_step_status(manifest["name"])
             health = store.get_module_health(tier, manifest["name"])
+            stats = stats_by_key.get((tier, manifest["name"]))
             modules.append(
                 {
                     "name": manifest["name"],
@@ -471,10 +507,23 @@ def list_modules():
                         "consecutive_failures": health["consecutive_failures"],
                         "threshold": int(manifest.get("circuit_breaker_threshold", DEFAULT_BREAKER_THRESHOLD)),
                     },
+                    "stats": {
+                        "total_runs": stats["total_runs"] if stats else 0,
+                        "success_rate": stats["success_rate"] if stats else None,
+                        "avg_duration_seconds": stats["avg_duration_seconds"] if stats else None,
+                    },
                 }
             )
         result[tier] = modules
     return result
+
+
+@app.get("/api/modules/stats")
+def module_stats():
+    """Per-module run statistics — total runs, success rate, average
+    duration — broken out by (tier, name). Also folded into `/api/modules`
+    per card, but exposed standalone for anyone who just wants the numbers."""
+    return store.module_stats()
 
 
 @app.get("/api/modules/{tier}/{name}/source")
@@ -573,6 +622,74 @@ def run_saved_pipeline(slug: str, http_request: Request):
     steps = _build_steps_from_definition(definition)
     stream_id = _launch_steps(steps)
     return {"stream_id": stream_id}
+
+
+@app.post("/api/pipelines/{slug}/webhook")
+async def trigger_pipeline_webhook(slug: str, http_request: Request):
+    """Launch a saved pipeline from an inbound HTTP call. The POST body (a
+    JSON object, or empty) overrides step 1's own input fields — any key
+    that isn't one of its declared inputs is silently ignored, same as any
+    other input dict in this app. No auth: this app is single-user/local
+    like every other endpoint, but it still respects the run rate limit and
+    a tripped circuit breaker exactly like every other launch path."""
+    _enforce_run_rate_limit(http_request)
+    try:
+        definition = pipeline_store.load_pipeline(slug)
+    except FileNotFoundError:
+        raise HTTPException(status_code=404, detail=f"No saved pipeline named '{slug}'.")
+
+    raw_body = await http_request.body()
+    if not raw_body:
+        overrides = {}
+    else:
+        try:
+            overrides = json.loads(raw_body)
+        except json.JSONDecodeError:
+            raise HTTPException(status_code=400, detail="Webhook body must be valid JSON.")
+    if not isinstance(overrides, dict):
+        raise HTTPException(status_code=400, detail="Webhook body must be a JSON object.")
+
+    _ensure_breakers_closed(_module_refs_from_steps(definition["steps"]))
+    steps = _build_steps_from_definition(definition, entry_overrides=overrides)
+    stream_id = _launch_steps(steps)
+    return {"stream_id": stream_id}
+
+
+@app.get("/api/pipelines/{slug}/export")
+def export_pipeline(slug: str):
+    """The pipeline's own saved YAML file, as a standalone download — for
+    sharing or backing up one pipeline outside the full state-store
+    snapshot (see /api/backup/export for that)."""
+    path = pipeline_store.PIPELINES_DIR / f"{slug}.yaml"
+    if not path.exists():
+        raise HTTPException(status_code=404, detail=f"No saved pipeline named '{slug}'.")
+    return FileResponse(path, filename=f"{slug}.yaml", media_type="application/x-yaml")
+
+
+@app.post("/api/pipelines/import")
+async def import_pipeline(file: UploadFile = File(...)):
+    """Import a pipeline YAML file (as produced by /api/pipelines/{slug}/export)
+    into this install's pipelines/ folder. Goes through the same validation
+    as a builder save — an unknown module, a bad mapping, or an out-of-range
+    condition/retry is rejected with the same error a hand-built pipeline
+    would get. Saving under a name that already exists overwrites it, same
+    as re-saving an edited pipeline in the builder."""
+    try:
+        data = await ingestion.read_upload_with_limit(file)
+    except ingestion.UploadTooLargeError as exc:
+        raise HTTPException(status_code=413, detail=str(exc))
+    try:
+        definition = yaml.safe_load(data)
+    except yaml.YAMLError as exc:
+        raise HTTPException(status_code=400, detail=f"Could not parse pipeline YAML: {exc}")
+    if not isinstance(definition, dict):
+        raise HTTPException(status_code=400, detail="Pipeline YAML must describe a single object.")
+
+    try:
+        saved = pipeline_store.save_pipeline(definition, TIER_DIRS)
+    except pipeline_store.PipelineValidationError as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
+    return {"pipeline": saved}
 
 
 @app.post("/api/pipelines/{slug}/duplicate")
@@ -755,6 +872,7 @@ def _parsed_steps_for_run(run_id: int) -> list[dict]:
     steps = store.steps_for_run(run_id)
     for step in steps:
         step["output"] = json.loads(step["output"]) if step["output"] else {}
+        step["inputs"] = json.loads(step["inputs"]) if step.get("inputs") else {}
         step["success"] = bool(step["success"])
     return steps
 
@@ -798,6 +916,42 @@ def run_detail(run_id: int):
     if not steps:
         raise HTTPException(status_code=404, detail=f"No recorded steps for run {run_id}.")
     return {"run_id": run_id, "steps": steps}
+
+
+@app.post("/api/runs/{run_id}/rerun")
+def rerun_run(run_id: int, http_request: Request):
+    """Replay a past run: re-instantiate each recorded step's module and
+    seed it with the exact resolved input values that step actually ran
+    with, executing them in the same order as a brand-new run. This
+    replays each step's own module + inputs faithfully; it does NOT
+    reconstruct whatever pipeline (mappings, conditions, parallel groups)
+    originally produced that run — that topology isn't part of run
+    history, only each step's module and its resolved inputs are. A
+    secret-shaped input is redacted before it's ever logged (same as
+    everywhere else), so a re-run can't recover or resend the original
+    secret value — only whatever masked placeholder history holds."""
+    _enforce_run_rate_limit(http_request)
+    steps = _parsed_steps_for_run(run_id)
+    if not steps:
+        raise HTTPException(status_code=404, detail=f"No recorded steps for run {run_id}.")
+
+    _ensure_breakers_closed([(s["tier"], s["name"]) for s in steps])
+
+    specs = []
+    for s in steps:
+        manifest = _manifest_by_name(s["tier"], s["name"])
+        module = instantiate(manifest["entrypoint"])
+        recorded_inputs = dict(s["inputs"])
+        specs.append(
+            StepSpec(
+                module=module,
+                seed=lambda ctx, inputs=recorded_inputs: dict(inputs),
+                timeout_seconds=DEFAULT_STEP_TIMEOUT_SECONDS,
+            )
+        )
+
+    stream_id = _launch_steps(specs)
+    return {"stream_id": stream_id, "replayed_steps": len(specs)}
 
 
 @app.get("/api/metrics")

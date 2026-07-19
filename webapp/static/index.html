@@ -58,10 +58,21 @@
   <main id="app">
     <section class="builder-section">
       <div class="builder-header">
-        <h2>Visual Pipeline Builder</h2>
-        <p class="card-desc">Chain any automations, workflows, and agents into a custom sequence — no code.</p>
+        <div>
+          <h2>Visual Pipeline Builder</h2>
+          <p class="card-desc">Chain any automations, workflows, and agents into a custom sequence — no code.</p>
+        </div>
+        <div class="builder-header-actions">
+          <label class="btn btn-secondary btn-small" for="pipeline-import-input">Import pipeline…</label>
+          <input type="file" id="pipeline-import-input" accept=".yaml,.yml" hidden />
+        </div>
       </div>
       <div id="builder-panel" class="builder-panel hidden">
+        <div id="builder-editing-banner" class="builder-editing-banner hidden">
+          Editing <strong id="builder-editing-name"></strong> — renaming isn't supported while
+          editing (clone the pipeline instead to give a copy a new name).
+          <button id="builder-cancel-edit" class="btn btn-secondary btn-small" type="button">New pipeline</button>
+        </div>
         <div class="form-fields">
           <div class="field">
             <label for="builder-name">Pipeline name</label>

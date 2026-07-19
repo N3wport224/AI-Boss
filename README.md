@@ -456,6 +456,52 @@ A few things live in the header/subheader on every page load:
   blocks branch mappings that reference the group itself or anything after
   it.
 
+## Retries, webhooks, editing, and run history tools
+
+- **Automatic step retries with backoff** — any builder step (or parallel
+  branch) can turn on **Retry on failure**: max retries + a backoff seconds
+  value that doubles each attempt (`retry_backoff_seconds * 2**attempt`). A
+  failing step retries in place — no re-seed, same context — emitting a
+  `step_retrying` event (🔁 in the tracker, with attempt/delay in its
+  tooltip) before each wait; only exhausting every retry counts as a real
+  `step_failed`, and only the terminal outcome reaches the circuit breaker.
+- **Inbound webhook trigger** — every saved pipeline gets a
+  `POST /api/pipelines/{slug}/webhook` URL (shown, with a copy button, on
+  its card): POST a JSON body and it overrides step 1's own input fields
+  (unknown keys are ignored, same as any other input dict here) before
+  launching — no auth, consistent with this app's single-user/local scope,
+  but it still respects the run rate limit and a tripped circuit breaker
+  like any other launch path.
+- **Edit a saved pipeline** — an **Edit** action on a saved-pipeline card
+  loads its full definition (steps, mappings, conditions, retries, parallel
+  groups) back into the builder. Renaming is disabled while editing (a
+  banner explains why) so **Save & Launch** always overwrites the same
+  slug/file — no orphaned duplicate under a new name. Clone still exists
+  for making an actual differently-named copy.
+- **Run detail drill-down** — clicking a Recent Runs row expands it in
+  place with full per-step detail (tier/name/success/timing/output/error),
+  fetched from the existing `GET /api/runs/{run_id}` and cached client-side
+  (a run's recorded steps never change once finished).
+- **Per-module performance stats** — every module card now shows
+  `N runs · X% success · avg Yms`, sourced from `GET /api/modules/stats`
+  (also folded into `GET /api/modules` per card) — total runs, success
+  rate, and average duration grouped by (tier, name).
+- **Pipeline YAML export/import** — **Export** on a saved-pipeline card
+  downloads its own YAML file directly (for sharing/backup outside a full
+  state-store snapshot); **Import pipeline…** next to the builder uploads
+  one back in, validated through the exact same path a builder save uses.
+- **Re-run a past run** — every run's drill-down has a
+  **↻ Re-run with these inputs** button. Each step now records the full
+  resolved input snapshot it actually ran with (`GET /api/runs/{run_id}`
+  exposes `inputs` per step) — covering *both* seeding paths (`StepSpec.seed`
+  for pipeline steps, and the run's own `initial_context` for standalone
+  module/scheduled runs). `POST /api/runs/{run_id}/rerun` replays each
+  recorded step with its own module + recorded inputs as a brand-new run;
+  it doesn't reconstruct the original pipeline's mappings/conditions/groups
+  (that topology isn't part of run history), just the per-step facts that
+  are. A secret-shaped input is redacted before it's ever logged, so a
+  re-run can't recover or resend the real secret value.
+
 ## Tech stack
 
 - **Language:** Python 3.11+ — first-class async/sync support and native SDKs

@@ -1,4 +1,4 @@
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import datetime
 from typing import Any, Callable, Optional
 
@@ -12,6 +12,12 @@ class StepRecord:
     success: bool
     output: dict
     error: Optional[str] = None
+    # The step's own resolved input values (after static defaults, mappings,
+    # and template interpolation) — what it actually ran with, not just its
+    # manifest defaults. Lets a historical run be faithfully replayed (see
+    # POST /api/runs/{run_id}/rerun) without needing the original pipeline
+    # definition, mappings, or conditions to still exist.
+    inputs: dict = field(default_factory=dict)
 
 
 class MemoryStore:

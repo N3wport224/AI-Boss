@@ -1,3 +1,4 @@
+import time
 from concurrent.futures import ThreadPoolExecutor
 from concurrent.futures import TimeoutError as FutureTimeoutError
 from dataclasses import dataclass, field
@@ -41,6 +42,15 @@ class StepSpec:
     is not a failure — the run continues to the next step either way.
     `condition_label` is a human-readable rendering of the condition, carried on
     the skip event so dashboards can say *why* a step was skipped.
+
+    `max_retries`, if greater than 0, retries a failing `module.run()` (or a
+    timeout) up to that many additional times before counting it as a real
+    `step_failed`. Each retry waits `retry_backoff_seconds * 2**attempt`
+    (exponential backoff; attempt 0 for the first retry) and emits a
+    `step_retrying` event first, so a dashboard can show "retry 1/3" instead
+    of the step silently going quiet. A retried attempt reuses the same
+    seeded context — `seed()` runs once, before the first attempt, not again
+    per retry.
     """
 
     module: BaseModule
@@ -48,6 +58,8 @@ class StepSpec:
     timeout_seconds: Optional[float] = None
     condition: Optional[Callable[[ExecutionContext], bool]] = None
     condition_label: str = ""
+    max_retries: int = 0
+    retry_backoff_seconds: float = 0.0
 
 
 @dataclass
@@ -105,6 +117,68 @@ def _run_module(module: BaseModule, context: ExecutionContext, timeout_seconds: 
         return module.run(context)
     future = _EXECUTOR.submit(module.run, context)
     return _await_result(future, module.name, timeout_seconds)
+
+
+def _run_with_retries(step: StepSpec, context: ExecutionContext, emit: EventCallback, event_extra: dict) -> dict:
+    """Run `step.module` via `_run_module`, retrying on any exception up to
+    `step.max_retries` times with exponential backoff. Re-raises the last
+    exception once retries are exhausted (or immediately if max_retries is 0,
+    identical to calling `_run_module` directly)."""
+    attempt = 0
+    while True:
+        try:
+            return _run_module(step.module, context, step.timeout_seconds)
+        except Exception as exc:
+            if attempt >= step.max_retries:
+                raise
+            delay = step.retry_backoff_seconds * (2**attempt)
+            emit(
+                {
+                    "kind": "step_retrying",
+                    "attempt": attempt + 1,
+                    "max_retries": step.max_retries,
+                    "delay_seconds": delay,
+                    "error": str(exc),
+                    **event_extra,
+                }
+            )
+            if delay > 0:
+                time.sleep(delay)
+            attempt += 1
+
+
+def _await_branch_with_retries(
+    branch: StepSpec, first_future, context: ExecutionContext, emit: EventCallback, event_extra: dict
+):
+    """Await a parallel branch's already-submitted future, retrying by
+    resubmitting `branch.module.run` to the shared executor on failure (up to
+    `branch.max_retries` times, same exponential backoff as a sequential
+    step). Retrying blocks only this branch's slot in the collection loop —
+    every other branch's future keeps running independently in the
+    background regardless of how long this branch's retries take."""
+    future = first_future
+    attempt = 0
+    while True:
+        try:
+            return _await_result(future, branch.module.name, branch.timeout_seconds)
+        except Exception as exc:
+            if attempt >= branch.max_retries:
+                raise
+            delay = branch.retry_backoff_seconds * (2**attempt)
+            emit(
+                {
+                    "kind": "step_retrying",
+                    "attempt": attempt + 1,
+                    "max_retries": branch.max_retries,
+                    "delay_seconds": delay,
+                    "error": str(exc),
+                    **event_extra,
+                }
+            )
+            if delay > 0:
+                time.sleep(delay)
+            attempt += 1
+            future = _EXECUTOR.submit(branch.module.run, context)
 
 
 class Orchestrator:
@@ -172,15 +246,27 @@ class Orchestrator:
                 )
                 continue
             context.update(step.seed(context))
+            # A snapshot of everything this module can see when it runs — not
+            # just its own StepSpec.seed() output. A module fed via the run's
+            # `initial_context` (the standalone "run this module" and
+            # scheduled-module paths seed that way, not through StepSpec.seed)
+            # would otherwise have no recorded inputs at all to replay later.
+            resolved_inputs = dict(context.variables)
             context.active_module = (module.tier.value, module.name)
             emit({"kind": "step_started", "index": index, "tier": module.tier.value, "name": module.name})
             started_at = datetime.now(timezone.utc)
 
             try:
-                output = _run_module(module, context, step.timeout_seconds) or {}
+                output = (
+                    _run_with_retries(step, context, emit, {"index": index, "tier": module.tier.value, "name": module.name})
+                    or {}
+                )
             except Exception as exc:
                 finished_at = datetime.now(timezone.utc)
-                record = StepRecord(module.name, module.tier.value, started_at, finished_at, False, {}, str(exc))
+                record = StepRecord(
+                    module.name, module.tier.value, started_at, finished_at, False, {}, str(exc),
+                    inputs=redact_secrets(resolved_inputs),
+                )
                 context.record(record)
                 if self.state_store:
                     self.state_store.log_step(run_id, record)
@@ -206,7 +292,10 @@ class Orchestrator:
             finished_at = datetime.now(timezone.utc)
             context.update(output)  # the real, unredacted output — later steps may legitimately need it
             safe_output = redact_secrets(output)
-            record = StepRecord(module.name, module.tier.value, started_at, finished_at, True, safe_output)
+            record = StepRecord(
+                module.name, module.tier.value, started_at, finished_at, True, safe_output,
+                inputs=redact_secrets(resolved_inputs),
+            )
             context.record(record)
             if self.state_store:
                 self.state_store.log_step(run_id, record)
@@ -266,8 +355,14 @@ class Orchestrator:
                 continue
             branches.append((branch_index, branch))
 
-        for _, branch in branches:
+        # A snapshot of everything each branch's module can see when it runs —
+        # not just its own seed() output (see the equivalent comment in the
+        # main run() loop for why: some seeding paths merge straight into
+        # context.variables rather than through a StepSpec.seed).
+        resolved_inputs_by_branch = {}
+        for branch_index, branch in branches:
             context.update(branch.seed(context))
+            resolved_inputs_by_branch[branch_index] = dict(context.variables)
 
         started_ats = [datetime.now(timezone.utc) for _ in branches]
         futures = [_EXECUTOR.submit(branch.module.run, context) for _, branch in branches]
@@ -287,10 +382,22 @@ class Orchestrator:
             )
 
             try:
-                output = _await_result(future, module.name, branch.timeout_seconds) or {}
+                output = (
+                    _await_branch_with_retries(
+                        branch,
+                        future,
+                        context,
+                        emit,
+                        {"index": index, "branch_index": branch_index, "parallel": True, "tier": module.tier.value, "name": module.name},
+                    )
+                    or {}
+                )
             except Exception as exc:
                 finished_at = datetime.now(timezone.utc)
-                record = StepRecord(module.name, module.tier.value, started_at, finished_at, False, {}, str(exc))
+                record = StepRecord(
+                    module.name, module.tier.value, started_at, finished_at, False, {}, str(exc),
+                    inputs=redact_secrets(resolved_inputs_by_branch[branch_index]),
+                )
                 context.record(record)
                 if self.state_store:
                     self.state_store.log_step(run_id, record)
@@ -312,7 +419,10 @@ class Orchestrator:
             finished_at = datetime.now(timezone.utc)
             context.update(output)
             safe_output = redact_secrets(output)
-            record = StepRecord(module.name, module.tier.value, started_at, finished_at, True, safe_output)
+            record = StepRecord(
+                module.name, module.tier.value, started_at, finished_at, True, safe_output,
+                inputs=redact_secrets(resolved_inputs_by_branch[branch_index]),
+            )
             context.record(record)
             if self.state_store:
                 self.state_store.log_step(run_id, record)

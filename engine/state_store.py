@@ -87,7 +87,17 @@ class StateStore:
         self._lock = threading.Lock()
         with self._lock:
             self._conn.executescript(SCHEMA)
+            self._migrate_locked()
             self._conn.commit()
+
+    def _migrate_locked(self) -> None:
+        """Lightweight schema migrations for columns added after a table
+        already existed via CREATE TABLE IF NOT EXISTS — must be called
+        with `self._lock` already held. Each migration is a no-op once
+        applied, so this is safe to run on every startup."""
+        columns = {row[1] for row in self._conn.execute("PRAGMA table_info(steps)").fetchall()}
+        if "inputs" not in columns:
+            self._conn.execute("ALTER TABLE steps ADD COLUMN inputs TEXT NOT NULL DEFAULT '{}'")
 
     def start_run(self) -> int:
         with self._lock:
@@ -109,8 +119,8 @@ class StateStore:
     def log_step(self, run_id: int, step: StepRecord) -> None:
         with self._lock:
             self._conn.execute(
-                "INSERT INTO steps (run_id, name, tier, success, output, error, started_at, finished_at) "
-                "VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+                "INSERT INTO steps (run_id, name, tier, success, output, error, started_at, finished_at, inputs) "
+                "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
                 (
                     run_id,
                     step.name,
@@ -120,6 +130,7 @@ class StateStore:
                     step.error,
                     step.started_at.isoformat(),
                     step.finished_at.isoformat(),
+                    json.dumps(step.inputs),
                 ),
             )
             self._conn.commit()
@@ -144,15 +155,55 @@ class StateStore:
             row = cur.fetchone()
         return bool(row[0]) if row is not None else None
 
+    def module_stats(self) -> list[dict]:
+        """Per-module run statistics — total runs, success rate, and average
+        duration — broken out by (tier, name). The per-module counterpart to
+        `metrics_summary()`'s single global aggregate."""
+        with self._lock:
+            rows = self._conn.execute(
+                "SELECT tier, name, success, started_at, finished_at FROM steps"
+            ).fetchall()
+
+        stats: dict[tuple[str, str], dict] = {}
+        for tier, name, success, started_at, finished_at in rows:
+            entry = stats.setdefault(
+                (tier, name), {"tier": tier, "name": name, "total": 0, "succeeded": 0, "durations": []}
+            )
+            entry["total"] += 1
+            if success:
+                entry["succeeded"] += 1
+            try:
+                entry["durations"].append(
+                    (datetime.fromisoformat(finished_at) - datetime.fromisoformat(started_at)).total_seconds()
+                )
+            except (TypeError, ValueError):
+                continue
+
+        results = []
+        for entry in stats.values():
+            durations = entry["durations"]
+            results.append(
+                {
+                    "tier": entry["tier"],
+                    "name": entry["name"],
+                    "total_runs": entry["total"],
+                    "success_count": entry["succeeded"],
+                    "success_rate": round(entry["succeeded"] / entry["total"], 4) if entry["total"] else None,
+                    "avg_duration_seconds": round(sum(durations) / len(durations), 4) if durations else None,
+                }
+            )
+        results.sort(key=lambda r: (r["tier"], r["name"]))
+        return results
+
     def steps_for_run(self, run_id: int) -> list[dict]:
         with self._lock:
             cur = self._conn.execute(
-                "SELECT name, tier, success, output, error, started_at, finished_at "
+                "SELECT name, tier, success, output, error, started_at, finished_at, inputs "
                 "FROM steps WHERE run_id = ? ORDER BY id",
                 (run_id,),
             )
             rows = cur.fetchall()
-        cols = ("name", "tier", "success", "output", "error", "started_at", "finished_at")
+        cols = ("name", "tier", "success", "output", "error", "started_at", "finished_at", "inputs")
         return [dict(zip(cols, row)) for row in rows]
 
     def metrics_summary(self) -> dict:
@@ -490,7 +541,7 @@ class StateStore:
                 "SELECT id, started_at, finished_at, status FROM runs ORDER BY id"
             ).fetchall()
             step_rows = self._conn.execute(
-                "SELECT id, run_id, name, tier, success, output, error, started_at, finished_at "
+                "SELECT id, run_id, name, tier, success, output, error, started_at, finished_at, inputs "
                 "FROM steps ORDER BY id"
             ).fetchall()
             schedule_rows = self._conn.execute(
@@ -501,7 +552,7 @@ class StateStore:
             ).fetchall()
 
         run_cols = ("id", "started_at", "finished_at", "status")
-        step_cols = ("id", "run_id", "name", "tier", "success", "output", "error", "started_at", "finished_at")
+        step_cols = ("id", "run_id", "name", "tier", "success", "output", "error", "started_at", "finished_at", "inputs")
         ingested_cols = ("hash", "filename", "kind", "ingested_at")
 
         steps = []
@@ -512,6 +563,10 @@ class StateStore:
                 record["output"] = json.loads(record["output"])
             except (TypeError, json.JSONDecodeError):
                 pass
+            try:
+                record["inputs"] = json.loads(record["inputs"])
+            except (TypeError, json.JSONDecodeError):
+                record["inputs"] = {}
             steps.append(record)
 
         return {
@@ -543,11 +598,12 @@ class StateStore:
 
             for step in snapshot.get("steps", []):
                 cur = self._conn.execute(
-                    "INSERT OR IGNORE INTO steps (id, run_id, name, tier, success, output, error, started_at, finished_at) "
-                    "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                    "INSERT OR IGNORE INTO steps (id, run_id, name, tier, success, output, error, started_at, finished_at, inputs) "
+                    "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
                     (
                         step["id"], step["run_id"], step["name"], step["tier"], int(step["success"]),
                         json.dumps(step["output"]), step.get("error"), step["started_at"], step["finished_at"],
+                        json.dumps(step.get("inputs") or {}),
                     ),
                 )
                 if cur.rowcount > 0:

@@ -421,3 +421,129 @@ def test_environment_view_lists_declared_vars_and_settings(monkeypatch):
     assert settings["Run rate limit"] == "30 requests / 10 s"
     assert settings["Upload / ingest size limit"] == "20 MB"
     assert "orchestrator.db" in settings["State store"]
+
+
+def test_run_detail_endpoint_includes_recorded_inputs():
+    res = client.post(
+        "/api/modules/automation/fetch_raw_metrics/run",
+        json={"inputs": {"signups": 321, "churn": 8, "revenue": 99}, "force_refresh": True},
+    )
+    with client.stream("GET", f"/api/stream/{res.json()['stream_id']}") as response:
+        for line in response.iter_lines():
+            if line.startswith("data: ") and '"run_completed"' in line:
+                break
+
+    run_id = client.get("/api/runs?limit=1").json()[0]["id"]
+    detail = client.get(f"/api/runs/{run_id}").json()
+    assert detail["steps"][0]["inputs"]["signups"] == 321
+    assert detail["steps"][0]["inputs"]["churn"] == 8
+
+
+def test_rerun_replays_a_single_module_run_with_its_recorded_inputs():
+    res = client.post(
+        "/api/modules/automation/fetch_raw_metrics/run",
+        json={"inputs": {"signups": 654, "churn": 12, "revenue": 8}, "force_refresh": True},
+    )
+    with client.stream("GET", f"/api/stream/{res.json()['stream_id']}") as response:
+        for line in response.iter_lines():
+            if line.startswith("data: ") and '"run_completed"' in line:
+                break
+
+    run_id = client.get("/api/runs?limit=1").json()[0]["id"]
+    rerun_res = client.post(f"/api/runs/{run_id}/rerun")
+    assert rerun_res.status_code == 200
+    assert rerun_res.json()["replayed_steps"] == 1
+
+    events = []
+    with client.stream("GET", f"/api/stream/{rerun_res.json()['stream_id']}") as response:
+        for line in response.iter_lines():
+            if line.startswith("data: "):
+                events.append(json.loads(line[len("data: "):]))
+                if events[-1]["kind"] in ("run_completed", "run_failed"):
+                    break
+
+    assert events[-1]["kind"] == "run_completed"
+    assert events[-1]["context"]["signups"] == 654
+    assert events[-1]["context"]["churn"] == 12
+
+
+def test_rerun_replays_a_multi_step_pipeline_run_faithfully():
+    res = client.post("/api/pipeline/run", json={"inputs": {}})
+    with client.stream("GET", f"/api/stream/{res.json()['stream_id']}") as response:
+        for line in response.iter_lines():
+            if line.startswith("data: ") and '"run_completed"' in line:
+                break
+
+    run_id = client.get("/api/runs?limit=1").json()[0]["id"]
+    original_steps = client.get(f"/api/runs/{run_id}").json()["steps"]
+    assert len(original_steps) == 3
+
+    rerun_res = client.post(f"/api/runs/{run_id}/rerun")
+    assert rerun_res.status_code == 200
+    assert rerun_res.json()["replayed_steps"] == 3
+
+    events = []
+    with client.stream("GET", f"/api/stream/{rerun_res.json()['stream_id']}") as response:
+        for line in response.iter_lines():
+            if line.startswith("data: "):
+                events.append(json.loads(line[len("data: "):]))
+                if events[-1]["kind"] in ("run_completed", "run_failed"):
+                    break
+
+    assert events[-1]["kind"] == "run_completed"
+    assert "agent_decision" in events[-1]["context"]
+
+
+def test_rerun_of_a_nonexistent_run_is_a_404():
+    res = client.post("/api/runs/999999999/rerun")
+    assert res.status_code == 404
+
+
+def test_state_store_migrates_a_pre_existing_db_missing_the_inputs_column(tmp_path):
+    import sqlite3
+
+    from engine.state_store import StateStore
+
+    db_path = str(tmp_path / "legacy.db")
+    # Simulate a database created before the `inputs` column existed.
+    legacy_conn = sqlite3.connect(db_path)
+    legacy_conn.executescript(
+        """
+        CREATE TABLE runs (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            started_at TEXT NOT NULL,
+            finished_at TEXT,
+            status TEXT NOT NULL
+        );
+        CREATE TABLE steps (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            run_id INTEGER NOT NULL REFERENCES runs(id),
+            name TEXT NOT NULL,
+            tier TEXT NOT NULL,
+            success INTEGER NOT NULL,
+            output TEXT NOT NULL,
+            error TEXT,
+            started_at TEXT NOT NULL,
+            finished_at TEXT NOT NULL
+        );
+        """
+    )
+    legacy_conn.execute(
+        "INSERT INTO runs (started_at, finished_at, status) VALUES ('2020-01-01T00:00:00', '2020-01-01T00:00:01', 'completed')"
+    )
+    legacy_conn.execute(
+        "INSERT INTO steps (run_id, name, tier, success, output, started_at, finished_at) "
+        "VALUES (1, 'legacy_step', 'automation', 1, '{}', '2020-01-01T00:00:00', '2020-01-01T00:00:01')"
+    )
+    legacy_conn.commit()
+    legacy_conn.close()
+
+    store = StateStore(db_path)  # must not raise, and must add the missing column
+    steps = store.steps_for_run(1)
+    assert steps[0]["name"] == "legacy_step"
+    assert steps[0]["inputs"] == "{}"  # migrated default, never NULL
+    store.close()
+
+    # Reopening again (column already present) must also be a no-op, not an error.
+    store2 = StateStore(db_path)
+    store2.close()

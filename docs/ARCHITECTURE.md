@@ -757,6 +757,110 @@ only a JSON parse error or timeout falls back to an empty issue list.
     parallel-group pipelines saved, run (branch-tagged events asserted),
     rejected below two branches, rejected for sibling-referencing
     mappings, and graphed. 145 tests total.
+72. **Add automatic step retries with backoff** (`StepSpec.max_retries`/
+    `retry_backoff_seconds`; `_run_with_retries`/`_await_branch_with_retries`
+    in `engine/orchestrator.py`; a `step_retrying` event; a **Retry on
+    failure** row per builder step/branch): a failing attempt is retried in
+    place (no re-seed) up to `max_retries` times, waiting
+    `retry_backoff_seconds * 2**attempt` between attempts and emitting
+    `step_retrying` first so a dashboard can show "retry 1/3" instead of a
+    step silently going quiet. Only the terminal outcome — success after
+    retries, or failure once retries are exhausted — reaches a
+    `step_completed`/`step_failed` event and (per Batch 6's circuit
+    breaker) the breaker's failure count; a transient failure that
+    eventually succeeds never counts against it. A parallel branch retries
+    by resubmitting `branch.module.run` to the shared executor, blocking
+    only that branch's slot in the collection loop — every other branch's
+    future keeps running independently regardless of how long one
+    branch's retries take.
+73. **Add an inbound webhook trigger for saved pipelines**
+    (`POST /api/pipelines/{slug}/webhook`; a copyable webhook URL on each
+    saved-pipeline card): the POST body (a JSON object, or empty) is
+    merged into step 1's own input dict before building that pipeline's
+    steps (`_apply_entry_overrides`, `_build_steps_from_definition`'s new
+    `entry_overrides` parameter) — unknown keys are silently ignored, same
+    as every other input dict here. For a `type: parallel` first step, the
+    override is applied to every branch's inputs. No auth (single-user/
+    local, same as everywhere else in this app), but it still goes through
+    the same rate limiter and circuit-breaker check as any other launch
+    path.
+74. **Add editing a saved pipeline in the builder** (an **Edit** action;
+    `moduleStepToBuilderStep`/`definitionToBuilderSteps` rebuild the
+    builder's internal fieldSources/condition/retry shape from a saved
+    definition, resolving a saved dotted-path mapping back into
+    `{step, output, nestedPath}`): renaming is disabled while editing (the
+    name field only, enforced client-side) so **Save & Launch** always
+    re-POSTs under the same name and therefore overwrites the same
+    slug/file in place — no delete-pipeline endpoint needed, and no risk
+    of an orphaned duplicate under a new name. A **New pipeline** button
+    in the editing banner resets the session. Along the way, fixed the
+    edit flow's `scrollIntoView` landing a target flush against the
+    sticky topbar (added `scroll-margin-top` to `.builder-panel`).
+75. **Add a run detail drill-down** (click-to-expand rows in Recent Runs,
+    backed by the already-existing `GET /api/runs/{run_id}`; results
+    cached client-side per run id since a finished run's steps never
+    change): surfaced a pre-existing class-name collision along the way —
+    the new table row reused `.run-row`, already a flex-row class for a
+    module card's Run-button row, so the `<tr>` rendered as
+    `display: flex` and its cells wrapped onto two visual lines instead of
+    laying out as table columns. Renamed to `.history-row`. Also added
+    `table-layout: fixed` to `.runs-table table` and `white-space: pre-wrap`
+    to the drill-down's output `<pre>` — without both, a wide recorded
+    JSON value could force the whole table wider than its container.
+76. **Add per-module performance statistics** (`StateStore.module_stats()`
+    grouping the `steps` table by (tier, name); folded into `GET
+    /api/modules` per card and exposed standalone at `GET
+    /api/modules/stats`): total runs, success rate, average duration. A
+    module with zero recorded runs reports `total_runs: 0` and `None` for
+    the rate/duration fields rather than erroring or omitting the key.
+77. **Add pipeline YAML export/import**
+    (`GET /api/pipelines/{slug}/export` serves the pipeline's own saved
+    YAML file directly; `POST /api/pipelines/import` accepts an uploaded
+    YAML file through the exact same `pipeline_store.save_pipeline()`
+    validation path a builder save uses — an unknown module or bad
+    mapping is rejected identically either way): import under an existing
+    pipeline's name overwrites it in place, same semantics as re-saving
+    an edited pipeline (entry 74).
+78. **Add re-running a past run with its original inputs**
+    (`StepRecord.inputs`; a new `steps.inputs` column with a
+    startup-time `_migrate_locked()` migration for databases created
+    before this column existed; `POST /api/runs/{run_id}/rerun`): the
+    first attempt only captured a `StepSpec.seed()` call's return value,
+    which is empty for the standalone "run this module" and
+    scheduled-module launch paths — those seed by passing values as the
+    run's `initial_context` instead, a different mechanism the engine
+    didn't know to record. Fixed by snapshotting `dict(context.variables)`
+    right after seeding (covers both paths, since either way the values
+    are merged into context before the module runs) rather than just the
+    seed function's own return value. A re-run replays each recorded
+    step's module with its own recorded snapshot as a brand-new run —
+    faithful per-step replay, not a reconstruction of the original
+    pipeline's mappings/conditions/parallel-group topology (not part of
+    run history, only each step's module + resolved inputs are). A
+    secret-shaped input is redacted before it's ever logged, so replaying
+    it sends the masked placeholder, never the real value. The frontend's
+    **↻ Re-run with these inputs** button in a run's drill-down reuses the
+    same tracker/log machinery as every other launch; since a full
+    Recent-Runs refresh (needed to show the new row) collapses whatever
+    detail row was open, `onDone` re-expands the freshly created run's own
+    row afterward instead of leaving the just-finished result to vanish.
+79. **Add tests for all of Batch 7**: retries proving exponential backoff
+    timing, exhaustion vs. eventual success, and independent per-branch
+    retry in a parallel group; webhook override/no-body/unknown-key/
+    malformed-body/missing-pipeline/parallel-branch-override cases;
+    resaving a pipeline under the same name overwriting it in place with
+    no duplicate left behind (the contract the edit flow depends on);
+    export/import round-tripping a real saved pipeline plus malformed-
+    YAML/non-object/unknown-module rejection and overwrite-on-import;
+    per-module stats reflecting a real run's delta (not an absolute count,
+    since the module-level store is shared across the whole test file) and
+    zero-runs reporting `None` rather than an error; and inputs-recording
+    covering both seeding paths (StepSpec.seed and initial_context),
+    redaction of a secret-shaped recorded input, capture even on failure,
+    per-branch capture in a parallel group, a schema-migration test
+    opening a pre-existing database that predates the `inputs` column, and
+    end-to-end rerun of both a single-module run and a full 3-step
+    pipeline run. 184 tests total.
 
 ## 9. Roadmap
 
@@ -811,6 +915,20 @@ pipelines. Grow it only when a real need shows up:
   designed for messy hand-edited/spreadsheet-exported CSVs, a failure mode
   that doesn't really apply to JSON's more rigid structure. Revisit if a real
   need for JSON-specific cleanup shows up.
+- **Webhook triggers have no signature/secret verification** — consistent
+  with the rest of this app being single-user/local with no auth layer, but
+  worth calling out explicitly since a webhook URL is the one launch path
+  meant to be called by something other than the dashboard itself. Add a
+  shared-secret header check before exposing one past localhost.
+- **Re-run replays steps, not the original pipeline** — `POST
+  /api/runs/{run_id}/rerun` faithfully replays each recorded step's module
+  + resolved inputs, but run history doesn't store the mappings,
+  conditions, retry policy, or parallel-group topology that originally
+  produced the run — only what each step actually saw and did. A re-run is
+  therefore always a flat sequential replay, even if the original run came
+  from a saved pipeline with parallel groups. Reconstructing full topology
+  would mean recording (and versioning) the pipeline definition alongside
+  every run, not just its steps.
 
 Each step above is additive — none require rewriting `BaseModule`, the manifest
 format, or the example modules.

@@ -1,5 +1,7 @@
 import time
 
+import pytest
+
 from engine import BaseModule, Orchestrator, ParallelGroup, StepSpec, Tier
 from engine.context import ExecutionContext
 from engine.state_store import StateStore
@@ -372,3 +374,148 @@ def test_parallel_group_branch_condition_skips_only_that_branch():
     assert skipped["parallel"] is True
     assert skipped["branch_index"] == 1
     assert skipped["name"] == "always_fails"
+
+
+class FailsNTimes(BaseModule):
+    """Fails its first `fail_count` calls, then succeeds — a controllable
+    stand-in for a flaky external dependency."""
+
+    name = "fails_n_times"
+    tier = Tier.AUTOMATION
+
+    def __init__(self, fail_count: int):
+        self.fail_count = fail_count
+        self.calls = 0
+
+    def run(self, context: ExecutionContext) -> dict:
+        self.calls += 1
+        if self.calls <= self.fail_count:
+            raise RuntimeError(f"transient failure {self.calls}")
+        return {"succeeded_on_call": self.calls}
+
+
+def test_step_retries_and_eventually_succeeds_within_the_retry_budget():
+    module = FailsNTimes(fail_count=2)
+    step = StepSpec(module=module, max_retries=3, retry_backoff_seconds=0.01)
+    events = []
+
+    context = Orchestrator([step]).run({}, on_event=events.append)
+
+    assert module.calls == 3
+    assert context.get("succeeded_on_call") == 3
+    kinds = [e["kind"] for e in events]
+    assert kinds == ["step_started", "step_retrying", "step_retrying", "step_completed", "run_completed"]
+
+    retries = [e for e in events if e["kind"] == "step_retrying"]
+    assert [r["attempt"] for r in retries] == [1, 2]
+    assert [r["max_retries"] for r in retries] == [3, 3]
+    # Exponential backoff: attempt 0 waits backoff*2**0, attempt 1 waits backoff*2**1.
+    assert retries[0]["delay_seconds"] == pytest.approx(0.01)
+    assert retries[1]["delay_seconds"] == pytest.approx(0.02)
+
+
+def test_step_retries_are_exhausted_and_the_step_really_fails():
+    module = FailsNTimes(fail_count=5)
+    step = StepSpec(module=module, max_retries=2, retry_backoff_seconds=0.01)
+    events = []
+
+    context = Orchestrator([step], stop_on_error=False).run({}, on_event=events.append)
+
+    assert module.calls == 3  # 1 initial attempt + 2 retries
+    kinds = [e["kind"] for e in events]
+    assert kinds == ["step_started", "step_retrying", "step_retrying", "step_failed", "run_failed"]
+    failure_record = next(s for s in context.history if s.name == "fails_n_times")
+    assert failure_record.success is False
+
+
+def test_zero_retries_is_identical_to_no_retry_behavior():
+    module = FailsNTimes(fail_count=1)
+    step = StepSpec(module=module)  # max_retries defaults to 0
+    events = []
+
+    Orchestrator([step], stop_on_error=False).run({}, on_event=events.append)
+
+    assert module.calls == 1
+    assert not any(e["kind"] == "step_retrying" for e in events)
+    assert [e["kind"] for e in events] == ["step_started", "step_failed", "run_failed"]
+
+
+def test_parallel_group_branch_retries_independently_of_other_branches():
+    flaky = FailsNTimes(fail_count=1)
+    group = ParallelGroup(
+        steps=[
+            SleepAndEcho("stable", 0.01),
+            StepSpec(module=flaky, max_retries=2, retry_backoff_seconds=0.01),
+        ]
+    )
+    events = []
+    context = Orchestrator([group]).run({}, on_event=events.append)
+
+    assert context.get("stable") is True
+    assert context.get("succeeded_on_call") == 2
+    retries = [e for e in events if e["kind"] == "step_retrying"]
+    assert len(retries) == 1
+    assert retries[0]["branch_index"] == 1
+    assert retries[0]["parallel"] is True
+
+
+def test_step_record_captures_resolved_inputs_seeded_via_step_spec():
+    step = StepSpec(module=Double(), seed=lambda ctx: {"value": 21})
+    context = Orchestrator([step]).run({})
+
+    record = next(s for s in context.history if s.name == "double")
+    assert record.inputs == {"value": 21}
+
+
+def test_step_record_captures_inputs_seeded_via_initial_context_not_step_seed():
+    """The standalone 'run this module' and scheduled-module paths seed a
+    step by passing values as the run's initial_context, not through
+    StepSpec.seed — inputs recording must cover that path too, not just
+    explicit seed() closures."""
+    step = StepSpec(module=Double())  # default seed: lambda ctx: {}
+    context = Orchestrator([step]).run({"value": 55})
+
+    record = next(s for s in context.history if s.name == "double")
+    assert record.inputs == {"value": 55}
+
+
+def test_step_record_captures_inputs_even_when_the_step_fails():
+    step = StepSpec(module=Fails(), seed=lambda ctx: {"marker": "present"})
+    context = Orchestrator([step], stop_on_error=False).run({})
+
+    record = next(s for s in context.history if s.name == "fails")
+    assert record.success is False
+    assert record.inputs == {"marker": "present"}
+
+
+def test_secret_shaped_recorded_input_is_redacted():
+    class ReadsSecret(BaseModule):
+        name = "reads_secret"
+        tier = Tier.AGENT
+
+        def run(self, context: ExecutionContext) -> dict:
+            return {"used": context.get("api_key")}
+
+    step = StepSpec(module=ReadsSecret())
+    context = Orchestrator([step]).run({"api_key": "sk-real-secret-value"})
+
+    record = next(s for s in context.history if s.name == "reads_secret")
+    assert record.inputs["api_key"] == "***REDACTED***"
+    # The live context (what a later step could still legitimately use) keeps
+    # the real value — only the recorded/emitted audit trail is masked.
+    assert context.get("api_key") == "sk-real-secret-value"
+
+
+def test_parallel_branch_step_record_captures_its_own_resolved_inputs():
+    group = ParallelGroup(
+        steps=[
+            StepSpec(module=Echo(), seed=lambda ctx: {"heard": "branch_a_value"}),
+            StepSpec(module=Double(), seed=lambda ctx: {"value": 9}),
+        ]
+    )
+    context = Orchestrator([group]).run({})
+
+    echo_record = next(s for s in context.history if s.name == "echo")
+    double_record = next(s for s in context.history if s.name == "double")
+    assert echo_record.inputs["heard"] == "branch_a_value"
+    assert double_record.inputs["value"] == 9

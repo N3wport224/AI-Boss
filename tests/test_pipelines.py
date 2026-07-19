@@ -451,3 +451,382 @@ def test_pipeline_graph_renders_a_parallel_group_as_one_slot_with_branch_detail(
 
     mapping_edges = [e for e in graph["edges"] if e["kind"] == "mapping"]
     assert {"from": 0, "to": 1, "kind": "mapping", "field": "signups", "output": "raw_metrics.signups"} in mapping_edges
+
+
+def test_pipeline_step_retries_a_transient_failure_and_succeeds(monkeypatch):
+    import automations.example_automation as example_automation
+
+    call_count = {"n": 0}
+    original_run = example_automation.DataFetchAutomation.run
+
+    def flaky_run(self, context):
+        call_count["n"] += 1
+        if call_count["n"] <= 2:
+            raise RuntimeError(f"transient failure {call_count['n']}")
+        return original_run(self, context)
+
+    monkeypatch.setattr(example_automation.DataFetchAutomation, "run", flaky_run)
+
+    payload = {
+        "name": "Retry Demo",
+        "steps": [
+            {
+                "tier": "automation",
+                "name": "fetch_raw_metrics",
+                "inputs": {"signups": 10, "churn": 1, "revenue": 5},
+                "retry": {"max_retries": 3, "backoff_seconds": 0.01},
+            }
+        ],
+    }
+    res = client.post("/api/pipelines", json=payload)
+    assert res.status_code == 200
+
+    events = _collect_stream(res.json()["stream_id"])
+    assert events[-1]["kind"] == "run_completed"
+    assert call_count["n"] == 3
+
+    retrying = [e for e in events if e["kind"] == "step_retrying"]
+    assert len(retrying) == 2
+    assert [r["attempt"] for r in retrying] == [1, 2]
+
+    saved = pipeline_store.load_pipeline("retry_demo")
+    assert saved["steps"][0]["retry"] == {"max_retries": 3, "backoff_seconds": 0.01}
+
+
+def test_pipeline_step_fails_for_real_once_retries_are_exhausted(monkeypatch):
+    import automations.example_automation as example_automation
+
+    def always_fails(self, context):
+        raise RuntimeError("permanent failure")
+
+    monkeypatch.setattr(example_automation.DataFetchAutomation, "run", always_fails)
+
+    payload = {
+        "name": "Retry Exhausted",
+        "steps": [
+            {
+                "tier": "automation",
+                "name": "fetch_raw_metrics",
+                "retry": {"max_retries": 2, "backoff_seconds": 0.01},
+            }
+        ],
+    }
+    res = client.post("/api/pipelines", json=payload)
+    assert res.status_code == 200
+
+    events = _collect_stream(res.json()["stream_id"])
+    assert events[-1]["kind"] == "run_failed"
+    assert len([e for e in events if e["kind"] == "step_retrying"]) == 2
+    assert any(e["kind"] == "step_failed" for e in events)
+
+
+def test_pipeline_step_without_retry_key_omits_it_from_saved_yaml():
+    payload = {
+        "name": "No Retry Here",
+        "steps": [{"tier": "automation", "name": "fetch_raw_metrics"}],
+    }
+    res = client.post("/api/pipelines", json=payload)
+    assert res.status_code == 200
+    saved = pipeline_store.load_pipeline("no_retry_here")
+    assert "retry" not in saved["steps"][0]
+
+
+def test_pipeline_step_retry_with_negative_max_retries_is_rejected():
+    payload = {
+        "name": "Bad Retry Count",
+        "steps": [
+            {
+                "tier": "automation",
+                "name": "fetch_raw_metrics",
+                "retry": {"max_retries": -1, "backoff_seconds": 1},
+            }
+        ],
+    }
+    res = client.post("/api/pipelines", json=payload)
+    assert res.status_code == 400
+    assert "max_retries" in res.json()["detail"]
+
+
+def test_pipeline_step_retry_with_negative_backoff_is_rejected():
+    payload = {
+        "name": "Bad Retry Backoff",
+        "steps": [
+            {
+                "tier": "automation",
+                "name": "fetch_raw_metrics",
+                "retry": {"max_retries": 1, "backoff_seconds": -0.5},
+            }
+        ],
+    }
+    res = client.post("/api/pipelines", json=payload)
+    assert res.status_code == 400
+    assert "backoff_seconds" in res.json()["detail"]
+
+
+def _webhook_pipeline_payload(name):
+    return {
+        "name": name,
+        "steps": [
+            {"tier": "automation", "name": "fetch_raw_metrics", "inputs": {"signups": 10, "churn": 1, "revenue": 5}},
+            {"tier": "workflow", "name": "analyze_metrics", "inputs": {"risk_threshold": 0.1}},
+        ],
+    }
+
+
+def test_webhook_overrides_the_first_steps_inputs():
+    payload = _webhook_pipeline_payload("Webhook Override")
+    res = client.post("/api/pipelines", json=payload)
+    assert res.status_code == 200
+    _collect_stream(res.json()["stream_id"])
+
+    res2 = client.post("/api/pipelines/webhook_override/webhook", json={"signups": 1000, "churn": 900})
+    assert res2.status_code == 200
+    events = _collect_stream(res2.json()["stream_id"])
+
+    final = events[-1]
+    assert final["kind"] == "run_completed"
+    assert final["context"]["signups"] == 1000
+    assert final["context"]["churn"] == 900
+    assert final["context"]["insight"]["risk_level"] == "high"  # 900/1000 churn rate triggers "high"
+
+
+def test_webhook_with_no_body_runs_pipeline_with_its_saved_defaults():
+    payload = _webhook_pipeline_payload("Webhook No Body")
+    res = client.post("/api/pipelines", json=payload)
+    _collect_stream(res.json()["stream_id"])
+
+    res2 = client.post("/api/pipelines/webhook_no_body/webhook")
+    assert res2.status_code == 200
+    events = _collect_stream(res2.json()["stream_id"])
+    assert events[-1]["kind"] == "run_completed"
+    assert events[-1]["context"]["signups"] == 10  # the pipeline's own saved default
+
+
+def test_webhook_ignores_unknown_keys_in_the_body():
+    payload = _webhook_pipeline_payload("Webhook Unknown Keys")
+    res = client.post("/api/pipelines", json=payload)
+    _collect_stream(res.json()["stream_id"])
+
+    res2 = client.post("/api/pipelines/webhook_unknown_keys/webhook", json={"not_a_real_field": "whatever"})
+    assert res2.status_code == 200
+    events = _collect_stream(res2.json()["stream_id"])
+    assert events[-1]["kind"] == "run_completed"
+    assert events[-1]["context"]["signups"] == 10  # unaffected by the unrecognized key
+
+
+def test_webhook_rejects_a_non_object_json_body():
+    payload = _webhook_pipeline_payload("Webhook Bad Body")
+    res = client.post("/api/pipelines", json=payload)
+    _collect_stream(res.json()["stream_id"])
+
+    res2 = client.post("/api/pipelines/webhook_bad_body/webhook", content=b"[1, 2, 3]", headers={"Content-Type": "application/json"})
+    assert res2.status_code == 400
+    assert "JSON object" in res2.json()["detail"]
+
+
+def test_webhook_rejects_malformed_json():
+    payload = _webhook_pipeline_payload("Webhook Malformed")
+    res = client.post("/api/pipelines", json=payload)
+    _collect_stream(res.json()["stream_id"])
+
+    res2 = client.post("/api/pipelines/webhook_malformed/webhook", content=b"{not valid", headers={"Content-Type": "application/json"})
+    assert res2.status_code == 400
+    assert "valid JSON" in res2.json()["detail"]
+
+
+def test_webhook_for_an_unknown_pipeline_is_a_404():
+    res = client.post("/api/pipelines/does_not_exist_at_all/webhook", json={})
+    assert res.status_code == 404
+
+
+def test_webhook_overrides_a_branchs_inputs_inside_a_parallel_first_step():
+    payload = {
+        "name": "Webhook Parallel Entry",
+        "steps": [
+            {
+                "type": "parallel",
+                "branches": [
+                    {"tier": "automation", "name": "fetch_raw_metrics", "inputs": {"signups": 10, "churn": 1, "revenue": 5}},
+                    {"tier": "automation", "name": "fetch_raw_metrics", "inputs": {"signups": 1, "churn": 1, "revenue": 1}},
+                ],
+            }
+        ],
+    }
+    res = client.post("/api/pipelines", json=payload)
+    assert res.status_code == 200
+    _collect_stream(res.json()["stream_id"])
+
+    res2 = client.post("/api/pipelines/webhook_parallel_entry/webhook", json={"signups": 777})
+    assert res2.status_code == 200
+    events = _collect_stream(res2.json()["stream_id"])
+    assert events[-1]["kind"] == "run_completed"
+    # Both branches run the same module name, so context.signups reflects
+    # whichever branch's output merged in last — either way it's the override.
+    assert events[-1]["context"]["signups"] == 777
+
+
+def test_resaving_a_pipeline_under_the_same_name_overwrites_it_in_place():
+    """The builder's "Edit" flow re-POSTs the same pipeline name after
+    changes — this must overwrite the existing file/slug, not create a
+    second entry alongside it."""
+    first = {
+        "name": "Editable Pipeline",
+        "description": "original description",
+        "steps": [{"tier": "automation", "name": "fetch_raw_metrics", "inputs": {"signups": 1, "churn": 1, "revenue": 1}}],
+    }
+    res = client.post("/api/pipelines", json=first)
+    assert res.status_code == 200
+    _collect_stream(res.json()["stream_id"])
+
+    second = {
+        "name": "Editable Pipeline",
+        "description": "updated description",
+        "steps": [
+            {"tier": "automation", "name": "fetch_raw_metrics", "inputs": {"signups": 99, "churn": 2, "revenue": 3}},
+            {"tier": "workflow", "name": "analyze_metrics", "inputs": {"risk_threshold": 0.5}},
+        ],
+    }
+    res2 = client.post("/api/pipelines", json=second)
+    assert res2.status_code == 200
+    assert res2.json()["pipeline"]["slug"] == "editable_pipeline"
+    _collect_stream(res2.json()["stream_id"])
+
+    listed = client.get("/api/pipelines").json()
+    matching = [p for p in listed if p["slug"] == "editable_pipeline"]
+    assert len(matching) == 1  # no duplicate left behind
+    assert matching[0]["description"] == "updated description"
+    assert len(matching[0]["steps"]) == 2
+    assert matching[0]["steps"][0]["inputs"]["signups"] == 99
+
+
+def test_export_pipeline_returns_its_own_yaml_file():
+    payload = {
+        "name": "Export Target",
+        "steps": [{"tier": "automation", "name": "fetch_raw_metrics", "inputs": {"signups": 10, "churn": 1, "revenue": 5}}],
+    }
+    res = client.post("/api/pipelines", json=payload)
+    _collect_stream(res.json()["stream_id"])
+
+    export_res = client.get("/api/pipelines/export_target/export")
+    assert export_res.status_code == 200
+    assert "yaml" in export_res.headers["content-type"]
+
+    import yaml
+
+    exported = yaml.safe_load(export_res.content)
+    assert exported["name"] == "Export Target"
+    assert exported["slug"] == "export_target"
+    assert exported["steps"][0]["inputs"]["signups"] == 10
+
+
+def test_export_missing_pipeline_is_a_404():
+    res = client.get("/api/pipelines/totally_missing/export")
+    assert res.status_code == 404
+
+
+def test_import_pipeline_creates_a_new_saved_pipeline():
+    yaml_text = (
+        "name: Imported Fresh\n"
+        "steps:\n"
+        "  - tier: automation\n"
+        "    name: fetch_raw_metrics\n"
+        "    inputs:\n"
+        "      signups: 42\n"
+        "      churn: 3\n"
+        "      revenue: 7\n"
+    )
+    res = client.post(
+        "/api/pipelines/import",
+        files={"file": ("imported_fresh.yaml", yaml_text.encode(), "application/x-yaml")},
+    )
+    assert res.status_code == 200
+    assert res.json()["pipeline"]["slug"] == "imported_fresh"
+
+    listed = client.get("/api/pipelines").json()
+    match = next(p for p in listed if p["slug"] == "imported_fresh")
+    assert match["steps"][0]["inputs"]["signups"] == 42
+
+
+def test_import_round_trips_an_exported_pipeline():
+    payload = {
+        "name": "Round Trip Source",
+        "steps": [
+            {"tier": "automation", "name": "fetch_raw_metrics", "inputs": {"signups": 11, "churn": 2, "revenue": 3}},
+            {"tier": "workflow", "name": "analyze_metrics", "inputs": {"risk_threshold": 0.2}},
+        ],
+    }
+    res = client.post("/api/pipelines", json=payload)
+    _collect_stream(res.json()["stream_id"])
+    exported = client.get("/api/pipelines/round_trip_source/export").content
+
+    # Import the exact same YAML back under a renamed identity so it's a genuinely new pipeline.
+    renamed = exported.decode().replace("name: Round Trip Source", "name: Round Trip Copy").replace(
+        "slug: round_trip_source", "slug: round_trip_copy"
+    )
+    res2 = client.post(
+        "/api/pipelines/import",
+        files={"file": ("copy.yaml", renamed.encode(), "application/x-yaml")},
+    )
+    assert res2.status_code == 200
+    copy = res2.json()["pipeline"]
+    assert copy["slug"] == "round_trip_copy"
+    assert len(copy["steps"]) == 2
+    assert copy["steps"][1]["tier"] == "workflow"
+
+
+def test_import_rejects_malformed_yaml():
+    res = client.post(
+        "/api/pipelines/import",
+        files={"file": ("bad.yaml", b": : : not valid yaml", "application/x-yaml")},
+    )
+    assert res.status_code == 400
+    assert "parse" in res.json()["detail"].lower()
+
+
+def test_import_rejects_a_non_object_yaml_document():
+    res = client.post(
+        "/api/pipelines/import",
+        files={"file": ("list.yaml", b"- one\n- two\n", "application/x-yaml")},
+    )
+    assert res.status_code == 400
+    assert "single object" in res.json()["detail"]
+
+
+def test_import_rejects_a_pipeline_referencing_an_unknown_module():
+    yaml_text = "name: Bad Module Ref\nsteps:\n  - tier: automation\n    name: totally_fake_module\n"
+    res = client.post(
+        "/api/pipelines/import",
+        files={"file": ("bad.yaml", yaml_text.encode(), "application/x-yaml")},
+    )
+    assert res.status_code == 400
+    assert "totally_fake_module" in res.json()["detail"]
+
+
+def test_import_under_an_existing_name_overwrites_it():
+    first = {
+        "name": "Import Overwrite Target",
+        "steps": [{"tier": "automation", "name": "fetch_raw_metrics", "inputs": {"signups": 1, "churn": 1, "revenue": 1}}],
+    }
+    res = client.post("/api/pipelines", json=first)
+    _collect_stream(res.json()["stream_id"])
+
+    yaml_text = (
+        "name: Import Overwrite Target\n"
+        "steps:\n"
+        "  - tier: automation\n"
+        "    name: fetch_raw_metrics\n"
+        "    inputs:\n"
+        "      signups: 555\n"
+        "      churn: 1\n"
+        "      revenue: 1\n"
+    )
+    res2 = client.post(
+        "/api/pipelines/import",
+        files={"file": ("overwrite.yaml", yaml_text.encode(), "application/x-yaml")},
+    )
+    assert res2.status_code == 200
+
+    listed = client.get("/api/pipelines").json()
+    matching = [p for p in listed if p["slug"] == "import_overwrite_target"]
+    assert len(matching) == 1
+    assert matching[0]["steps"][0]["inputs"]["signups"] == 555
