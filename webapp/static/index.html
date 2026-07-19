@@ -70,6 +70,8 @@
         <div class="builder-header-actions">
           <label class="btn btn-secondary btn-small" for="pipeline-import-input">Import pipeline…</label>
           <input type="file" id="pipeline-import-input" accept=".yaml,.yml" hidden />
+          <input type="text" id="pipeline-import-url-input" class="artifact-search-input" placeholder="…or paste a URL to a .yaml pipeline" />
+          <button id="pipeline-import-url-btn" class="btn btn-secondary btn-small" type="button">Import from URL</button>
         </div>
       </div>
       <div id="builder-panel" class="builder-panel hidden">
@@ -103,6 +105,7 @@
         <p id="builder-error" class="builder-error hidden"></p>
 
         <div class="builder-actions">
+          <button id="builder-validate" class="btn btn-secondary" type="button" title="Check this definition without saving or running it">Validate</button>
           <button id="builder-save-only" class="btn btn-secondary" type="button" title="Save without running it now">Save</button>
           <button id="builder-launch" class="btn btn-primary" type="button">Save &amp; Launch</button>
         </div>
@@ -142,6 +145,10 @@
             <span>hours</span>
             <button id="purge-btn" class="btn btn-secondary btn-small" type="button">Purge</button>
           </div>
+        </div>
+        <div class="artifacts-bulk-tag-row">
+          <input type="text" id="artifact-bulk-tag-input" class="artifact-search-input" placeholder="Tag to apply to selected…" />
+          <button id="artifact-bulk-tag-btn" class="btn btn-secondary btn-small" type="button" disabled>Apply tag to selected</button>
         </div>
         <div id="artifact-search-results" class="hidden"></div>
         <div id="artifacts-list" class="runs-table"></div>

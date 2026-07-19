@@ -587,6 +587,23 @@ def scaffold_module_route(payload: ModuleScaffoldRequest):
     return result
 
 
+class ModuleDuplicateRequest(BaseModel):
+    new_name: str
+    description: str = ""
+
+
+@app.post("/api/modules/{tier}/{name}/duplicate")
+def duplicate_module_route(tier: str, name: str, payload: ModuleDuplicateRequest):
+    """Clone an existing module's manifest + source under a new name in the
+    same tier -- a working starting point (keeps the original's inputs/
+    outputs/run() logic intact) rather than an empty from-scratch stub."""
+    try:
+        result = scaffold.duplicate_module(tier, name, payload.new_name, payload.description, TIER_DIRS)
+    except scaffold.ScaffoldError as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
+    return result
+
+
 @app.get("/api/modules/stats")
 def module_stats():
     """Per-module run statistics — total runs, success rate, average
@@ -746,9 +763,55 @@ def set_module_enabled(tier: str, name: str, payload: ModuleEnabledUpdate):
     return {"tier": tier, "name": name, "runtime_enabled": payload.enabled}
 
 
+class InputPresetSave(BaseModel):
+    preset_name: str
+    inputs: dict[str, Any] = {}
+
+
+@app.get("/api/modules/{tier}/{name}/presets")
+def list_input_presets(tier: str, name: str):
+    _manifest_by_name(tier, name)  # 404 for a module that doesn't exist
+    return store.list_input_presets(tier, name)
+
+
+@app.post("/api/modules/{tier}/{name}/presets")
+def save_input_preset(tier: str, name: str, payload: InputPresetSave):
+    """Save the current values in a module card's input form under a name,
+    so a user can reapply that exact combination later with one click
+    instead of retyping it every time."""
+    _manifest_by_name(tier, name)  # 404 for a module that doesn't exist
+    if not payload.preset_name.strip():
+        raise HTTPException(status_code=400, detail="Preset name is required.")
+    return store.save_input_preset(tier, name, payload.preset_name.strip(), payload.inputs)
+
+
+@app.delete("/api/modules/{tier}/{name}/presets/{preset_name}")
+def delete_input_preset(tier: str, name: str, preset_name: str):
+    _manifest_by_name(tier, name)  # 404 for a module that doesn't exist
+    deleted = store.delete_input_preset(tier, name, preset_name)
+    if not deleted:
+        raise HTTPException(status_code=404, detail=f"No preset named '{preset_name}' for {tier}/{name}.")
+    return {"deleted": preset_name}
+
+
 @app.get("/api/pipelines")
 def list_saved_pipelines():
     return pipeline_store.list_pipelines()
+
+
+@app.post("/api/pipelines/validate")
+def validate_pipeline_route(definition: PipelineDefinition):
+    """Dry-run validation for the pipeline builder -- checks a definition
+    against validate_pipeline() (module references exist, mappings point to
+    a declared output on a strictly earlier step, condition/retry shapes are
+    sane) without writing anything to disk or launching a run. Lets a user
+    catch a mistake mid-edit without either saving a draft or triggering a
+    real run just to find out."""
+    try:
+        validated = pipeline_store.validate_pipeline(definition.model_dump(), TIER_DIRS)
+    except pipeline_store.PipelineValidationError as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
+    return {"valid": True, "pipeline": validated}
 
 
 @app.post("/api/pipelines")
@@ -847,6 +910,39 @@ async def import_pipeline(file: UploadFile = File(...)):
         data = await ingestion.read_upload_with_limit(file)
     except ingestion.UploadTooLargeError as exc:
         raise HTTPException(status_code=413, detail=str(exc))
+    try:
+        definition = yaml.safe_load(data)
+    except yaml.YAMLError as exc:
+        raise HTTPException(status_code=400, detail=f"Could not parse pipeline YAML: {exc}")
+    if not isinstance(definition, dict):
+        raise HTTPException(status_code=400, detail="Pipeline YAML must describe a single object.")
+
+    try:
+        saved = pipeline_store.save_pipeline(definition, TIER_DIRS)
+    except pipeline_store.PipelineValidationError as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
+    return {"pipeline": saved}
+
+
+class ImportPipelineUrlRequest(BaseModel):
+    url: str
+
+
+@app.post("/api/pipelines/import-url")
+def import_pipeline_from_url(payload: ImportPipelineUrlRequest):
+    """Same import as POST /api/pipelines/import (a YAML file produced by
+    /api/pipelines/{slug}/export), but fetched from a URL instead of
+    uploaded from disk -- the same streaming, size-capped GET Batch 10's
+    file-from-URL ingestion already uses."""
+    if not payload.url.strip():
+        raise HTTPException(status_code=400, detail="A URL is required.")
+    try:
+        data = ingestion.fetch_url_bytes(payload.url)
+    except ingestion.UploadTooLargeError as exc:
+        raise HTTPException(status_code=413, detail=str(exc))
+    except Exception as exc:
+        raise HTTPException(status_code=400, detail=f"Could not fetch that URL: {exc}")
+
     try:
         definition = yaml.safe_load(data)
     except yaml.YAMLError as exc:
@@ -1539,6 +1635,47 @@ def set_artifact_tags(filename: str, payload: ArtifactTagsUpdate):
         raise HTTPException(status_code=404, detail=f"No artifact named '{safe_name}'.")
     cleaned = sorted({t.strip() for t in payload.tags if t.strip()})
     return {"filename": safe_name, "tags": store.set_artifact_tags(safe_name, cleaned)}
+
+
+class ArtifactBulkTag(BaseModel):
+    filenames: list[str]
+    tag: str
+
+
+@app.post("/api/artifacts/bulk-tags")
+def bulk_tag_artifacts(payload: ArtifactBulkTag):
+    """Add one tag to every selected artifact at once -- adds to whatever
+    tags a file already has, the same as typing into its own '+ tag' field,
+    just applied to a whole selection instead of one file at a time.
+    Unknown filenames are skipped rather than failing the whole batch."""
+    tag = payload.tag.strip()
+    if not tag:
+        raise HTTPException(status_code=400, detail="A tag is required.")
+
+    existing_tags = store.all_artifact_tags()
+    tagged = []
+    for filename in payload.filenames:
+        safe_name = Path(filename).name
+        if not (ingestion.ARTIFACTS_DIR / safe_name).is_file():
+            continue
+        current = set(existing_tags.get(safe_name, []))
+        current.add(tag)
+        store.set_artifact_tags(safe_name, sorted(current))
+        tagged.append(safe_name)
+    return {"tag": tag, "tagged": tagged}
+
+
+@app.get("/api/artifacts/{filename}/content")
+def artifact_content(filename: str):
+    """Full (capped) extracted content for one artifact -- not just a
+    search-result snippet. Structured records (CSV/XLSX) render as a table,
+    extracted PDF text as plain text, and a binary original that has no
+    directly-viewable content (points to its .json/.txt companion instead)."""
+    safe_name = Path(filename).name  # strip any path components — filenames only, never a traversal target
+    try:
+        return ingestion.read_artifact_content(safe_name)
+    except FileNotFoundError:
+        raise HTTPException(status_code=404, detail=f"No artifact named '{safe_name}'.")
 
 
 @app.get("/api/watcher/status")

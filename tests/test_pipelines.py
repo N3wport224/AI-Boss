@@ -1102,3 +1102,61 @@ def test_compare_pipelines_404s_when_either_slug_is_unknown():
 
     assert client.get("/api/pipelines/compare", params={"a": "solo", "b": "does_not_exist"}).status_code == 404
     assert client.get("/api/pipelines/compare", params={"a": "does_not_exist", "b": "solo"}).status_code == 404
+
+
+# ---- Batch 12: validate a pipeline without saving or launching ----
+
+def test_validate_accepts_a_well_formed_definition_without_persisting_it():
+    payload = {
+        "name": "Validate Only Should Not Persist",
+        "steps": [{"tier": "automation", "name": "fetch_raw_metrics", "inputs": {"signups": 1, "churn": 1, "revenue": 1}}],
+    }
+    res = client.post("/api/pipelines/validate", json=payload)
+    assert res.status_code == 200
+    body = res.json()
+    assert body["valid"] is True
+    assert body["pipeline"]["slug"] == "validate_only_should_not_persist"
+
+    # Never actually written to disk, and never appears among saved pipelines.
+    assert not (pipeline_store.PIPELINES_DIR / "validate_only_should_not_persist.yaml").exists()
+    assert not any(p["slug"] == "validate_only_should_not_persist" for p in client.get("/api/pipelines").json())
+
+
+def test_validate_rejects_a_reference_to_a_nonexistent_module():
+    res = client.post(
+        "/api/pipelines/validate",
+        json={"name": "Bad Validate", "steps": [{"tier": "automation", "name": "does_not_exist"}]},
+    )
+    assert res.status_code == 400
+    assert not (pipeline_store.PIPELINES_DIR / "bad_validate.yaml").exists()
+
+
+def test_validate_rejects_a_mapping_to_an_undeclared_output():
+    res = client.post(
+        "/api/pipelines/validate",
+        json={
+            "name": "Bad Mapping Validate",
+            "steps": [
+                {"tier": "automation", "name": "fetch_raw_metrics", "inputs": {}},
+                {
+                    "tier": "workflow",
+                    "name": "analyze_metrics",
+                    "inputs": {},
+                    "mappings": {"risk_threshold": {"step": 0, "output": "not_a_real_output"}},
+                },
+            ],
+        },
+    )
+    assert res.status_code == 400
+
+
+def test_validate_does_not_launch_a_real_run():
+    """Unlike POST /api/pipelines (even with launch: false, which still
+    saves), /api/pipelines/validate must never touch run history at all."""
+    before = len(client.get("/api/runs?limit=10000").json())
+    client.post(
+        "/api/pipelines/validate",
+        json={"name": "No Run From Validate", "steps": [{"tier": "automation", "name": "fetch_raw_metrics"}]},
+    )
+    after = len(client.get("/api/runs?limit=10000").json())
+    assert after == before

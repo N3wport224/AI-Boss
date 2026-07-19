@@ -1,3 +1,4 @@
+import io
 import shutil
 
 import pytest
@@ -325,3 +326,128 @@ def test_purge_never_touches_state_store_or_pipelines(tmp_path):
     assert client.get("/api/health").json()["checks"][0]["ok"] is True
 
     shutil.rmtree(pipeline_store.PIPELINES_DIR, ignore_errors=True)
+
+
+# ---- Batch 12: artifact content viewer ----
+
+def test_view_content_of_a_csv_sidecar_json_renders_as_a_table():
+    client.post("/api/ingest/csv", files={"file": ("view_me.csv", b"name,revenue\nAcme,100\nBeta,200\n", "text/csv")})
+    sidecar = next(f["name"] for f in client.get("/api/artifacts").json() if f["name"].endswith(".json"))
+
+    res = client.get(f"/api/artifacts/{sidecar}/content")
+    assert res.status_code == 200
+    body = res.json()
+    assert body["kind"] == "table"
+    assert body["truncated"] is False
+    assert body["content"] == [{"name": "Acme", "revenue": "100"}, {"name": "Beta", "revenue": "200"}]
+
+
+def test_view_content_of_the_raw_csv_original_also_renders_as_a_table():
+    client.post("/api/ingest/csv", files={"file": ("view_raw.csv", b"a,b\n1,2\n", "text/csv")})
+    raw = next(f["name"] for f in client.get("/api/artifacts").json() if f["name"].endswith(".csv"))
+
+    res = client.get(f"/api/artifacts/{raw}/content")
+    assert res.status_code == 200
+    body = res.json()
+    assert body["kind"] == "table"
+    assert body["content"] == [{"a": "1", "b": "2"}]
+
+
+def test_view_content_of_a_pdf_text_sidecar_renders_as_text():
+    from pypdf import PdfWriter
+
+    writer = PdfWriter()
+    writer.add_blank_page(width=72, height=72)
+    buf = io.BytesIO()
+    writer.write(buf)
+    client.post("/api/ingest/pdf", files={"file": ("view_pdf.pdf", buf.getvalue(), "application/pdf")})
+
+    txt_name = next(f["name"] for f in client.get("/api/artifacts").json() if f["name"].endswith(".txt"))
+    res = client.get(f"/api/artifacts/{txt_name}/content")
+    assert res.status_code == 200
+    body = res.json()
+    assert body["kind"] == "text"
+    assert body["truncated"] is False
+
+
+def test_view_content_of_a_directly_uploaded_json_object_renders_as_json():
+    client.post("/api/ingest/json", files={"file": ("view_obj.json", b'{"a": 1, "b": 2}', "application/json")})
+    name = next(f["name"] for f in client.get("/api/artifacts").json() if f["name"].endswith(".json"))
+
+    res = client.get(f"/api/artifacts/{name}/content")
+    body = res.json()
+    assert body["kind"] == "json"
+    assert body["content"] == {"a": 1, "b": 2}
+
+
+def test_view_content_of_a_binary_original_is_marked_unsupported():
+    from openpyxl import Workbook
+
+    workbook = Workbook()
+    sheet = workbook.active
+    sheet.append(["x", "y"])
+    sheet.append([1, 2])
+    buf = io.BytesIO()
+    workbook.save(buf)
+    client.post(
+        "/api/ingest/xlsx",
+        files={"file": ("view_bin.xlsx", buf.getvalue(), "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")},
+    )
+    xlsx_name = next(f["name"] for f in client.get("/api/artifacts").json() if f["name"].endswith(".xlsx"))
+
+    res = client.get(f"/api/artifacts/{xlsx_name}/content")
+    body = res.json()
+    assert body["kind"] == "unsupported"
+    assert body["content"] is None
+    assert "companion" in body["message"]
+
+
+def test_view_content_of_unknown_artifact_404s():
+    res = client.get("/api/artifacts/does_not_exist.json/content")
+    assert res.status_code == 404
+
+
+def test_view_content_rejects_path_traversal_in_filename():
+    res = client.get("/api/artifacts/..%2F..%2Fetc%2Fpasswd/content")
+    assert res.status_code == 404
+
+
+# ---- Batch 12: bulk tag artifacts ----
+
+def test_bulk_tag_adds_to_files_own_existing_tags():
+    client.post("/api/ingest/csv", files={"file": ("bulk_a.csv", b"x,y\n951,952\n", "text/csv")})
+    client.post("/api/ingest/csv", files={"file": ("bulk_b.csv", b"x,y\n953,954\n", "text/csv")})
+    files = client.get("/api/artifacts").json()
+    a_name = next(f["name"] for f in files if f["name"].endswith("bulk_a.csv"))
+    b_name = next(f["name"] for f in files if f["name"].endswith("bulk_b.csv"))
+
+    client.put(f"/api/artifacts/{a_name}/tags", json={"tags": ["preexisting"]})
+
+    res = client.post("/api/artifacts/bulk-tags", json={"filenames": [a_name, b_name], "tag": "reviewed"})
+    assert res.status_code == 200
+    body = res.json()
+    assert body["tag"] == "reviewed"
+    assert set(body["tagged"]) == {a_name, b_name}
+
+    updated = client.get("/api/artifacts").json()
+    a_tags = next(f["tags"] for f in updated if f["name"] == a_name)
+    b_tags = next(f["tags"] for f in updated if f["name"] == b_name)
+    assert set(a_tags) == {"preexisting", "reviewed"}
+    assert set(b_tags) == {"reviewed"}
+
+
+def test_bulk_tag_skips_unknown_filenames_without_failing():
+    client.post("/api/ingest/csv", files={"file": ("bulk_c.csv", b"x,y\n955,956\n", "text/csv")})
+    c_name = next(f["name"] for f in client.get("/api/artifacts").json() if f["name"].endswith("bulk_c.csv"))
+
+    res = client.post(
+        "/api/artifacts/bulk-tags",
+        json={"filenames": [c_name, "totally_made_up_file.csv"], "tag": "batched"},
+    )
+    assert res.status_code == 200
+    assert res.json()["tagged"] == [c_name]
+
+
+def test_bulk_tag_rejects_a_blank_tag():
+    res = client.post("/api/artifacts/bulk-tags", json={"filenames": [], "tag": "   "})
+    assert res.status_code == 400

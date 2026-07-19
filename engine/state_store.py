@@ -101,6 +101,15 @@ CREATE TABLE IF NOT EXISTS breaker_overrides (
     updated_at TEXT NOT NULL,
     PRIMARY KEY (tier, name)
 );
+
+CREATE TABLE IF NOT EXISTS input_presets (
+    tier TEXT NOT NULL,
+    name TEXT NOT NULL,
+    preset_name TEXT NOT NULL,
+    inputs TEXT NOT NULL,
+    created_at TEXT NOT NULL,
+    PRIMARY KEY (tier, name, preset_name)
+);
 """
 
 
@@ -589,6 +598,38 @@ class StateStore:
         with self._lock:
             rows = self._conn.execute("SELECT tier, name, threshold FROM breaker_overrides").fetchall()
         return {(tier, name): threshold for tier, name, threshold in rows}
+
+    def save_input_preset(self, tier: str, name: str, preset_name: str, inputs: dict) -> dict:
+        """A named set of input values for a module's own card, so a user
+        can reapply a combination they use often instead of retyping it —
+        saving under a name that already exists for this module overwrites
+        it, same convention as re-saving a pipeline in the builder."""
+        created_at = datetime.now(timezone.utc).isoformat()
+        with self._lock:
+            self._conn.execute(
+                "INSERT INTO input_presets (tier, name, preset_name, inputs, created_at) VALUES (?, ?, ?, ?, ?) "
+                "ON CONFLICT(tier, name, preset_name) DO UPDATE SET inputs = excluded.inputs, created_at = excluded.created_at",
+                (tier, name, preset_name, json.dumps(inputs), created_at),
+            )
+            self._conn.commit()
+        return {"tier": tier, "name": name, "preset_name": preset_name, "inputs": inputs, "created_at": created_at}
+
+    def list_input_presets(self, tier: str, name: str) -> list[dict]:
+        with self._lock:
+            rows = self._conn.execute(
+                "SELECT preset_name, inputs, created_at FROM input_presets WHERE tier = ? AND name = ? ORDER BY preset_name",
+                (tier, name),
+            ).fetchall()
+        return [{"preset_name": r[0], "inputs": json.loads(r[1]), "created_at": r[2]} for r in rows]
+
+    def delete_input_preset(self, tier: str, name: str, preset_name: str) -> bool:
+        with self._lock:
+            cursor = self._conn.execute(
+                "DELETE FROM input_presets WHERE tier = ? AND name = ? AND preset_name = ?",
+                (tier, name, preset_name),
+            )
+            self._conn.commit()
+            return cursor.rowcount > 0
 
     def record_audit_event(self, action: str, detail: str) -> dict:
         """Append-only log of destructive/administrative actions (run purge,

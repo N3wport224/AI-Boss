@@ -1250,6 +1250,95 @@ only a JSON parse error or timeout falls back to an empty issue list.
      Confirmed stable across 6 consecutive full clean-state runs after the
      fix (2 of the preceding ~10 runs had failed on this same test before
      it). 311 tests total.
+107. **Add pipeline builder validation without saving** (`POST
+     /api/pipelines/validate`): calls `pipeline_store.validate_pipeline()` —
+     the same module-reference/mapping/condition/retry checks a real save
+     already runs — and returns its result without ever calling
+     `save_pipeline()` or launching a run. A **Validate** button next to
+     **Save** / **Save & Launch** in the builder.
+108. **Add importing a pipeline from a URL** (`POST
+     /api/pipelines/import-url`): the same YAML-parse-then-`save_pipeline()`
+     path `POST /api/pipelines/import` already uses for an uploaded file,
+     fed by Batch 10's `ingestion.fetch_url_bytes()` instead of a direct
+     upload. A URL input next to **Import pipeline…** in the builder header.
+109. **Add duplicating an existing module** (`webapp/scaffold.py`'s
+     `duplicate_module()`; `POST /api/modules/{tier}/{name}/duplicate`):
+     complements Batch 11's from-scratch scaffold with a working starting
+     point — copies the source module's manifest (inputs/outputs/
+     `circuit_breaker_threshold` and all) and its Python source, renaming
+     the class and its `name = "..."` attribute via a targeted, line-
+     anchored regex replace. Two real bugs surfaced and were fixed while
+     wiring this up against the actual bundled modules (not just synthetic
+     scaffolded ones): the source file path was wrongly assumed to match
+     the manifest's own `name` (e.g. `fetch_raw_metrics`), when a hand-
+     written module's file can be named anything (`example_automation.py`)
+     — fixed by deriving the path from the entrypoint's module segment
+     instead; and the description-replacement regex only matched double-
+     quoted strings, missing scaffold-generated modules whose description
+     is embedded via `repr()` (single-quoted for a plain string) — fixed
+     by matching either quote style. A **⧉** button on every module card.
+110. **Add an artifact content viewer** (`ingestion.read_artifact_content()`;
+     `GET /api/artifacts/{filename}/content`): structured records (a CSV/
+     XLSX `.json` sidecar, or a raw `.csv` original) render as a capped
+     table (`MAX_ARTIFACT_PREVIEW_ROWS`), extracted PDF text (`.txt`
+     sidecar) as capped plain text (`MAX_ARTIFACT_PREVIEW_CHARS`), a
+     directly-uploaded `.json` as either depending on whether its top-level
+     shape is a list or a single object, and a binary original (`.pdf`,
+     `.xlsx`) that has no directly-viewable content points to its `.txt`/
+     `.json` companion instead of erroring. A **View** button per artifact
+     row expands an inline content panel, mirroring the run-history
+     drill-down's expand-in-place pattern rather than a separate page.
+111. **Add saved input presets per module** (new `input_presets` table —
+     `(tier, name, preset_name)` primary key, `inputs` JSON, `created_at`;
+     `save_input_preset()` / `list_input_presets()` / `delete_input_preset()`
+     on `StateStore`; `GET`/`POST /api/modules/{tier}/{name}/presets`,
+     `DELETE .../presets/{preset_name}`): a named set of input values for a
+     module's own card, reusable later instead of retyping the same
+     combination. Reuses the existing `field__{tier}__{name}__{fieldName}`
+     DOM id convention `runModule()` already relies on to collect current
+     values (for saving) and to write values back (for loading) — no new
+     field-tracking mechanism needed. A **Presets…** dropdown plus
+     **Load** / **Save as…** / **Delete** buttons on any module card that
+     declares at least one input field.
+112. **Add bulk-tagging artifacts** (`POST /api/artifacts/bulk-tags`):
+     applies one tag to every selected file's *existing* tag set (a union,
+     not a replace) — reads each file's current tags via
+     `store.all_artifact_tags()`, adds the new tag, and re-saves through
+     the same `set_artifact_tags()` a single-file edit already uses.
+     Unknown filenames in the batch are skipped rather than failing the
+     whole request. Checkboxes per row plus a header "select all", mirroring
+     Recent Runs' existing bulk-select/bulk-purge pattern exactly, with an
+     **Apply tag to selected (N)** button that enables only once something's
+     checked.
+113. **Add tests for all of Batch 12**: pipeline validation accepting a
+     well-formed definition without persisting it or touching run history,
+     and rejecting a bad module reference / bad mapping the same way a real
+     save would; URL-based pipeline import's happy path, a bad-module
+     rejection, a non-mapping YAML document, malformed YAML, a 404
+     upstream, and an oversized response, via a real local `HTTPServer`
+     fixture; module duplication's generated source actually parsing as
+     valid Python *and* its class actually instantiating and running (not
+     just a syntax check), the source module's own inputs/outputs schema
+     surviving into the copy, an overridable description, a 400-equivalent
+     for an unknown source module, and a collision with an existing target
+     — both at the `webapp.scaffold` function level and through the real
+     HTTP endpoint against an actual bundled module (`fetch_raw_metrics`),
+     with an autouse fixture cleaning up every file it creates in the real,
+     git-tracked source directories; the artifact viewer's table/text/json/
+     unsupported `kind` branches (including a directly-uploaded JSON object
+     vs. a CSV/XLSX sidecar array), a 404 for an unknown artifact, and a
+     path-traversal attempt in the filename also 404ing rather than
+     resolving outside `artifacts/`; input presets' save-list-delete round
+     trip, per-module scoping (the same preset name in two different
+     modules stays independent), overwrite-on-resave, and 404s for an
+     unknown module on every preset endpoint; bulk-tagging adding to (not
+     replacing) a file's existing tags, skipping an unknown filename
+     without failing the batch, and rejecting a blank tag — with test
+     fixture content deliberately kept byte-distinct from other fixtures
+     already in the same file after a real content-hash dedup collision
+     surfaced on a full-suite run (`bulk_a.csv`'s placeholder `1,2` content
+     collided with an existing `a.csv` fixture earlier in the same file).
+     348 tests total, stable across repeated clean full-suite runs.
 
 ## 9. Roadmap
 

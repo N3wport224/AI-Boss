@@ -70,6 +70,7 @@ const builderStepsEl = document.getElementById("builder-steps");
 const builderAddStepBtn = document.getElementById("builder-add-step");
 const builderLaunchBtn = document.getElementById("builder-launch");
 const builderSaveOnlyBtn = document.getElementById("builder-save-only");
+const builderValidateBtn = document.getElementById("builder-validate");
 const builderErrorEl = document.getElementById("builder-error");
 const builderTrackerEl = document.getElementById("builder-tracker");
 const builderResultEl = document.getElementById("builder-result");
@@ -1352,6 +1353,7 @@ function renderCard(module) {
           ${favoriteButtonHtml(favKey)}
           <button class="module-toggle-btn ${runtimeEnabled ? "" : "off"}" data-tier="${module.tier}" data-name="${module.name}" data-enabled="${runtimeEnabled}" type="button" title="${runtimeEnabled ? "Disable this module" : "Enable this module"}">${runtimeEnabled ? "⏻ On" : "⏻ Off"}</button>
           <button class="code-toggle" data-tier="${module.tier}" data-name="${module.name}" type="button" title="View source">&lt;/&gt;</button>
+          <button class="module-duplicate-btn" data-tier="${module.tier}" data-name="${module.name}" type="button" title="Duplicate this module as a starting point for a new one">⧉</button>
           <div class="status-slot">${tripped ? statusPill("tripped") : statusPill(module.status)}</div>
         </div>
       </div>
@@ -1375,6 +1377,16 @@ function renderCard(module) {
       ${breakerHtml}
       ${disabledHtml}
       <div class="code-panel hidden"></div>
+      ${
+        module.inputs.length
+          ? `<div class="input-presets-row" data-tier="${module.tier}" data-name="${module.name}">
+               <select class="input-preset-select" title="Saved input presets"><option value="">Presets…</option></select>
+               <button class="btn btn-secondary btn-small input-preset-load-btn" type="button">Load</button>
+               <button class="btn btn-secondary btn-small input-preset-save-btn" type="button">Save as…</button>
+               <button class="btn btn-secondary btn-small input-preset-delete-btn" type="button">Delete</button>
+             </div>`
+          : ""
+      }
       ${fieldsHtml}
       <div class="run-row">
         <button class="btn btn-run" data-tier="${module.tier}" data-name="${module.name}" ${blocked ? "disabled" : ""}>Run</button>
@@ -1478,6 +1490,9 @@ function renderSections(modulesByTier) {
   sectionsEl.querySelectorAll(".code-toggle").forEach((btn) => {
     btn.addEventListener("click", () => toggleModuleSource(btn.dataset.tier, btn.dataset.name));
   });
+  sectionsEl.querySelectorAll(".module-duplicate-btn").forEach((btn) => {
+    btn.addEventListener("click", () => duplicateModule(btn.dataset.tier, btn.dataset.name));
+  });
   sectionsEl.querySelectorAll(".breaker-reset-btn").forEach((btn) => {
     btn.addEventListener("click", async () => {
       try {
@@ -1535,11 +1550,104 @@ function renderSections(modulesByTier) {
       }
     });
   });
+  sectionsEl.querySelectorAll(".input-presets-row").forEach((row) => {
+    wireInputPresetsRow(row.dataset.tier, row.dataset.name);
+    loadInputPresetsIntoRow(row.dataset.tier, row.dataset.name);
+  });
   wireFavoriteToggles(sectionsEl);
   wireVariableChips(sectionsEl);
   applyCollapsedState(sectionsEl);
   wireCollapseToggles(sectionsEl);
   applySearchFilter();
+}
+
+// ---- Saved input presets per module ----
+
+function presetsRowFor(tier, name) {
+  return sectionsEl.querySelector(`.input-presets-row[data-tier="${CSS.escape(tier)}"][data-name="${CSS.escape(name)}"]`);
+}
+
+async function loadInputPresetsIntoRow(tier, name) {
+  const row = presetsRowFor(tier, name);
+  if (!row) return;
+  const select = row.querySelector(".input-preset-select");
+  try {
+    const res = await fetch(`/api/modules/${tier}/${name}/presets`);
+    const presets = await res.json();
+    const previousValue = select.value;
+    select.innerHTML =
+      `<option value="">Presets…</option>` +
+      presets.map((p) => `<option value="${escapeHtml(p.preset_name)}">${escapeHtml(p.preset_name)}</option>`).join("");
+    if (presets.some((p) => p.preset_name === previousValue)) select.value = previousValue;
+  } catch {
+    // Presets are a convenience, not core functionality — a failed fetch just leaves the dropdown empty.
+  }
+}
+
+function wireInputPresetsRow(tier, name) {
+  const row = presetsRowFor(tier, name);
+  if (!row) return;
+  const select = row.querySelector(".input-preset-select");
+  const card = row.closest(".card");
+
+  row.querySelector(".input-preset-load-btn").addEventListener("click", async () => {
+    const presetName = select.value;
+    if (!presetName) return;
+    try {
+      const res = await fetch(`/api/modules/${tier}/${name}/presets`);
+      const presets = await res.json();
+      const preset = presets.find((p) => p.preset_name === presetName);
+      if (!preset) return;
+      Object.entries(preset.inputs).forEach(([fieldName, value]) => {
+        const el = card.querySelector(`#${CSS.escape(fieldId(tier, name, fieldName))}`);
+        if (!el) return;
+        if (el.type === "checkbox") el.checked = Boolean(value);
+        else el.value = value ?? "";
+      });
+      showToast(`Loaded preset "${presetName}".`, "success");
+    } catch (err) {
+      showToast(`Could not load preset: ${err}`, "error");
+    }
+  });
+
+  row.querySelector(".input-preset-save-btn").addEventListener("click", async () => {
+    const presetName = prompt("Save the current values as a preset named:");
+    if (!presetName || !presetName.trim()) return;
+
+    const inputEls = card.querySelectorAll("[id^='field__']");
+    const inputs = {};
+    inputEls.forEach((el) => {
+      const fieldName = el.id.split("__").slice(3).join("__");
+      inputs[fieldName] = el.type === "checkbox" ? el.checked : el.value;
+    });
+
+    try {
+      const res = await fetch(`/api/modules/${tier}/${name}/presets`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ preset_name: presetName.trim(), inputs }),
+      });
+      if (!res.ok) throw new Error((await res.json()).detail || `HTTP ${res.status}`);
+      showToast(`Saved preset "${presetName.trim()}".`, "success");
+      await loadInputPresetsIntoRow(tier, name);
+      select.value = presetName.trim();
+    } catch (err) {
+      showToast(`Could not save preset: ${err}`, "error");
+    }
+  });
+
+  row.querySelector(".input-preset-delete-btn").addEventListener("click", async () => {
+    const presetName = select.value;
+    if (!presetName) return;
+    try {
+      const res = await fetch(`/api/modules/${tier}/${name}/presets/${encodeURIComponent(presetName)}`, { method: "DELETE" });
+      if (!res.ok) throw new Error((await res.json()).detail || `HTTP ${res.status}`);
+      showToast(`Deleted preset "${presetName}".`, "success");
+      await loadInputPresetsIntoRow(tier, name);
+    } catch (err) {
+      showToast(`Could not delete preset: ${err}`, "error");
+    }
+  });
 }
 
 async function loadModules() {
@@ -2305,6 +2413,38 @@ document.getElementById("pipeline-import-input").addEventListener("change", asyn
   e.target.value = "";
 });
 
+const pipelineImportUrlInput = document.getElementById("pipeline-import-url-input");
+const pipelineImportUrlBtn = document.getElementById("pipeline-import-url-btn");
+
+pipelineImportUrlBtn.addEventListener("click", async () => {
+  const url = pipelineImportUrlInput.value.trim();
+  if (!url) {
+    showToast("Enter a URL first.", "error");
+    return;
+  }
+
+  pipelineImportUrlBtn.disabled = true;
+  try {
+    const res = await fetch("/api/pipelines/import-url", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ url }),
+    });
+    const body = await res.json();
+    if (!res.ok) {
+      showToast(`Import failed: ${body.detail || "unknown error"}`, "error");
+      return;
+    }
+    showToast(`Imported pipeline "${body.pipeline.name}".`, "success");
+    pipelineImportUrlInput.value = "";
+    await loadSavedPipelines();
+  } catch (err) {
+    showToast(`Import failed: ${err}`, "error");
+  } finally {
+    pipelineImportUrlBtn.disabled = false;
+  }
+});
+
 builderToggleBtn.addEventListener("click", () => {
   if (builderPanelEl.classList.contains("hidden")) openBuilder();
   else closeBuilder();
@@ -2384,6 +2524,32 @@ function collectBuilderPipelinePayload() {
 
   return { name, description: builderDescriptionEl.value.trim(), steps };
 }
+
+builderValidateBtn.addEventListener("click", async () => {
+  const payload = collectBuilderPipelinePayload();
+  if (!payload) return;
+
+  builderValidateBtn.disabled = true;
+  builderValidateBtn.textContent = "Validating...";
+  try {
+    const res = await fetch("/api/pipelines/validate", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(payload),
+    });
+    const body = await res.json();
+    if (!res.ok) {
+      showBuilderError(body.detail || "This pipeline is invalid.");
+      return;
+    }
+    showToast(`"${payload.name}" looks valid — nothing saved or run.`, "success");
+  } catch (err) {
+    showBuilderError(`Request failed: ${err}`);
+  } finally {
+    builderValidateBtn.disabled = false;
+    builderValidateBtn.textContent = "Validate";
+  }
+});
 
 builderSaveOnlyBtn.addEventListener("click", async () => {
   const payload = collectBuilderPipelinePayload();
@@ -2974,6 +3140,10 @@ const purgeBtn = document.getElementById("purge-btn");
 const artifactSearchInput = document.getElementById("artifact-search");
 const artifactSearchResultsEl = document.getElementById("artifact-search-results");
 const artifactTagFilterInput = document.getElementById("artifact-tag-filter");
+const artifactBulkTagInput = document.getElementById("artifact-bulk-tag-input");
+const artifactBulkTagBtn = document.getElementById("artifact-bulk-tag-btn");
+
+const selectedArtifactNames = new Set();
 
 function formatBytes(bytes) {
   if (bytes < 1024) return `${bytes} B`;
@@ -2990,19 +3160,33 @@ async function saveArtifactTags(filename, tags) {
   return res.json();
 }
 
+function updateArtifactBulkTagBtn() {
+  artifactBulkTagBtn.disabled = selectedArtifactNames.size === 0;
+  artifactBulkTagBtn.textContent = selectedArtifactNames.size
+    ? `Apply tag to selected (${selectedArtifactNames.size})`
+    : "Apply tag to selected";
+}
+
 async function loadArtifacts() {
   const tagFilter = artifactTagFilterInput.value.trim();
   const url = tagFilter ? `/api/artifacts?tag=${encodeURIComponent(tagFilter)}` : "/api/artifacts";
   const res = await fetch(url);
   const files = await res.json();
 
+  const liveNames = new Set(files.map((f) => f.name));
+  [...selectedArtifactNames].forEach((name) => {
+    if (!liveNames.has(name)) selectedArtifactNames.delete(name);
+  });
+
   if (!files.length) {
     artifactsListEl.innerHTML = `<div class="runs-empty">${
       tagFilter ? `No artifacts tagged "${escapeHtml(tagFilter)}".` : "No artifacts yet — upload a CSV or PDF above."
     }</div>`;
+    updateArtifactBulkTagBtn();
     return;
   }
 
+  const allSelected = files.every((f) => selectedArtifactNames.has(f.name));
   const rows = files
     .map((f) => {
       const tagChips = (f.tags || [])
@@ -3014,8 +3198,10 @@ async function loadArtifacts() {
           </span>`
         )
         .join("");
+      const checked = selectedArtifactNames.has(f.name) ? "checked" : "";
       return `
       <tr>
+        <td><input type="checkbox" class="artifact-select-checkbox" data-artifact="${escapeHtml(f.name)}" ${checked} /></td>
         <td>${escapeHtml(f.name)}</td>
         <td>${formatBytes(f.size_bytes)}</td>
         <td>${new Date(f.modified_at * 1000).toLocaleString()}</td>
@@ -3023,14 +3209,45 @@ async function loadArtifacts() {
           <span class="tag-chip-list">${tagChips}</span>
           <input type="text" class="tag-add-input" data-artifact="${escapeHtml(f.name)}" placeholder="+ tag" />
         </td>
+        <td><button class="btn btn-secondary btn-small artifact-view-btn" data-artifact="${escapeHtml(f.name)}" type="button">View</button></td>
+      </tr>
+      <tr class="artifact-content-row hidden" data-content-for="${escapeHtml(f.name)}">
+        <td colspan="6"></td>
       </tr>`;
     })
     .join("");
   artifactsListEl.innerHTML = `
     <table>
-      <thead><tr><th>File</th><th>Size</th><th>Modified</th><th>Tags</th></tr></thead>
+      <thead><tr>
+        <th><input type="checkbox" id="artifact-select-all" ${allSelected ? "checked" : ""} /></th>
+        <th>File</th><th>Size</th><th>Modified</th><th>Tags</th><th></th>
+      </tr></thead>
       <tbody>${rows}</tbody>
     </table>`;
+
+  artifactsListEl.querySelectorAll(".artifact-select-checkbox").forEach((checkbox) => {
+    checkbox.addEventListener("change", () => {
+      const filename = checkbox.dataset.artifact;
+      if (checkbox.checked) selectedArtifactNames.add(filename);
+      else selectedArtifactNames.delete(filename);
+      updateArtifactBulkTagBtn();
+      const selectAllCheckbox = document.getElementById("artifact-select-all");
+      if (selectAllCheckbox) selectAllCheckbox.checked = files.every((f) => selectedArtifactNames.has(f.name));
+    });
+  });
+
+  const selectAllCheckbox = document.getElementById("artifact-select-all");
+  selectAllCheckbox.addEventListener("change", () => {
+    if (selectAllCheckbox.checked) files.forEach((f) => selectedArtifactNames.add(f.name));
+    else files.forEach((f) => selectedArtifactNames.delete(f.name));
+    loadArtifacts();
+  });
+
+  updateArtifactBulkTagBtn();
+
+  artifactsListEl.querySelectorAll(".artifact-view-btn").forEach((btn) => {
+    btn.addEventListener("click", () => toggleArtifactContent(btn.dataset.artifact));
+  });
 
   artifactsListEl.querySelectorAll(".tag-chip-remove").forEach((btn) => {
     btn.addEventListener("click", async () => {
@@ -3055,6 +3272,57 @@ async function loadArtifacts() {
       await loadArtifacts();
     });
   });
+}
+
+function renderArtifactContent(body) {
+  if (body.kind === "unsupported") {
+    return `<p class="card-desc">${escapeHtml(body.message)}</p>`;
+  }
+  if (body.kind === "table") {
+    if (!body.content.length) return `<p class="card-desc">No rows.</p>`;
+    const columns = Object.keys(body.content[0]);
+    const headerRow = columns.map((c) => `<th>${escapeHtml(c)}</th>`).join("");
+    const bodyRows = body.content
+      .map((row) => `<tr>${columns.map((c) => `<td>${escapeHtml(row[c] ?? "")}</td>`).join("")}</tr>`)
+      .join("");
+    return `
+      <div class="artifact-content-table-wrap">
+        <table><thead><tr>${headerRow}</tr></thead><tbody>${bodyRows}</tbody></table>
+      </div>
+      ${body.truncated ? `<p class="card-desc">Showing the first ${body.content.length} row(s) — truncated.</p>` : ""}`;
+  }
+  if (body.kind === "json") {
+    return `<pre class="log-tab-content">${escapeHtml(JSON.stringify(body.content, null, 2))}</pre>`;
+  }
+  // "text"
+  return `
+    <pre class="log-tab-content">${escapeHtml(body.content)}</pre>
+    ${body.truncated ? `<p class="card-desc">Truncated.</p>` : ""}`;
+}
+
+async function toggleArtifactContent(filename) {
+  const row = artifactsListEl.querySelector(`.artifact-content-row[data-content-for="${CSS.escape(filename)}"]`);
+  if (!row) return;
+  const cell = row.querySelector("td");
+
+  if (!row.classList.contains("hidden")) {
+    row.classList.add("hidden");
+    return;
+  }
+
+  row.classList.remove("hidden");
+  cell.innerHTML = `<p class="card-desc">Loading…</p>`;
+  try {
+    const res = await fetch(`/api/artifacts/${encodeURIComponent(filename)}/content`);
+    const body = await res.json();
+    if (!res.ok) {
+      cell.innerHTML = `<p class="card-desc">${escapeHtml(body.detail || "Could not load this artifact.")}</p>`;
+      return;
+    }
+    cell.innerHTML = renderArtifactContent(body);
+  } catch (err) {
+    cell.innerHTML = `<p class="card-desc">Failed to load content: ${err}</p>`;
+  }
 }
 
 let artifactTagFilterDebounce = null;
@@ -3255,6 +3523,33 @@ purgeBtn.addEventListener("click", async () => {
   showToast(`Purged ${body.removed_count} artifact file(s).`, "success");
   await loadArtifacts();
   await loadAuditLog();
+});
+
+artifactBulkTagBtn.addEventListener("click", async () => {
+  const tag = artifactBulkTagInput.value.trim();
+  if (!tag) {
+    showToast("Enter a tag first.", "error");
+    return;
+  }
+  if (!selectedArtifactNames.size) return;
+
+  try {
+    const res = await fetch("/api/artifacts/bulk-tags", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ filenames: [...selectedArtifactNames], tag }),
+    });
+    const body = await res.json();
+    if (!res.ok) {
+      showToast(body.detail || "Failed to apply tag.", "error");
+      return;
+    }
+    showToast(`Tagged ${body.tagged.length} artifact(s) with "${tag}".`, "success");
+    artifactBulkTagInput.value = "";
+    await loadArtifacts();
+  } catch (err) {
+    showToast(`Bulk tag failed: ${err}`, "error");
+  }
 });
 
 const runsPurgeHoursInput = document.getElementById("runs-purge-hours");
@@ -3793,6 +4088,28 @@ scaffoldCreateBtn.addEventListener("click", async () => {
     scaffoldCreateBtn.textContent = "Scaffold module";
   }
 });
+
+async function duplicateModule(tier, name) {
+  const newName = prompt(`Duplicate "${name}" as a new module — enter a name for the copy:`);
+  if (!newName || !newName.trim()) return;
+
+  try {
+    const res = await fetch(`/api/modules/${tier}/${name}/duplicate`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ new_name: newName.trim() }),
+    });
+    const body = await res.json();
+    if (!res.ok) {
+      showToast(body.detail || "Failed to duplicate this module.", "error");
+      return;
+    }
+    showToast(`Duplicated "${name}" as "${body.name}" (${body.tier}).`, "success");
+    await loadModules();
+  } catch (err) {
+    showToast(`Duplicate failed: ${err}`, "error");
+  }
+}
 
 // ---- Command palette (Ctrl/Cmd+K) ----
 

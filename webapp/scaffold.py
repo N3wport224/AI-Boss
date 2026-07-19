@@ -8,6 +8,8 @@ from pathlib import Path
 
 import yaml
 
+from engine.registry import load_manifests
+
 TIER_PACKAGE = {"automation": "automations", "workflow": "workflows", "agent": "agents"}
 TIER_ENUM = {"automation": "AUTOMATION", "workflow": "WORKFLOW", "agent": "AGENT"}
 
@@ -93,4 +95,75 @@ def scaffold_module(tier: str, name: str, description: str, tier_dirs: dict) -> 
         "class_name": class_name,
         "yaml_path": str(yaml_path),
         "py_path": str(py_path),
+    }
+
+
+def duplicate_module(tier: str, source_name: str, new_name: str, description: str, tier_dirs: dict) -> dict:
+    """Clone an EXISTING module's manifest + Python source under a new name
+    in the same tier — a working starting point (not an empty stub) for a
+    new module that's similar to one that already exists, complementing
+    `scaffold_module`'s from-scratch stub. Renames the class and its
+    `name = "..."` attribute inside the copied source via a targeted string
+    replace: every module in this repo, generated or hand-written, follows
+    the same `class X(BaseModule): name = "y"` single-line shape, so this
+    holds for anything actually on disk to duplicate from. Leaves the rest
+    of the source (including `run()`) untouched — it's a starting point to
+    edit, not a black box."""
+    if tier not in TIER_PACKAGE:
+        raise ScaffoldError(f"Unknown tier '{tier}'. Must be one of: automation, workflow, agent.")
+
+    directory = Path(tier_dirs[tier])
+    source_manifest = next((m for m in load_manifests(directory) if m.get("name") == source_name), None)
+    if source_manifest is None:
+        raise ScaffoldError(f"No {tier} module named '{source_name}' to duplicate.")
+
+    new_module_name = _module_name_from(new_name)
+    new_class_name = _class_name_from(new_module_name)
+    new_description = description.strip() or source_manifest.get("description", "")
+
+    new_yaml_path = directory / f"{new_module_name}.yaml"
+    new_py_path = directory / f"{new_module_name}.py"
+    if new_yaml_path.exists() or new_py_path.exists():
+        raise ScaffoldError(f"A module named '{new_module_name}' already exists in this tier.")
+
+    module_path, old_class_name = source_manifest["entrypoint"].split(":")
+    # The manifest's own `name` (e.g. "fetch_raw_metrics") is its identity in
+    # the registry, not necessarily its filename -- a hand-written module's
+    # source file can be named anything (e.g. example_automation.py), so the
+    # real source file is whatever the entrypoint's module path resolves to.
+    source_py_path = directory / f"{module_path.rsplit('.', 1)[-1]}.py"
+    if not source_py_path.exists():
+        raise ScaffoldError(f"Could not find the source file for '{source_name}'.")
+
+    # Anchored to the exact 4-space-indented class-attribute line every
+    # module in this repo uses, so an incidental "name = ..."/"description =
+    # ..."-shaped phrase inside a docstring or comment is never mistaken for
+    # the real attribute.
+    _QUOTED_STRING = r"(?:'[^']*'|\"[^\"]*\")"
+    new_source = re.sub(
+        rf"class\s+{re.escape(old_class_name)}\s*\(", f"class {new_class_name}(", source_py_path.read_text(), count=1
+    )
+    new_source = re.sub(rf"^    name\s*=\s*{_QUOTED_STRING}", f'    name = "{new_module_name}"', new_source, count=1, flags=re.MULTILINE)
+    if description.strip():
+        new_source = re.sub(
+            rf"^    description\s*=\s*{_QUOTED_STRING}",
+            f"    description = {new_description!r}",
+            new_source,
+            count=1,
+            flags=re.MULTILINE,
+        )
+    new_py_path.write_text(new_source)
+
+    new_manifest = dict(source_manifest)
+    new_manifest["name"] = new_module_name
+    new_manifest["entrypoint"] = f"{TIER_PACKAGE[tier]}.{new_module_name}:{new_class_name}"
+    new_manifest["description"] = new_description
+    new_yaml_path.write_text(yaml.safe_dump(new_manifest, sort_keys=False))
+
+    return {
+        "tier": tier,
+        "name": new_module_name,
+        "class_name": new_class_name,
+        "yaml_path": str(new_yaml_path),
+        "py_path": str(new_py_path),
     }

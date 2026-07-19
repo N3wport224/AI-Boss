@@ -611,6 +611,29 @@ A few things live in the header/subheader on every page load:
   otherwise asks you to hand-write — and it's discoverable immediately, no
   restart needed.
 
+## Pipeline validation/import, module duplication, artifact viewing, and presets
+
+- **Validate a pipeline without saving** — a **Validate** button next to
+  **Save** / **Save & Launch** checks the current builder definition
+  (module references, mappings, condition/retry shapes) and reports errors
+  without writing anything to disk or launching a run.
+- **Import a pipeline from a URL** — paste a link to a `.yaml` pipeline
+  export next to **Import pipeline…** to bring it in the same way an
+  uploaded file already does.
+- **Duplicate an existing module** — a **⧉** button on any module card
+  clones its manifest and source under a new name in the same tier, a
+  working starting point (keeps the original's inputs/outputs/`run()`
+  logic) rather than an empty stub.
+- **Artifact content viewer** — a **View** button on each ingested artifact
+  expands its full extracted content inline — a table for structured
+  records, plain text for extracted PDF text — not just a search-result
+  snippet.
+- **Saved input presets** — save the current values in a module card's
+  input form under a name, then reload that exact combination later with
+  one click instead of retyping it.
+- **Bulk tag artifacts** — select multiple ingested files with checkboxes
+  and apply one tag to all of them at once, instead of one at a time.
+
 ## Tech stack
 
 - **Language:** Python 3.11+ — first-class async/sync support and native SDKs

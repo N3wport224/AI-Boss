@@ -1105,6 +1105,14 @@ body.density-compact .tier-section {
 
 .builder-header-actions {
   flex-shrink: 0;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+
+.builder-header-actions .artifact-search-input {
+  width: 220px;
 }
 
 .builder-panel.hidden {
@@ -1904,6 +1912,25 @@ body.density-compact .tier-section {
   font-size: 0.8rem;
 }
 
+.input-presets-row {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  margin-bottom: 10px;
+  flex-wrap: wrap;
+}
+
+.input-presets-row .input-preset-select {
+  flex: 1;
+  min-width: 100px;
+  background: var(--bg-elevated);
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  color: var(--text);
+  padding: 5px 6px;
+  font-size: 0.8rem;
+}
+
 .webhook-url {
   flex: 1;
   min-width: 0;
@@ -1943,6 +1970,33 @@ body.density-compact .tier-section {
 
 .dag-scroll {
   overflow-x: auto;
+}
+
+.artifact-content-row td {
+  padding: 12px;
+  background: var(--bg-elevated);
+}
+
+.artifact-content-table-wrap {
+  overflow-x: auto;
+  max-height: 320px;
+  overflow-y: auto;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+}
+
+.artifact-content-table-wrap table {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 0.82rem;
+}
+
+.artifact-content-table-wrap th,
+.artifact-content-table-wrap td {
+  padding: 6px 10px;
+  border-bottom: 1px solid var(--border);
+  text-align: left;
+  white-space: nowrap;
 }
 
 .history-panel {
@@ -2094,6 +2148,17 @@ body.density-compact .tier-section {
 
 .ingest-url-row .artifact-search-input {
   flex: 1;
+}
+
+.artifacts-bulk-tag-row {
+  display: flex;
+  gap: 8px;
+  margin: 10px 0;
+}
+
+.artifacts-bulk-tag-row .artifact-search-input {
+  flex: 1;
+  max-width: 280px;
 }
 
 .artifacts-row {
@@ -2270,6 +2335,22 @@ body.density-compact .tier-section {
 }
 
 .code-toggle:hover {
+  border-color: var(--accent-automation);
+  color: var(--text);
+}
+
+.module-duplicate-btn {
+  background: none;
+  border: 1px solid var(--border);
+  color: var(--text-dim);
+  border-radius: 6px;
+  padding: 3px 8px;
+  font-size: 0.9rem;
+  line-height: 1;
+  cursor: pointer;
+}
+
+.module-duplicate-btn:hover {
   border-color: var(--accent-automation);
   color: var(--text);
 }

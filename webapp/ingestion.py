@@ -339,6 +339,57 @@ def search_artifacts(query: str, max_results: int = 20) -> list[dict]:
     return results
 
 
+MAX_ARTIFACT_PREVIEW_CHARS = 20_000
+MAX_ARTIFACT_PREVIEW_ROWS = 200
+
+
+def read_artifact_content(filename: str) -> dict:
+    """Full (but capped) extracted content for one ingested artifact, for
+    the dashboard's artifact viewer -- not just a search-result snippet.
+    `.json` sidecars (CSV/XLSX records) pretty-print and cap at
+    MAX_ARTIFACT_PREVIEW_ROWS records; `.txt` sidecars (PDF text) and raw
+    `.csv` uploads cap at MAX_ARTIFACT_PREVIEW_CHARS/rows respectively.
+    A binary original (`.pdf`, `.xlsx`) isn't directly viewable as text —
+    its `.txt`/`.json` sidecar (ingested alongside it, listed as its own
+    artifact) is where the real content lives."""
+    path = ARTIFACTS_DIR / filename
+    if not path.is_file():
+        raise FileNotFoundError(filename)
+
+    suffix = path.suffix.lower()
+    if suffix == ".json":
+        try:
+            data = json.loads(path.read_text())
+        except (json.JSONDecodeError, UnicodeDecodeError):
+            return {"kind": "text", "content": path.read_text(errors="replace")[:MAX_ARTIFACT_PREVIEW_CHARS], "truncated": True}
+        if isinstance(data, list):
+            return {
+                "kind": "table",
+                "content": data[:MAX_ARTIFACT_PREVIEW_ROWS],
+                "truncated": len(data) > MAX_ARTIFACT_PREVIEW_ROWS,
+            }
+        return {"kind": "json", "content": data, "truncated": False}
+
+    if suffix == ".txt":
+        text = path.read_text(errors="replace")
+        return {"kind": "text", "content": text[:MAX_ARTIFACT_PREVIEW_CHARS], "truncated": len(text) > MAX_ARTIFACT_PREVIEW_CHARS}
+
+    if suffix == ".csv":
+        records = csv_bytes_to_records(path.read_bytes())
+        return {
+            "kind": "table",
+            "content": records[:MAX_ARTIFACT_PREVIEW_ROWS],
+            "truncated": len(records) > MAX_ARTIFACT_PREVIEW_ROWS,
+        }
+
+    return {
+        "kind": "unsupported",
+        "content": None,
+        "truncated": False,
+        "message": f"'{suffix}' isn't directly viewable — look for this file's .json or .txt companion instead.",
+    }
+
+
 def purge_old_artifacts(older_than_hours: float) -> list[str]:
     """Delete files under artifacts/ older than the given age.
 
