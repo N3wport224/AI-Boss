@@ -190,6 +190,19 @@ def test_breakers_listing_reports_failure_counts_below_threshold():
     assert entry["tripped"] is False
 
 
+def test_breakers_csv_export_has_a_header_and_a_row_for_a_tracked_module():
+    _fail_http_request_once()
+
+    res = client.get("/api/breakers.csv")
+    assert res.status_code == 200
+    assert res.headers["content-type"].startswith("text/csv")
+    assert "attachment; filename=breakers.csv" in res.headers["content-disposition"]
+
+    lines = res.text.strip().splitlines()
+    assert lines[0] == "tier,name,consecutive_failures,tripped,updated_at"
+    assert any(line.startswith("automation,http_request,") for line in lines[1:])
+
+
 def test_saved_pipeline_containing_a_tripped_module_is_blocked():
     for _ in range(3):
         _fail_http_request_once()

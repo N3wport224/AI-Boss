@@ -789,6 +789,26 @@ def list_breakers():
     return store.all_module_health()
 
 
+@app.get("/api/breakers.csv")
+def breakers_csv():
+    """Same breaker-state list as GET /api/breakers, as a downloadable CSV —
+    mirrors every other CSV export in this app. A literal path, not a
+    suffix on a dynamic segment, so there's no route-ordering conflict
+    with /api/breakers/{tier}/{name}/reset (also a different HTTP method)."""
+    buffer = io.StringIO()
+    writer = csv.DictWriter(
+        buffer, fieldnames=["tier", "name", "consecutive_failures", "tripped", "updated_at"]
+    )
+    writer.writeheader()
+    for entry in store.all_module_health():
+        writer.writerow(entry)
+    return StreamingResponse(
+        iter([buffer.getvalue()]),
+        media_type="text/csv",
+        headers={"Content-Disposition": "attachment; filename=breakers.csv"},
+    )
+
+
 @app.post("/api/breakers/{tier}/{name}/reset")
 def reset_module_breaker(tier: str, name: str):
     _manifest_by_name(tier, name)  # 404 for a module that doesn't exist
@@ -1151,6 +1171,24 @@ def export_pipeline(slug: str):
     if not path.exists():
         raise HTTPException(status_code=404, detail=f"No saved pipeline named '{slug}'.")
     return FileResponse(path, filename=f"{slug}.yaml", media_type="application/x-yaml")
+
+
+@app.get("/api/pipelines/{slug}/export.json")
+def export_pipeline_json(slug: str):
+    """The same pipeline definition as GET /api/pipelines/{slug}/export,
+    just serialized as JSON instead of YAML -- for a user or tool that
+    prefers JSON. Not re-importable via POST /api/pipelines/import, which
+    only reads YAML; this is a read-only alternate format."""
+    try:
+        definition = pipeline_store.load_pipeline(slug)
+    except FileNotFoundError:
+        raise HTTPException(status_code=404, detail=f"No saved pipeline named '{slug}'.")
+    buffer = json.dumps(definition, indent=2)
+    return StreamingResponse(
+        iter([buffer]),
+        media_type="application/json",
+        headers={"Content-Disposition": f"attachment; filename={slug}.json"},
+    )
 
 
 @app.post("/api/pipelines/import")
@@ -1725,6 +1763,23 @@ def bulk_set_schedules_enabled(payload: BulkScheduleSetEnabled):
         if schedule is not None:
             updated.append(schedule_id)
     return {"updated": updated, "enabled": payload.enabled}
+
+
+@app.post("/api/schedules/bulk-export")
+def bulk_export_schedules(payload: BulkScheduleIds):
+    """Download a user-picked set of schedules as a JSON file -- the
+    finer-grained counterpart to the full-list CSV export
+    (GET /api/schedules.csv), for backing up or sharing just a handful of
+    schedules rather than the whole list. An unknown id is silently
+    skipped rather than failing the whole request."""
+    all_schedules = {s["id"]: s for s in store.list_schedules()}
+    selected = [all_schedules[sid] for sid in payload.schedule_ids if sid in all_schedules]
+    buffer = json.dumps(selected, indent=2)
+    return StreamingResponse(
+        iter([buffer]),
+        media_type="application/json",
+        headers={"Content-Disposition": "attachment; filename=schedules_selected.json"},
+    )
 
 
 @app.post("/api/schedules/bulk-clear-label")

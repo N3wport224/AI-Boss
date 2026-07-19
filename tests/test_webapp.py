@@ -329,6 +329,24 @@ def test_bulk_clear_schedule_labels_blanks_out_selected_and_skips_unknown_ids():
     client.post("/api/schedules/bulk-delete", json={"schedule_ids": [id_a, id_b, id_keep]})
 
 
+def test_bulk_export_schedules_returns_only_selected_and_skips_unknown_ids():
+    id_a = _create_test_schedule()
+    id_b = _create_test_schedule()
+    id_other = _create_test_schedule()
+
+    res = client.post("/api/schedules/bulk-export", json={"schedule_ids": [id_a, id_b, 9999999]})
+    assert res.status_code == 200
+    assert res.headers["content-type"].startswith("application/json")
+    assert "attachment; filename=schedules_selected.json" in res.headers["content-disposition"]
+
+    body = res.json()
+    returned_ids = {s["id"] for s in body}
+    assert returned_ids == {id_a, id_b}
+    assert id_other not in returned_ids
+
+    client.post("/api/schedules/bulk-delete", json={"schedule_ids": [id_a, id_b, id_other]})
+
+
 def test_bulk_delete_schedules_removes_every_selected_one():
     id_a = _create_test_schedule()
     id_b = _create_test_schedule()

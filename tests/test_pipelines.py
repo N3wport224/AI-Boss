@@ -857,6 +857,30 @@ def test_export_missing_pipeline_is_a_404():
     assert res.status_code == 404
 
 
+def test_export_pipeline_json_returns_the_same_definition_as_json():
+    payload = {
+        "name": "Export Target JSON",
+        "steps": [{"tier": "automation", "name": "fetch_raw_metrics", "inputs": {"signups": 10, "churn": 1, "revenue": 5}}],
+    }
+    res = client.post("/api/pipelines", json=payload)
+    _collect_stream(res.json()["stream_id"])
+
+    export_res = client.get("/api/pipelines/export_target_json/export.json")
+    assert export_res.status_code == 200
+    assert export_res.headers["content-type"].startswith("application/json")
+    assert "attachment; filename=export_target_json.json" in export_res.headers["content-disposition"]
+
+    exported = export_res.json()
+    assert exported["name"] == "Export Target JSON"
+    assert exported["slug"] == "export_target_json"
+    assert exported["steps"][0]["inputs"]["signups"] == 10
+
+
+def test_export_pipeline_json_missing_pipeline_is_a_404():
+    res = client.get("/api/pipelines/totally_missing/export.json")
+    assert res.status_code == 404
+
+
 def test_export_all_pipelines_returns_a_zip_with_every_saved_pipeline():
     import io
     import zipfile

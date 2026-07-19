@@ -898,6 +898,20 @@ A few things live in the header/subheader on every page load:
   file count and combined size of whatever's currently listed (respecting
   the active tag filter).
 
+## Schedule JSON export/sorting, breaker CSV export, and pipeline JSON export
+
+- **Export selected schedules as JSON** — checkbox-select multiple
+  schedules and download just those as a JSON file, complementing the
+  existing full-list CSV export.
+- **Sort schedules** — a Next run / Name dropdown above the schedule list
+  reorders it, alongside the existing keyword filter.
+- **Export circuit breaker states to CSV** — an **Export breakers CSV**
+  link near the Modules directory downloads every tracked module's breaker
+  state.
+- **Export a saved pipeline as JSON** — an **Export JSON** link on each
+  pipeline card downloads its definition in JSON, alongside the existing
+  YAML export.
+
 ## Tech stack
 
 - **Language:** Python 3.11+ — first-class async/sync support and native SDKs

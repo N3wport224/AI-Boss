@@ -2407,6 +2407,57 @@ only a JSON parse error or timeout falls back to an empty issue list.
      `memory.json` file containing a previously-imported key; uploading a
      CSV file and reloading showed "(2 files, 86 B)" next to the
      **Artifacts** heading.
+202. **Add exporting selected schedules as JSON**
+     (`POST /api/schedules/bulk-export` -- takes a `schedule_ids` list,
+     looks each one up via `store.list_schedules()`, and streams the
+     matches back as a JSON array download, silently skipping unknown
+     ids. Unlike the full-list `GET /api/schedules.csv` export, this needs
+     a POST body rather than a plain link, so the frontend uses the same
+     fetch-as-blob-then-click-a-throwaway-`<a>` technique as the Batch 24
+     bulk-artifact-zip download. An **⬇ Export selected JSON** button
+     sits next to the other schedule bulk-action buttons).
+203. **Add exporting circuit breaker states to CSV**
+     (`GET /api/breakers.csv` -- the same list `GET /api/breakers` already
+     returns, as a downloadable CSV with a `tier,name,consecutive_
+     failures,tripped,updated_at` header, mirroring every other CSV
+     export in the app. An **Export breakers CSV** link sits next to the
+     existing **Export used-by CSV** link above the Modules directory).
+204. **Add exporting a saved pipeline definition as JSON**
+     (`GET /api/pipelines/{slug}/export.json` -- the same definition the
+     existing `GET /api/pipelines/{slug}/export` YAML download returns,
+     just JSON-serialized instead; not re-importable via
+     `POST /api/pipelines/import`, which only reads YAML, so it's a
+     read-only alternate format for a user or tool that prefers JSON. The
+     existing pipeline-card **Export** button was relabeled **Export
+     YAML** and a new **Export JSON** link sits next to it. No route-
+     ordering concern versus the existing `.../export` route: `export`
+     and `export.json` are both fully literal terminal path segments, so
+     FastAPI can always tell them apart regardless of registration order
+     -- unlike the earlier `{run_id}` vs `{run_id}.json` case, where one
+     side of the ambiguity was a dynamic capture).
+205. **Add sorting the schedule list** (frontend-only -- a **Sort: next
+     run / Sort: name** dropdown above the schedule list reorders
+     `renderSchedulesList()`'s already-filtered array by `next_run_at` or
+     `name` before rendering, alongside the existing Batch 21 keyword
+     filter. Sorts a shallow copy of the filtered array, not the shared
+     `cachedSchedules` reference, so the sort choice never leaks into
+     other features that read `cachedSchedules` in creation order).
+206. **Add tests for all of Batch 28**: bulk-exporting schedules returns
+     only the requested ids as a JSON array and silently skips an unknown
+     id; the breakers CSV export has the right header and a row for a
+     module with a real tracked failure; the pipeline JSON export returns
+     the same fields as the existing YAML export for both a real pipeline
+     and an unknown slug (404). 560 tests total, stable across two
+     repeated clean full-suite runs. Live-verified end to end with
+     Playwright against a freshly started server: checkbox-selecting two
+     schedules and clicking **⬇ Export selected JSON** downloaded a JSON
+     file containing exactly those two schedules' ids; switching the sort
+     dropdown to **Sort: name** reordered the visible rows alphabetically;
+     tripping `http_request`'s breaker with an empty URL and clicking
+     **Export breakers CSV** downloaded a CSV whose header and a data row
+     for `automation,http_request` were both present; clicking **Export
+     JSON** on a saved pipeline card downloaded a JSON file whose `slug`
+     and `name` matched.
 
 ## 9. Roadmap
 

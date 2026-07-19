@@ -223,13 +223,16 @@ const schedulesBulkPauseBtn = document.getElementById("schedules-bulk-pause-btn"
 const schedulesBulkResumeBtn = document.getElementById("schedules-bulk-resume-btn");
 const schedulesBulkFavoriteBtn = document.getElementById("schedules-bulk-favorite-btn");
 const schedulesBulkClearLabelBtn = document.getElementById("schedules-bulk-clear-label-btn");
+const schedulesBulkExportBtn = document.getElementById("schedules-bulk-export-btn");
 const schedulesBulkDeleteBtn = document.getElementById("schedules-bulk-delete-btn");
 const schedulesSelectAllEl = document.getElementById("schedules-select-all");
 const scheduleFilterInput = document.getElementById("schedule-filter");
+const scheduleSortSelect = document.getElementById("schedule-sort");
 
 const selectedScheduleIds = new Set();
 
 scheduleFilterInput.addEventListener("input", () => renderSchedulesList());
+scheduleSortSelect.addEventListener("change", () => renderSchedulesList());
 
 function updateSchedulesBulkButtons() {
   const disabled = selectedScheduleIds.size === 0;
@@ -237,12 +240,14 @@ function updateSchedulesBulkButtons() {
   schedulesBulkResumeBtn.disabled = disabled;
   schedulesBulkFavoriteBtn.disabled = disabled;
   schedulesBulkClearLabelBtn.disabled = disabled;
+  schedulesBulkExportBtn.disabled = disabled;
   schedulesBulkDeleteBtn.disabled = disabled;
   const suffix = selectedScheduleIds.size ? ` (${selectedScheduleIds.size})` : "";
   schedulesBulkPauseBtn.textContent = `Pause selected${suffix}`;
   schedulesBulkResumeBtn.textContent = `Resume selected${suffix}`;
   schedulesBulkFavoriteBtn.textContent = `★ Favorite selected${suffix}`;
   schedulesBulkClearLabelBtn.textContent = `Clear labels${suffix}`;
+  schedulesBulkExportBtn.textContent = `⬇ Export selected JSON${suffix}`;
   schedulesBulkDeleteBtn.textContent = `Delete selected${suffix}`;
 }
 
@@ -3520,7 +3525,8 @@ function renderSavedPipelines(pipelinesList) {
               <button class="btn btn-secondary btn-small" data-clone-slug="${p.slug}" type="button">Clone</button>
               <button class="btn btn-secondary btn-small" data-graph-slug="${p.slug}" type="button">Graph</button>
               <button class="btn btn-secondary btn-small" data-history-slug="${p.slug}" type="button">History</button>
-              <a class="btn btn-secondary btn-small" href="/api/pipelines/${p.slug}/export" download="${p.slug}.yaml">Export</a>
+              <a class="btn btn-secondary btn-small" href="/api/pipelines/${p.slug}/export" download="${p.slug}.yaml">Export YAML</a>
+              <a class="btn btn-secondary btn-small" href="/api/pipelines/${p.slug}/export.json" download="${p.slug}.json">Export JSON</a>
               <button class="btn btn-danger btn-small" data-delete-slug="${p.slug}" data-delete-name="${p.name}" type="button">Delete</button>
             </div>
             <div class="tracker hidden"></div>
@@ -5235,12 +5241,20 @@ function renderSchedulesList() {
   });
 
   const filterQuery = scheduleFilterInput.value.trim().toLowerCase();
-  const filtered = filterQuery
-    ? schedules.filter((s) => {
-        const haystack = `${s.kind} ${s.tier || ""} ${s.name}`.toLowerCase();
-        return haystack.includes(filterQuery);
-      })
-    : schedules;
+  const filtered = [
+    ...(filterQuery
+      ? schedules.filter((s) => {
+          const haystack = `${s.kind} ${s.tier || ""} ${s.name}`.toLowerCase();
+          return haystack.includes(filterQuery);
+        })
+      : schedules),
+  ];
+
+  if (scheduleSortSelect.value === "name") {
+    filtered.sort((a, b) => a.name.localeCompare(b.name));
+  } else {
+    filtered.sort((a, b) => new Date(a.next_run_at) - new Date(b.next_run_at));
+  }
 
   if (!filtered.length) {
     schedulesListEl.className = "runs-empty";
@@ -5378,6 +5392,30 @@ schedulesBulkClearLabelBtn.addEventListener("click", async () => {
   });
   showToast(`Cleared label on ${selectedScheduleIds.size} schedule(s).`, "success");
   await loadSchedules();
+});
+
+schedulesBulkExportBtn.addEventListener("click", async () => {
+  if (!selectedScheduleIds.size) return;
+  try {
+    const res = await fetch("/api/schedules/bulk-export", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ schedule_ids: [...selectedScheduleIds] }),
+    });
+    if (!res.ok) throw new Error(`HTTP ${res.status}`);
+    const blob = await res.blob();
+    const url = URL.createObjectURL(blob);
+    const link = document.createElement("a");
+    link.href = url;
+    link.download = "schedules_selected.json";
+    document.body.appendChild(link);
+    link.click();
+    link.remove();
+    URL.revokeObjectURL(url);
+    showToast(`Exported ${selectedScheduleIds.size} schedule(s) as JSON.`, "success");
+  } catch (err) {
+    showToast(`Export failed: ${err}`, "error");
+  }
 });
 
 schedulesSelectAllEl.addEventListener("change", () => {

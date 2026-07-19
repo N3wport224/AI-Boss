@@ -315,6 +315,10 @@
       </div>
       <div class="pipeline-filter-row">
         <input type="text" id="schedule-filter" placeholder="Filter by target, tier, or kind…" class="artifact-search-input" />
+        <select id="schedule-sort">
+          <option value="next_run">Sort: next run</option>
+          <option value="name">Sort: name</option>
+        </select>
       </div>
       <div class="artifacts-bulk-tag-row">
         <label class="schedule-select-all-label">
@@ -325,6 +329,7 @@
         <button id="schedules-bulk-resume-btn" class="btn btn-secondary btn-small" type="button" disabled>Resume selected</button>
         <button id="schedules-bulk-favorite-btn" class="btn btn-secondary btn-small" type="button" disabled>★ Favorite selected</button>
         <button id="schedules-bulk-clear-label-btn" class="btn btn-secondary btn-small" type="button" disabled>Clear labels</button>
+        <button id="schedules-bulk-export-btn" class="btn btn-secondary btn-small" type="button" disabled>⬇ Export selected JSON</button>
         <button id="schedules-bulk-delete-btn" class="btn btn-danger btn-small" type="button" disabled>Delete selected</button>
       </div>
       <div id="schedules-list" class="runs-empty">No schedules yet — recurring runs will appear here.</div>
@@ -507,6 +512,7 @@
     <div id="pipeline-result" class="pipeline-result hidden"></div>
     <div class="artifacts-bulk-tag-row" id="modules-bulk-row">
       <a class="btn btn-secondary btn-small" href="/api/modules/used-by.csv" download title="Which saved pipelines use each module, as a CSV">Export used-by CSV</a>
+      <a class="btn btn-secondary btn-small" href="/api/breakers.csv" download title="Every module's circuit breaker state, as a CSV">Export breakers CSV</a>
       <label class="schedule-select-all-label">
         <input type="checkbox" id="modules-select-all" />
         Select all modules
