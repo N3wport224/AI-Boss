@@ -149,6 +149,7 @@
         <div class="artifacts-bulk-tag-row">
           <input type="text" id="artifact-bulk-tag-input" class="artifact-search-input" placeholder="Tag to apply to selected…" />
           <button id="artifact-bulk-tag-btn" class="btn btn-secondary btn-small" type="button" disabled>Apply tag to selected</button>
+          <button id="artifact-bulk-untag-btn" class="btn btn-secondary btn-small" type="button" disabled title="Remove this tag from every selected file">Remove tag from selected</button>
         </div>
         <div id="artifact-tag-directory" class="tag-directory hidden"></div>
         <div id="artifact-search-results" class="hidden"></div>
@@ -400,6 +401,11 @@
         <button id="runs-search-btn" class="btn btn-secondary btn-small" type="button">Search</button>
       </div>
       <div id="runs-search-results" class="hidden"></div>
+      <div class="runs-search-bar">
+        <input type="search" id="run-notes-search-input" placeholder="Search your notes on past runs…" />
+        <button id="run-notes-search-btn" class="btn btn-secondary btn-small" type="button">Search notes</button>
+      </div>
+      <div id="run-notes-search-results" class="hidden"></div>
       <div id="runs-trend" class="runs-trend"></div>
       <div id="recent-runs-table" class="runs-table"></div>
       <div class="run-compare-bar">

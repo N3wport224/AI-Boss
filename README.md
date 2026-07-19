@@ -681,6 +681,27 @@ A few things live in the header/subheader on every page load:
   view. Distinct from a run's own after-the-fact note: this documents the
   pipeline's *design*, not one particular execution of it.
 
+## Artifact favorites/bulk-untag, quick-fill from last run, run-notes search, version branching, and notification cleanup
+
+- **Favorite artifacts** — the existing module/pipeline favorites system
+  now covers artifacts too; a starred artifact appears in the Favorites
+  section with a one-click **View** shortcut.
+- **Bulk remove a tag from selected artifacts** — the inverse of bulk-tag:
+  select multiple files and strip one tag from all of them at once.
+- **Quick-fill from a module's last run** — a **↺ Use last run's inputs**
+  button fills a module's form with whatever values it actually ran with
+  most recently, no named preset required ahead of time.
+- **Search across run notes** — a dedicated search box finds past runs by
+  keyword in your own notes on them, distinct from the existing search
+  over step outputs/errors.
+- **Branch a pipeline version into a new pipeline** — alongside restoring
+  an archived version in place, "Branch as new…" saves it as a brand-new
+  saved pipeline instead, leaving the current one untouched.
+- **Clear read notifications** — a "Clear read" button in the bell icon's
+  Alerts section deletes already-read alerts outright, keeping the list
+  from growing unbounded (distinct from mark-all-read, which just flips
+  the read flag).
+
 ## Tech stack
 
 - **Language:** Python 3.11+ — first-class async/sync support and native SDKs

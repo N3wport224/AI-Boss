@@ -242,6 +242,25 @@ def restore_pipeline_version(slug: str, version_id: str, tier_dirs: dict) -> dic
     return save_pipeline(old_definition, tier_dirs)
 
 
+def branch_pipeline_version(slug: str, version_id: str, new_name: str, tier_dirs: dict) -> dict:
+    """Restore an archived version as a brand-new saved pipeline under
+    `new_name`, leaving the pipeline at `slug` (and its own current
+    definition) completely untouched — the branching counterpart to
+    `restore_pipeline_version()`'s in-place overwrite, for when the old
+    version is worth keeping around as its own pipeline rather than
+    replacing what's there now."""
+    old_definition = load_pipeline_version(slug, version_id)
+    new_slug = _slugify(new_name)
+    if (PIPELINES_DIR / f"{new_slug}.yaml").exists():
+        raise PipelineValidationError(f"A pipeline named '{new_name}' already exists.")
+    new_definition = {
+        "name": new_name,
+        "description": old_definition.get("description", ""),
+        "steps": old_definition["steps"],
+    }
+    return save_pipeline(new_definition, tier_dirs)
+
+
 def list_pipelines() -> list[dict]:
     if not PIPELINES_DIR.exists():
         return []

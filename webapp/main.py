@@ -781,6 +781,19 @@ class InputPresetSave(BaseModel):
     inputs: dict[str, Any] = {}
 
 
+@app.get("/api/modules/{tier}/{name}/last-run-inputs")
+def last_run_inputs(tier: str, name: str):
+    """The input values this module was actually run with most recently --
+    a one-click quick-fill distinct from a named preset (Batch 12): no
+    saving required, just "whatever I ran last time." 404s if this module
+    has never been run at all (not merely unknown -- an unknown module
+    reaching this far isn't this endpoint's job to validate)."""
+    inputs = store.latest_step_inputs(tier, name)
+    if inputs is None:
+        raise HTTPException(status_code=404, detail=f"{tier}/{name} has never been run.")
+    return {"inputs": inputs}
+
+
 @app.get("/api/modules/{tier}/{name}/presets")
 def list_input_presets(tier: str, name: str):
     _manifest_by_name(tier, name)  # 404 for a module that doesn't exist
@@ -1126,6 +1139,29 @@ def restore_pipeline_version(slug: str, version_id: str):
     return {"pipeline": restored}
 
 
+class PipelineVersionBranch(BaseModel):
+    new_name: str
+
+
+@app.post("/api/pipelines/{slug}/versions/{version_id}/branch")
+def branch_pipeline_version(slug: str, version_id: str, payload: PipelineVersionBranch):
+    """Restore an archived version as a brand-new pipeline instead of
+    overwriting `slug`'s current definition -- for when an old version is
+    worth keeping as its own pipeline, not just recovering from a mistake."""
+    if not payload.new_name.strip():
+        raise HTTPException(status_code=400, detail="A name for the new pipeline is required.")
+    try:
+        branched = pipeline_store.branch_pipeline_version(slug, version_id, payload.new_name.strip(), TIER_DIRS)
+    except FileNotFoundError:
+        raise HTTPException(status_code=404, detail=f"No version '{version_id}' for pipeline '{slug}'.")
+    except pipeline_store.PipelineValidationError as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
+    store.record_audit_event(
+        "pipeline_version_branch", f"Branched '{slug}' version {version_id} into new pipeline '{branched['slug']}'."
+    )
+    return {"pipeline": branched}
+
+
 @app.get("/api/schedules")
 def list_schedules():
     return store.list_schedules()
@@ -1317,6 +1353,14 @@ def search_run_history(q: str = "", limit: int = 20):
     the run-history counterpart to /api/artifacts/search. Step outputs are
     redacted before they're ever logged, so snippets are already safe."""
     return {"query": q, "results": store.search_steps(q, limit)}
+
+
+@app.get("/api/runs/search-notes")
+def search_run_notes(q: str = "", limit: int = 20):
+    """Keyword search across the free-text notes attached to past runs
+    (Batch 13) -- distinct from /api/runs/search, which searches step
+    outputs/errors, not the user's own annotations."""
+    return {"query": q, "results": store.search_run_notes(q, limit)}
 
 
 @app.post("/api/runs/purge")
@@ -1619,6 +1663,14 @@ def mark_all_notifications_read():
     return {"marked": store.mark_all_notifications_read()}
 
 
+@app.post("/api/notifications/clear-read")
+def clear_read_notifications():
+    """Delete every already-read notification from the Alerts list --
+    distinct from mark-all-read, which only flips the read flag and keeps
+    every row around forever."""
+    return {"cleared": store.clear_read_notifications()}
+
+
 NOTIFICATION_KINDS = ("breaker_tripped", "schedule_failed", "resource_alert")
 
 
@@ -1853,6 +1905,30 @@ def bulk_tag_artifacts(payload: ArtifactBulkTag):
         store.set_artifact_tags(safe_name, sorted(current))
         tagged.append(safe_name)
     return {"tag": tag, "tagged": tagged}
+
+
+@app.post("/api/artifacts/bulk-untag")
+def bulk_untag_artifacts(payload: ArtifactBulkTag):
+    """The inverse of bulk-tag -- removes one tag from every selected
+    artifact's existing tag set, leaving any other tags on that file alone.
+    A file that never had this tag is a no-op, not skipped from the
+    response the way an unknown filename is (it's still a real, existing
+    artifact -- just nothing to remove)."""
+    tag = payload.tag.strip()
+    if not tag:
+        raise HTTPException(status_code=400, detail="A tag is required.")
+
+    existing_tags = store.all_artifact_tags()
+    untagged = []
+    for filename in payload.filenames:
+        safe_name = Path(filename).name
+        if not (ingestion.ARTIFACTS_DIR / safe_name).is_file():
+            continue
+        current = set(existing_tags.get(safe_name, []))
+        current.discard(tag)
+        store.set_artifact_tags(safe_name, sorted(current))
+        untagged.append(safe_name)
+    return {"tag": tag, "untagged": untagged}
 
 
 @app.get("/api/artifacts/{filename}/content")

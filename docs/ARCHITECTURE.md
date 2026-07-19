@@ -1527,6 +1527,84 @@ only a JSON parse error or timeout falls back to an empty issue list.
      a branch never inheriting its group's note, and the graph endpoint
      surfacing a step's note. 410 tests total, stable across repeated
      clean full-suite runs.
+128. **Add artifact favorites** (frontend-only, no backend change — the
+     existing localStorage-backed favorites system, previously scoped to
+     `module::` and `pipeline::` key prefixes, gains an `artifact::{filename}`
+     prefix; a new `currentArtifacts` array mirrors `currentModulesByTier`/
+     `currentPipelines` so `renderFavoritesSection()` can resolve an
+     artifact favorite back to its live metadata). Rather than a "Run"
+     action (which makes no sense for a file), an artifact favorite chip
+     gets a "View" action wired to the same `toggleArtifactContent()` the
+     artifact list's own View button already uses, scrolling to and
+     expanding the row. Verified only through Playwright, same as every
+     other pure-frontend feature this project has shipped (builder undo,
+     step duplication).
+129. **Add bulk tag removal for artifacts** (`POST /api/artifacts/bulk-untag`,
+     the structural mirror of Batch 12's `POST /api/artifacts/bulk-tags` --
+     same selected-filenames-plus-one-tag shape, same
+     skip-unknown-filenames-without-failing behavior, but `discard()`s the
+     tag from each file's existing set instead of `add()`ing it). A file
+     that never had the tag is reported as `untagged` anyway (it's still a
+     real, existing artifact, just a no-op) -- only a genuinely unknown
+     filename gets skipped. A second **Remove tag from selected** button
+     added next to the existing bulk-tag button, sharing the same tag-name
+     input and selection-count enable/disable logic.
+130. **Add quick-fill from a module's last run** (`StateStore.latest_step_inputs(tier,
+     name)` -- a single `ORDER BY id DESC LIMIT 1` query against the `steps`
+     table scoped to both tier and name (module names aren't guaranteed
+     globally unique across tiers, unlike the older, name-only
+     `latest_step_status()`); `GET /api/modules/{tier}/{name}/last-run-inputs`,
+     404 when the module's never been run). A secret-shaped input is
+     already redacted at the point it's stored, the same redaction every
+     other history view lives with -- this endpoint doesn't add or remove
+     any redaction of its own. A **↺ Use last run's inputs** button added
+     to the existing input-presets row, reusing its own field-filling logic
+     but requiring no named preset to exist ahead of time.
+131. **Add search across run notes** (`StateStore.search_run_notes(query,
+     limit=20)` -- a case-insensitive `LIKE` query with `%`/`_` escaped so
+     it's a literal substring search, not a glob, mirroring
+     `webapp.pipelines.search_pipelines()`'s content-search pattern applied
+     to run annotations instead of pipeline YAML;
+     `GET /api/runs/search-notes`, registered *before*
+     `GET /api/runs/{run_id}` in `webapp/main.py` -- same route-ordering
+     requirement `/api/runs/search`, `/api/runs/compare`, etc. already
+     established, since a literal 2-segment path and a dynamic 2-segment
+     path collide unless the literal one is matched first). A second,
+     separate search box under Recent Runs, distinct from the existing
+     step-output/error search -- clicking a hit's run number scrolls to and
+     expands that run's row if it's within the currently loaded page.
+132. **Add branching a pipeline version into a new pipeline**
+     (`webapp.pipelines.branch_pipeline_version(slug, version_id, new_name,
+     tier_dirs)` -- loads the archived version same as
+     `restore_pipeline_version()`, but instead of overwriting `slug` it
+     re-slugifies `new_name` and calls `save_pipeline()` under that new
+     slug entirely, 400ing on a name collision rather than silently
+     clobbering an existing pipeline the way `restore_pipeline_version()`'s
+     in-place overwrite is expected to; `POST
+     /api/pipelines/{slug}/versions/{version_id}/branch`). A **Branch as
+     new…** button added next to each version's existing **Restore**
+     button in the pipeline History panel, prompting for the new name.
+133. **Add clearing read notifications** (`StateStore.clear_read_notifications()`
+     -- a single `DELETE FROM notifications WHERE read = 1`, distinct from
+     `mark_all_notifications_read()`, which only flips the flag and leaves
+     every row in place forever; `POST /api/notifications/clear-read`). A
+     **Clear read** button appears in the Alerts section's own heading only
+     when at least one alert is actually read, so it's never shown as a
+     dead click when there's nothing to clear.
+134. **Add tests for all of Batch 15**: `latest_step_inputs()`'s never-run
+     None case, most-recent-wins ordering, and tier+name scoping (a shared
+     module *name* across two different tiers keeps independent last-run
+     inputs); the last-run-inputs endpoint's 404 and its reflecting the
+     most recent of two real runs; bulk-untag keeping a file's other tags,
+     no-op on a tag it never had, skipping an unknown filename, and
+     rejecting a blank tag; run-notes search matching a keyword, staying
+     case-insensitive, and returning empty for a blank or unmatched query;
+     branching a version into a genuinely new, independent pipeline
+     (confirming the *original*'s current definition is untouched),
+     rejecting a colliding target name, 404ing for an unknown version, and
+     rejecting a blank name; clear-read-notifications' store-level
+     read-only deletion and its endpoint round trip. 429 tests total,
+     stable across repeated clean full-suite runs.
 
 ## 9. Roadmap
 

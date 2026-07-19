@@ -277,3 +277,34 @@ def test_create_notification_endpoint_still_creates_when_unmuted():
 
     notifications = client.get("/api/notifications").json()
     assert any(n["message"] == "unmuted alert" for n in notifications)
+
+
+# ---- Batch 15: clear all read notifications ----
+
+def test_clear_read_notifications_only_removes_read_ones(tmp_path):
+    s = StateStore(str(tmp_path / "clear_read.db"))
+    a = s.add_notification("info", "read one")
+    s.add_notification("info", "unread one")
+    s.mark_notification_read(a["id"])
+
+    cleared = s.clear_read_notifications()
+    assert cleared == 1
+
+    remaining = s.list_notifications()
+    assert len(remaining) == 1
+    assert remaining[0]["message"] == "unread one"
+    s.close()
+
+
+def test_clear_read_notifications_via_the_api():
+    a = client.post("/api/notifications", json={"kind": "info", "message": "to be cleared"}).json()
+    client.post("/api/notifications", json={"kind": "info", "message": "stays around"})
+    client.post(f"/api/notifications/{a['id']}/read")
+
+    res = client.post("/api/notifications/clear-read")
+    assert res.status_code == 200
+    assert res.json()["cleared"] >= 1
+
+    remaining = client.get("/api/notifications").json()
+    assert not any(n["id"] == a["id"] for n in remaining)
+    assert any(n["message"] == "stays around" for n in remaining)

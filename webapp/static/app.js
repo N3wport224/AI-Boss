@@ -106,6 +106,7 @@ const schedulerPausedBannerEl = document.getElementById("scheduler-paused-banner
 
 let currentModulesByTier = {};
 let currentPipelines = [];
+let currentArtifacts = [];
 let builderSteps = [];
 let editingPipelineSlug = null; // non-null while the builder holds a loaded saved pipeline
 
@@ -333,13 +334,30 @@ function renderNotificationsPanel() {
         .join("")
     : `<div class="dropdown-empty">Nothing yet — run something.</div>`;
 
+  const hasReadAlerts = persistentNotifications.some((n) => n.read);
+
   notificationsPanel.innerHTML = `
-    <h4>Alerts</h4>
+    <div class="notification-section-head">
+      <h4>Alerts</h4>
+      ${hasReadAlerts ? `<button class="btn btn-secondary btn-small" id="notifications-clear-read-btn" type="button">Clear read</button>` : ""}
+    </div>
     ${alertsHtml}
     <h4>Recent activity</h4>
     ${activityHtml}
     <h4>Preferences</h4>
     ${preferencesHtml}`;
+
+  notificationsPanel.querySelector("#notifications-clear-read-btn")?.addEventListener("click", async (e) => {
+    e.stopPropagation();
+    try {
+      await fetch("/api/notifications/clear-read", { method: "POST" });
+      const res = await fetch("/api/notifications");
+      persistentNotifications = await res.json();
+      renderNotificationsPanel();
+    } catch (err) {
+      showToast(`Could not clear read notifications: ${err}`, "error");
+    }
+  });
 
   notificationsPanel.querySelectorAll(".notification-mute-toggle").forEach((toggle) => {
     toggle.addEventListener("click", async (e) => {
@@ -1123,6 +1141,7 @@ function wireFavoriteToggles(container) {
 }
 
 function renderFavoriteChip(entry) {
+  const actionLabel = entry.action === "view" ? "View" : "Run";
   return `
     <div class="card favorite-chip">
       <div class="card-head">
@@ -1130,7 +1149,7 @@ function renderFavoriteChip(entry) {
         ${favoriteButtonHtml(entry.key)}
       </div>
       <p class="card-desc">${entry.description || ""}</p>
-      <button class="btn btn-run" data-fav-run="${entry.key}" type="button">Run</button>
+      <button class="btn btn-run" data-fav-run="${entry.key}" type="button">${actionLabel}</button>
     </div>`;
 }
 
@@ -1140,11 +1159,15 @@ function renderFavoritesSection() {
     if (key.startsWith("module::")) {
       const [, tier, name] = key.split("::");
       const module = (currentModulesByTier[tier] || []).find((m) => m.name === name);
-      if (module) entries.push({ key, label: module.name, description: module.description });
+      if (module) entries.push({ key, label: module.name, description: module.description, action: "run" });
     } else if (key.startsWith("pipeline::")) {
       const slug = key.slice("pipeline::".length);
       const pipeline = currentPipelines.find((p) => p.slug === slug);
-      if (pipeline) entries.push({ key, label: pipeline.name, description: pipeline.description });
+      if (pipeline) entries.push({ key, label: pipeline.name, description: pipeline.description, action: "run" });
+    } else if (key.startsWith("artifact::")) {
+      const filename = key.slice("artifact::".length);
+      const artifact = currentArtifacts.find((f) => f.name === filename);
+      if (artifact) entries.push({ key, label: artifact.name, description: formatBytes(artifact.size_bytes), action: "view" });
     }
   }
 
@@ -1169,6 +1192,10 @@ function runFavorite(key) {
     const slug = key.slice("pipeline::".length);
     const pipeline = currentPipelines.find((p) => p.slug === slug);
     if (pipeline) runSavedPipeline(slug, pipeline.name, currentPipelines);
+  } else if (key.startsWith("artifact::")) {
+    const filename = key.slice("artifact::".length);
+    artifactsListEl.scrollIntoView({ behavior: "smooth", block: "center" });
+    toggleArtifactContent(filename);
   }
 }
 
@@ -1521,6 +1548,7 @@ function renderCard(module) {
                <button class="btn btn-secondary btn-small input-preset-load-btn" type="button">Load</button>
                <button class="btn btn-secondary btn-small input-preset-save-btn" type="button">Save as…</button>
                <button class="btn btn-secondary btn-small input-preset-delete-btn" type="button">Delete</button>
+               <button class="btn btn-secondary btn-small input-last-run-btn" type="button" title="Fill in whatever values this module was run with most recently">↺ Use last run's inputs</button>
              </div>`
           : ""
       }
@@ -1753,6 +1781,26 @@ function wireInputPresetsRow(tier, name) {
       showToast(`Loaded preset "${presetName}".`, "success");
     } catch (err) {
       showToast(`Could not load preset: ${err}`, "error");
+    }
+  });
+
+  row.querySelector(".input-last-run-btn").addEventListener("click", async () => {
+    try {
+      const res = await fetch(`/api/modules/${tier}/${name}/last-run-inputs`);
+      const body = await res.json();
+      if (!res.ok) {
+        showToast(body.detail || "This module has never been run.", "error");
+        return;
+      }
+      Object.entries(body.inputs).forEach(([fieldName, value]) => {
+        const el = card.querySelector(`#${CSS.escape(fieldId(tier, name, fieldName))}`);
+        if (!el) return;
+        if (el.type === "checkbox") el.checked = Boolean(value);
+        else el.value = value ?? "";
+      });
+      showToast("Filled in with last run's inputs.", "success");
+    } catch (err) {
+      showToast(`Could not load last run's inputs: ${err}`, "error");
     }
   });
 
@@ -3179,6 +3227,7 @@ function renderPipelineHistory(slug, panel, versions) {
         <div class="schedule-row-actions">
           <button class="btn btn-secondary btn-small" data-view-version="${v.version_id}" type="button">View diff</button>
           <button class="btn btn-secondary btn-small" data-restore-version="${v.version_id}" type="button">Restore</button>
+          <button class="btn btn-secondary btn-small" data-branch-version="${v.version_id}" type="button" title="Save this version as a brand-new pipeline instead of overwriting the current one">Branch as new…</button>
         </div>
       </div>
       <div class="version-diff-detail hidden" data-diff-for="${v.version_id}"></div>`
@@ -3194,6 +3243,32 @@ function renderPipelineHistory(slug, panel, versions) {
   panel.querySelectorAll("[data-restore-version]").forEach((btn) => {
     btn.addEventListener("click", () => restorePipelineVersion(slug, btn.dataset.restoreVersion));
   });
+
+  panel.querySelectorAll("[data-branch-version]").forEach((btn) => {
+    btn.addEventListener("click", () => branchPipelineVersion(slug, btn.dataset.branchVersion));
+  });
+}
+
+async function branchPipelineVersion(slug, versionId) {
+  const newName = prompt("Save this version as a new pipeline named:");
+  if (!newName || !newName.trim()) return;
+
+  try {
+    const res = await fetch(`/api/pipelines/${slug}/versions/${versionId}/branch`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ new_name: newName.trim() }),
+    });
+    const body = await res.json();
+    if (!res.ok) {
+      showToast(body.detail || "Branch failed.", "error");
+      return;
+    }
+    showToast(`Created "${body.pipeline.name}" from this version.`, "success");
+    await loadSavedPipelines();
+  } catch (err) {
+    showToast(`Branch failed: ${err}`, "error");
+  }
 }
 
 async function togglePipelineVersionDiff(slug, panel, versionId) {
@@ -3458,6 +3533,7 @@ const artifactTagFilterInput = document.getElementById("artifact-tag-filter");
 const artifactTagDirectoryEl = document.getElementById("artifact-tag-directory");
 const artifactBulkTagInput = document.getElementById("artifact-bulk-tag-input");
 const artifactBulkTagBtn = document.getElementById("artifact-bulk-tag-btn");
+const artifactBulkUntagBtn = document.getElementById("artifact-bulk-untag-btn");
 
 const selectedArtifactNames = new Set();
 
@@ -3481,6 +3557,10 @@ function updateArtifactBulkTagBtn() {
   artifactBulkTagBtn.textContent = selectedArtifactNames.size
     ? `Apply tag to selected (${selectedArtifactNames.size})`
     : "Apply tag to selected";
+  artifactBulkUntagBtn.disabled = selectedArtifactNames.size === 0;
+  artifactBulkUntagBtn.textContent = selectedArtifactNames.size
+    ? `Remove tag from selected (${selectedArtifactNames.size})`
+    : "Remove tag from selected";
 }
 
 async function loadArtifactTagDirectory() {
@@ -3514,6 +3594,7 @@ async function loadArtifacts() {
   const url = tagFilter ? `/api/artifacts?tag=${encodeURIComponent(tagFilter)}` : "/api/artifacts";
   const res = await fetch(url);
   const files = await res.json();
+  currentArtifacts = files;
   loadArtifactTagDirectory();
 
   const liveNames = new Set(files.map((f) => f.name));
@@ -3526,6 +3607,7 @@ async function loadArtifacts() {
       tagFilter ? `No artifacts tagged "${escapeHtml(tagFilter)}".` : "No artifacts yet — upload a CSV or PDF above."
     }</div>`;
     updateArtifactBulkTagBtn();
+    renderFavoritesSection();
     return;
   }
 
@@ -3542,10 +3624,11 @@ async function loadArtifacts() {
         )
         .join("");
       const checked = selectedArtifactNames.has(f.name) ? "checked" : "";
+      const favKey = `artifact::${f.name}`;
       return `
       <tr>
         <td><input type="checkbox" class="artifact-select-checkbox" data-artifact="${escapeHtml(f.name)}" ${checked} /></td>
-        <td>${escapeHtml(f.name)}</td>
+        <td>${favoriteButtonHtml(favKey)} ${escapeHtml(f.name)}</td>
         <td>${formatBytes(f.size_bytes)}</td>
         <td>${new Date(f.modified_at * 1000).toLocaleString()}</td>
         <td class="artifact-tags-cell">
@@ -3587,6 +3670,8 @@ async function loadArtifacts() {
   });
 
   updateArtifactBulkTagBtn();
+  wireFavoriteToggles(artifactsListEl);
+  renderFavoritesSection();
 
   artifactsListEl.querySelectorAll(".artifact-view-btn").forEach((btn) => {
     btn.addEventListener("click", () => toggleArtifactContent(btn.dataset.artifact));
@@ -3904,6 +3989,33 @@ artifactBulkTagBtn.addEventListener("click", async () => {
   }
 });
 
+artifactBulkUntagBtn.addEventListener("click", async () => {
+  const tag = artifactBulkTagInput.value.trim();
+  if (!tag) {
+    showToast("Enter a tag first.", "error");
+    return;
+  }
+  if (!selectedArtifactNames.size) return;
+
+  try {
+    const res = await fetch("/api/artifacts/bulk-untag", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ filenames: [...selectedArtifactNames], tag }),
+    });
+    const body = await res.json();
+    if (!res.ok) {
+      showToast(body.detail || "Failed to remove tag.", "error");
+      return;
+    }
+    showToast(`Removed "${tag}" from ${body.untagged.length} artifact(s).`, "success");
+    artifactBulkTagInput.value = "";
+    await loadArtifacts();
+  } catch (err) {
+    showToast(`Bulk untag failed: ${err}`, "error");
+  }
+});
+
 const runsPurgeHoursInput = document.getElementById("runs-purge-hours");
 const runsPurgeBtn = document.getElementById("runs-purge-btn");
 
@@ -3975,6 +4087,60 @@ runsSearchInput.addEventListener("input", () => {
   if (!runsSearchInput.value.trim()) {
     runsSearchResultsEl.classList.add("hidden");
     runsSearchResultsEl.innerHTML = "";
+  }
+});
+
+// ---- Search across run notes (distinct from step-output/error search above) ----
+
+const runNotesSearchInput = document.getElementById("run-notes-search-input");
+const runNotesSearchBtn = document.getElementById("run-notes-search-btn");
+const runNotesSearchResultsEl = document.getElementById("run-notes-search-results");
+
+async function searchRunNotes() {
+  const query = runNotesSearchInput.value.trim();
+  if (!query) {
+    runNotesSearchResultsEl.classList.add("hidden");
+    runNotesSearchResultsEl.innerHTML = "";
+    return;
+  }
+
+  const res = await fetch(`/api/runs/search-notes?q=${encodeURIComponent(query)}`);
+  const body = await res.json();
+  runNotesSearchResultsEl.classList.remove("hidden");
+
+  if (!body.results.length) {
+    runNotesSearchResultsEl.innerHTML = `<div class="runs-empty">No run notes match "${escapeHtml(query)}".</div>`;
+    return;
+  }
+
+  runNotesSearchResultsEl.innerHTML = body.results
+    .map(
+      (r) => `
+      <div class="runs-search-hit">
+        <span class="hit-meta">Run #${r.run_id}</span>
+        <span class="hit-snippet">${escapeHtml(r.note)}</span>
+      </div>`
+    )
+    .join("");
+
+  runNotesSearchResultsEl.querySelectorAll(".hit-meta").forEach((el, i) => {
+    el.style.cursor = "pointer";
+    el.addEventListener("click", () => {
+      const runId = body.results[i].run_id;
+      recentRunsTableEl.scrollIntoView({ behavior: "smooth", block: "center" });
+      toggleRunDetail(String(runId));
+    });
+  });
+}
+
+runNotesSearchBtn.addEventListener("click", searchRunNotes);
+runNotesSearchInput.addEventListener("keydown", (e) => {
+  if (e.key === "Enter") searchRunNotes();
+});
+runNotesSearchInput.addEventListener("input", () => {
+  if (!runNotesSearchInput.value.trim()) {
+    runNotesSearchResultsEl.classList.add("hidden");
+    runNotesSearchResultsEl.innerHTML = "";
   }
 });
 

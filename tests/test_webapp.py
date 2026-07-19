@@ -449,6 +449,45 @@ def test_run_note_404s_for_an_unknown_run():
     assert res.status_code == 404
 
 
+def test_search_run_notes_finds_a_keyword_in_a_notes_text():
+    res = client.post(
+        "/api/modules/automation/fetch_raw_metrics/run",
+        json={"inputs": {"signups": 4, "churn": 1, "revenue": 1}, "force_refresh": True},
+    )
+    _collect_stream(res.json()["stream_id"])
+    run_id = client.get("/api/runs?limit=1").json()[0]["id"]
+    client.put(f"/api/runs/{run_id}/note", json={"note": "Flaky upstream vendor, expected failure."})
+
+    search_res = client.get("/api/runs/search-notes", params={"q": "flaky upstream"})
+    assert search_res.status_code == 200
+    body = search_res.json()
+    assert body["query"] == "flaky upstream"
+    assert any(r["run_id"] == run_id for r in body["results"])
+
+
+def test_search_run_notes_is_case_insensitive():
+    res = client.post(
+        "/api/modules/automation/fetch_raw_metrics/run",
+        json={"inputs": {"signups": 5, "churn": 1, "revenue": 1}, "force_refresh": True},
+    )
+    _collect_stream(res.json()["stream_id"])
+    run_id = client.get("/api/runs?limit=1").json()[0]["id"]
+    client.put(f"/api/runs/{run_id}/note", json={"note": "UPPERCASE MARKER"})
+
+    search_res = client.get("/api/runs/search-notes", params={"q": "uppercase marker"})
+    assert any(r["run_id"] == run_id for r in search_res.json()["results"])
+
+
+def test_search_run_notes_returns_empty_for_a_blank_query():
+    res = client.get("/api/runs/search-notes", params={"q": ""})
+    assert res.json()["results"] == []
+
+
+def test_search_run_notes_finds_nothing_for_an_unmatched_keyword():
+    res = client.get("/api/runs/search-notes", params={"q": "zzz_nonexistent_note_keyword_zzz"})
+    assert res.json()["results"] == []
+
+
 def test_run_endpoints_are_rate_limited_per_client():
     from webapp.main import _run_rate_limiter
 

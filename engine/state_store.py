@@ -242,6 +242,21 @@ class StateStore:
             row = cur.fetchone()
         return bool(row[0]) if row is not None else None
 
+    def latest_step_inputs(self, tier: str, name: str) -> Optional[dict]:
+        """The resolved input values a module was run with most recently
+        (whichever run that was in, whether a lone card run or one step of a
+        pipeline), or None if it's never been run. A secret-shaped field is
+        already redacted at this point -- the same redaction every other
+        history view (run detail, rerun) already lives with, not something
+        this method does specially."""
+        with self._lock:
+            cur = self._conn.execute(
+                "SELECT inputs FROM steps WHERE tier = ? AND name = ? ORDER BY id DESC LIMIT 1",
+                (tier, name),
+            )
+            row = cur.fetchone()
+        return json.loads(row[0]) if row is not None else None
+
     def module_stats(self) -> list[dict]:
         """Per-module run statistics — total runs, success rate, and average
         duration — broken out by (tier, name). The per-module counterpart to
@@ -853,6 +868,24 @@ class StateStore:
             rows = self._conn.execute("SELECT run_id, note FROM run_notes").fetchall()
         return {run_id: note for run_id, note in rows}
 
+    def search_run_notes(self, query: str, limit: int = 20) -> list[dict]:
+        """Case-insensitive keyword search across every run's own note --
+        mirrors webapp.pipelines.search_pipelines()'s content-search pattern,
+        applied to run annotations instead of pipeline YAML text. A run
+        without a note is never a match; SQL LIKE with escaped wildcards
+        keeps this a literal substring search, not a glob."""
+        query_stripped = query.strip()
+        if not query_stripped:
+            return []
+        like_pattern = "%" + query_stripped.replace("%", r"\%").replace("_", r"\_") + "%"
+        with self._lock:
+            rows = self._conn.execute(
+                "SELECT run_id, note FROM run_notes WHERE note LIKE ? ESCAPE '\\' "
+                "ORDER BY run_id DESC LIMIT ?",
+                (like_pattern, limit),
+            ).fetchall()
+        return [{"run_id": run_id, "note": note} for run_id, note in rows]
+
     def add_notification(self, kind: str, message: str) -> Optional[dict]:
         """Record a durable notification -- unlike a toast (which vanishes on
         reload) or the audit log (a record of user-initiated actions), this
@@ -920,6 +953,15 @@ class StateStore:
     def mark_all_notifications_read(self) -> int:
         with self._lock:
             cur = self._conn.execute("UPDATE notifications SET read = 1 WHERE read = 0")
+            self._conn.commit()
+        return cur.rowcount
+
+    def clear_read_notifications(self) -> int:
+        """Delete every already-read notification -- keeps the Alerts list
+        from growing unbounded, distinct from mark_all_notifications_read()
+        which only flips the read flag and leaves every row in place."""
+        with self._lock:
+            cur = self._conn.execute("DELETE FROM notifications WHERE read = 1")
             self._conn.commit()
         return cur.rowcount
 

@@ -1107,6 +1107,91 @@ def test_restore_unknown_pipeline_version_404s():
     assert res.status_code == 404
 
 
+# ---- Branch a pipeline version into a new pipeline (distinct from in-place restore) ----
+
+def test_branch_pipeline_version_creates_a_new_pipeline_without_touching_the_original():
+    client.post(
+        "/api/pipelines",
+        json={
+            "name": "Branch Source",
+            "steps": [{"tier": "automation", "name": "fetch_raw_metrics", "inputs": {"signups": 1, "churn": 1, "revenue": 1}}],
+        },
+    )
+    client.post(
+        "/api/pipelines",
+        json={
+            "name": "Branch Source",
+            "steps": [{"tier": "automation", "name": "fetch_raw_metrics", "inputs": {"signups": 999, "churn": 1, "revenue": 1}}],
+        },
+    )
+    old_version_id = client.get("/api/pipelines/branch_source/versions").json()[0]["version_id"]
+
+    res = client.post(
+        f"/api/pipelines/branch_source/versions/{old_version_id}/branch",
+        json={"new_name": "Branch Source (from old version)"},
+    )
+    assert res.status_code == 200
+    branched = res.json()["pipeline"]
+    assert branched["slug"] == "branch_source_from_old_version"
+    assert branched["steps"][0]["inputs"]["signups"] == 1
+
+    # The original pipeline's own current definition is untouched.
+    original = pipeline_store.load_pipeline("branch_source")
+    assert original["steps"][0]["inputs"]["signups"] == 999
+
+
+def test_branch_pipeline_version_rejects_a_colliding_name():
+    client.post(
+        "/api/pipelines",
+        json={"name": "Branch Collide Source", "steps": [{"tier": "automation", "name": "fetch_raw_metrics"}]},
+    )
+    client.post(
+        "/api/pipelines",
+        json={"name": "Branch Collide Source", "steps": [{"tier": "automation", "name": "http_request", "inputs": {"url": "https://example.com", "method": "GET"}}]},
+    )
+    client.post(
+        "/api/pipelines",
+        json={"name": "Branch Collide Target", "steps": [{"tier": "automation", "name": "fetch_raw_metrics"}]},
+    )
+    version_id = client.get("/api/pipelines/branch_collide_source/versions").json()[0]["version_id"]
+
+    res = client.post(
+        f"/api/pipelines/branch_collide_source/versions/{version_id}/branch",
+        json={"new_name": "Branch Collide Target"},
+    )
+    assert res.status_code == 400
+
+
+def test_branch_unknown_pipeline_version_404s():
+    client.post(
+        "/api/pipelines",
+        json={"name": "No Versions To Branch", "steps": [{"tier": "automation", "name": "fetch_raw_metrics"}]},
+    )
+    res = client.post(
+        "/api/pipelines/no_versions_to_branch/versions/20200101T000000000000/branch",
+        json={"new_name": "Whatever"},
+    )
+    assert res.status_code == 404
+
+
+def test_branch_pipeline_version_rejects_a_blank_name():
+    client.post(
+        "/api/pipelines",
+        json={"name": "Branch Blank Name Source", "steps": [{"tier": "automation", "name": "fetch_raw_metrics"}]},
+    )
+    client.post(
+        "/api/pipelines",
+        json={"name": "Branch Blank Name Source", "steps": [{"tier": "automation", "name": "http_request", "inputs": {"url": "https://example.com", "method": "GET"}}]},
+    )
+    version_id = client.get("/api/pipelines/branch_blank_name_source/versions").json()[0]["version_id"]
+
+    res = client.post(
+        f"/api/pipelines/branch_blank_name_source/versions/{version_id}/branch",
+        json={"new_name": "   "},
+    )
+    assert res.status_code == 400
+
+
 # ---- Delete a saved pipeline ----
 
 def test_delete_pipeline_removes_it_from_the_saved_list():

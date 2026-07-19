@@ -567,3 +567,59 @@ def test_tags_summary_is_empty_when_nothing_is_tagged():
     summary = client.get("/api/artifacts/tags-summary").json()
     assert isinstance(summary, list)
     assert not any(entry["count"] == 0 for entry in summary)
+
+
+# ---- Batch 15: bulk remove a tag from selected artifacts ----
+
+def test_bulk_untag_removes_the_tag_but_keeps_other_tags():
+    client.post("/api/ingest/csv", files={"file": ("untag_a.csv", b"x,y\n991,992\n", "text/csv")})
+    client.post("/api/ingest/csv", files={"file": ("untag_b.csv", b"x,y\n993,994\n", "text/csv")})
+    files = client.get("/api/artifacts").json()
+    a_name = next(f["name"] for f in files if f["name"].endswith("untag_a.csv"))
+    b_name = next(f["name"] for f in files if f["name"].endswith("untag_b.csv"))
+
+    client.put(f"/api/artifacts/{a_name}/tags", json={"tags": ["keep_me", "remove_me"]})
+    client.put(f"/api/artifacts/{b_name}/tags", json={"tags": ["remove_me"]})
+
+    res = client.post("/api/artifacts/bulk-untag", json={"filenames": [a_name, b_name], "tag": "remove_me"})
+    assert res.status_code == 200
+    body = res.json()
+    assert body["tag"] == "remove_me"
+    assert set(body["untagged"]) == {a_name, b_name}
+
+    updated = client.get("/api/artifacts").json()
+    a_tags = next(f["tags"] for f in updated if f["name"] == a_name)
+    b_tags = next(f["tags"] for f in updated if f["name"] == b_name)
+    assert a_tags == ["keep_me"]
+    assert b_tags == []
+
+
+def test_bulk_untag_is_a_no_op_for_a_file_that_never_had_the_tag():
+    client.post("/api/ingest/csv", files={"file": ("untag_c.csv", b"x,y\n995,996\n", "text/csv")})
+    c_name = next(f["name"] for f in client.get("/api/artifacts").json() if f["name"].endswith("untag_c.csv"))
+    client.put(f"/api/artifacts/{c_name}/tags", json={"tags": ["something_else"]})
+
+    res = client.post("/api/artifacts/bulk-untag", json={"filenames": [c_name], "tag": "never_had_this"})
+    assert res.status_code == 200
+    assert res.json()["untagged"] == [c_name]
+
+    updated = client.get("/api/artifacts").json()
+    c_tags = next(f["tags"] for f in updated if f["name"] == c_name)
+    assert c_tags == ["something_else"]
+
+
+def test_bulk_untag_skips_unknown_filenames_without_failing():
+    client.post("/api/ingest/csv", files={"file": ("untag_d.csv", b"x,y\n997,998\n", "text/csv")})
+    d_name = next(f["name"] for f in client.get("/api/artifacts").json() if f["name"].endswith("untag_d.csv"))
+
+    res = client.post(
+        "/api/artifacts/bulk-untag",
+        json={"filenames": [d_name, "totally_made_up_file.csv"], "tag": "whatever"},
+    )
+    assert res.status_code == 200
+    assert res.json()["untagged"] == [d_name]
+
+
+def test_bulk_untag_rejects_a_blank_tag():
+    res = client.post("/api/artifacts/bulk-untag", json={"filenames": [], "tag": "   "})
+    assert res.status_code == 400
