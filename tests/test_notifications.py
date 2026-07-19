@@ -202,10 +202,10 @@ def test_scheduler_on_error_hook_is_wired_to_the_apps_own_scheduler():
 
 @pytest.fixture(autouse=True)
 def reset_notification_mutes():
-    for kind in ("breaker_tripped", "schedule_failed", "resource_alert"):
+    for kind in ("breaker_tripped", "schedule_failed", "resource_alert", "schedule_once_fired"):
         store.set_notification_kind_muted(kind, False)
     yield
-    for kind in ("breaker_tripped", "schedule_failed", "resource_alert"):
+    for kind in ("breaker_tripped", "schedule_failed", "resource_alert", "schedule_once_fired"):
         store.set_notification_kind_muted(kind, False)
 
 
@@ -260,6 +260,33 @@ def test_set_and_read_a_notification_preference_via_the_api():
 def test_set_preference_for_an_unknown_kind_400s():
     res = client.put("/api/notifications/preferences/not_a_real_kind", json={"muted": True})
     assert res.status_code == 400
+
+
+# ---- Batch 18: mute-all/unmute-all notification preferences ----
+
+def test_mute_all_notification_preferences_mutes_every_kind():
+    res = client.put("/api/notifications/preferences", json={"muted": True})
+    assert res.status_code == 200
+    assert all(muted is True for muted in res.json().values())
+
+    prefs = client.get("/api/notifications/preferences").json()
+    assert all(muted is True for muted in prefs.values())
+
+
+def test_unmute_all_notification_preferences_after_muting_all():
+    client.put("/api/notifications/preferences", json={"muted": True})
+    res = client.put("/api/notifications/preferences", json={"muted": False})
+    assert res.status_code == 200
+    assert all(muted is False for muted in res.json().values())
+
+    prefs = client.get("/api/notifications/preferences").json()
+    assert all(muted is False for muted in prefs.values())
+
+
+def test_mute_all_actually_suppresses_new_notifications_of_every_kind():
+    client.put("/api/notifications/preferences", json={"muted": True})
+    res = client.post("/api/notifications", json={"kind": "resource_alert", "message": "should be muted"})
+    assert res.json() == {"created": False, "kind": "resource_alert", "muted": True}
 
 
 def test_create_notification_endpoint_reports_muted_instead_of_creating():

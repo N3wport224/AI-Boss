@@ -778,3 +778,26 @@ def test_artifacts_csv_export_is_empty_but_valid_with_no_artifacts():
     assert res.status_code == 200
     lines = res.text.strip().splitlines()
     assert lines == ["filename,size_bytes,tags,modified_at"]
+
+
+# ---- Batch 18: download an artifact's raw file ----
+
+def test_download_artifact_returns_the_original_bytes():
+    csv_bytes = b"name,revenue\nRowDL1,6061\n"
+    client.post("/api/ingest/csv", files={"file": ("download_me.csv", csv_bytes, "text/csv")})
+    name = next(f["name"] for f in client.get("/api/artifacts").json() if f["name"].endswith("download_me.csv"))
+
+    res = client.get(f"/api/artifacts/{name}/download")
+    assert res.status_code == 200
+    assert res.content == csv_bytes
+    assert name in res.headers["content-disposition"]
+
+
+def test_download_unknown_artifact_404s():
+    res = client.get("/api/artifacts/does-not-exist.csv/download")
+    assert res.status_code == 404
+
+
+def test_download_artifact_rejects_path_traversal_in_filename():
+    res = client.get("/api/artifacts/..%2F..%2Fetc%2Fpasswd/download")
+    assert res.status_code == 404

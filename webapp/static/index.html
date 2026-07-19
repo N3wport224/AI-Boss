@@ -294,6 +294,11 @@
         <p id="schedule-error" class="builder-error hidden"></p>
         <button id="schedule-create-btn" class="btn btn-primary btn-small" type="button">Create Schedule</button>
       </div>
+      <div class="artifacts-bulk-tag-row">
+        <button id="schedules-bulk-pause-btn" class="btn btn-secondary btn-small" type="button" disabled>Pause selected</button>
+        <button id="schedules-bulk-resume-btn" class="btn btn-secondary btn-small" type="button" disabled>Resume selected</button>
+        <button id="schedules-bulk-delete-btn" class="btn btn-danger btn-small" type="button" disabled>Delete selected</button>
+      </div>
       <div id="schedules-list" class="runs-empty">No schedules yet — recurring runs will appear here.</div>
     </section>
 
@@ -354,6 +359,7 @@
         <span class="bar"></span>
         <h2>Agent Memory</h2>
         <div class="tier-heading-actions">
+          <a class="btn btn-secondary btn-small" href="/api/memory.csv" download>Export CSV</a>
           <button id="memory-clear-btn" class="btn btn-secondary btn-small" type="button">Clear all</button>
           <button class="collapse-toggle" type="button" data-collapse-key="memory">▾</button>
         </div>

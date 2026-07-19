@@ -64,6 +64,39 @@ def test_memory_endpoints_list_delete_and_redact():
     assert client.get("/api/memory").json() == []
 
 
+def test_memory_csv_export_contains_header_and_entries_and_redacts_secrets():
+    from webapp.main import store
+
+    store.clear_memory()
+    store.set_memory("batch18_marker", "plain value")
+    store.set_memory("batch18_secret_token", "sk-should-be-hidden")
+
+    res = client.get("/api/memory.csv")
+    assert res.status_code == 200
+    assert res.headers["content-type"].startswith("text/csv")
+    assert "attachment; filename=memory.csv" in res.headers["content-disposition"]
+
+    lines = res.text.strip().splitlines()
+    assert lines[0] == "key,value,updated_at"
+    marker_row = next(line for line in lines[1:] if line.startswith("batch18_marker"))
+    assert "plain value" in marker_row
+    secret_row = next(line for line in lines[1:] if line.startswith("batch18_secret_token"))
+    assert "sk-should-be-hidden" not in secret_row
+    assert "REDACTED" in secret_row
+
+    store.clear_memory()
+
+
+def test_memory_csv_export_is_empty_but_valid_with_no_entries():
+    from webapp.main import store
+
+    store.clear_memory()
+    res = client.get("/api/memory.csv")
+    assert res.status_code == 200
+    lines = res.text.strip().splitlines()
+    assert lines == ["key,value,updated_at"]
+
+
 def test_prune_runs_removes_only_finished_runs_older_than_cutoff(tmp_path):
     from datetime import datetime, timedelta, timezone
 

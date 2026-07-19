@@ -190,6 +190,62 @@ def test_schedule_crud_and_validation():
     assert not any(s["id"] == schedule_id for s in client.get("/api/schedules").json())
 
 
+def _create_test_schedule():
+    res = client.post(
+        "/api/schedules",
+        json={
+            "kind": "module",
+            "tier": "automation",
+            "name": "fetch_raw_metrics",
+            "inputs": {"signups": 1, "churn": 1, "revenue": 1},
+            "interval_seconds": 30,
+        },
+    )
+    return res.json()["id"]
+
+
+def test_bulk_set_schedules_enabled_pauses_and_resumes_a_selection():
+    id_a = _create_test_schedule()
+    id_b = _create_test_schedule()
+
+    pause_res = client.post("/api/schedules/bulk-set-enabled", json={"schedule_ids": [id_a, id_b], "enabled": False})
+    assert pause_res.status_code == 200
+    assert set(pause_res.json()["updated"]) == {id_a, id_b}
+    assert pause_res.json()["enabled"] is False
+
+    listed = {s["id"]: s for s in client.get("/api/schedules").json()}
+    assert listed[id_a]["enabled"] is False
+    assert listed[id_b]["enabled"] is False
+
+    resume_res = client.post("/api/schedules/bulk-set-enabled", json={"schedule_ids": [id_a, id_b], "enabled": True})
+    assert set(resume_res.json()["updated"]) == {id_a, id_b}
+    listed_after = {s["id"]: s for s in client.get("/api/schedules").json()}
+    assert listed_after[id_a]["enabled"] is True
+    assert listed_after[id_b]["enabled"] is True
+
+
+def test_bulk_set_schedules_enabled_skips_unknown_ids():
+    id_a = _create_test_schedule()
+    res = client.post("/api/schedules/bulk-set-enabled", json={"schedule_ids": [id_a, 9999999], "enabled": False})
+    assert res.status_code == 200
+    assert res.json()["updated"] == [id_a]
+
+
+def test_bulk_delete_schedules_removes_every_selected_one():
+    id_a = _create_test_schedule()
+    id_b = _create_test_schedule()
+    id_keep = _create_test_schedule()
+
+    res = client.post("/api/schedules/bulk-delete", json={"schedule_ids": [id_a, id_b]})
+    assert res.status_code == 200
+    assert set(res.json()["deleted"]) == {id_a, id_b}
+
+    remaining_ids = {s["id"] for s in client.get("/api/schedules").json()}
+    assert id_a not in remaining_ids
+    assert id_b not in remaining_ids
+    assert id_keep in remaining_ids
+
+
 def test_schedule_rejects_too_short_interval():
     res = client.post(
         "/api/schedules",

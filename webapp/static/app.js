@@ -119,6 +119,22 @@ const scheduleCreateBtn = document.getElementById("schedule-create-btn");
 const schedulesListEl = document.getElementById("schedules-list");
 const schedulerPauseToggleBtn = document.getElementById("scheduler-pause-toggle");
 const schedulerPausedBannerEl = document.getElementById("scheduler-paused-banner");
+const schedulesBulkPauseBtn = document.getElementById("schedules-bulk-pause-btn");
+const schedulesBulkResumeBtn = document.getElementById("schedules-bulk-resume-btn");
+const schedulesBulkDeleteBtn = document.getElementById("schedules-bulk-delete-btn");
+
+const selectedScheduleIds = new Set();
+
+function updateSchedulesBulkButtons() {
+  const disabled = selectedScheduleIds.size === 0;
+  schedulesBulkPauseBtn.disabled = disabled;
+  schedulesBulkResumeBtn.disabled = disabled;
+  schedulesBulkDeleteBtn.disabled = disabled;
+  const suffix = selectedScheduleIds.size ? ` (${selectedScheduleIds.size})` : "";
+  schedulesBulkPauseBtn.textContent = `Pause selected${suffix}`;
+  schedulesBulkResumeBtn.textContent = `Resume selected${suffix}`;
+  schedulesBulkDeleteBtn.textContent = `Delete selected${suffix}`;
+}
 
 let currentModulesByTier = {};
 let currentPipelines = [];
@@ -370,8 +386,23 @@ function renderNotificationsPanel() {
     ${alertsHtml}
     <h4>Recent activity</h4>
     ${activityHtml}
-    <h4>Preferences</h4>
+    <div class="notification-section-head">
+      <h4>Preferences</h4>
+      <div class="notification-section-actions">
+        <button class="btn btn-secondary btn-small" id="notifications-mute-all-btn" type="button">Mute all</button>
+        <button class="btn btn-secondary btn-small" id="notifications-unmute-all-btn" type="button">Unmute all</button>
+      </div>
+    </div>
     ${preferencesHtml}`;
+
+  notificationsPanel.querySelector("#notifications-mute-all-btn")?.addEventListener("click", async (e) => {
+    e.stopPropagation();
+    await setAllNotificationPreferences(true);
+  });
+  notificationsPanel.querySelector("#notifications-unmute-all-btn")?.addEventListener("click", async (e) => {
+    e.stopPropagation();
+    await setAllNotificationPreferences(false);
+  });
 
   notificationsPanel.querySelector("#notifications-clear-read-btn")?.addEventListener("click", async (e) => {
     e.stopPropagation();
@@ -402,6 +433,22 @@ function renderNotificationsPanel() {
       }
     });
   });
+}
+
+async function setAllNotificationPreferences(muted) {
+  try {
+    notificationPreferences = await (
+      await fetch("/api/notifications/preferences", {
+        method: "PUT",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ muted }),
+      })
+    ).json();
+    renderNotificationsPanel();
+    showToast(muted ? "Muted all notification kinds." : "Unmuted all notification kinds.", "success");
+  } catch (err) {
+    showToast(`Could not update notification preferences: ${err}`, "error");
+  }
 }
 
 function showToast(message, type = "success") {
@@ -3353,6 +3400,7 @@ function renderPipelineHistory(slug, panel, versions) {
     .map(
       (v) => `
       <div class="schedule-row" data-version-row="${v.version_id}">
+        <input type="checkbox" class="version-compare-checkbox" data-version-id="${v.version_id}" title="Select to compare against another version" />
         <div class="schedule-row-main">
           <strong>${new Date(v.saved_at).toLocaleString()}</strong>
           <span class="schedule-row-meta">version ${escapeHtml(v.version_id)}</span>
@@ -3367,7 +3415,56 @@ function renderPipelineHistory(slug, panel, versions) {
     )
     .join("");
 
-  panel.innerHTML = `<div class="version-history-list">${rows}</div>`;
+  panel.innerHTML = `
+    <div class="version-compare-bar">
+      <span class="schedule-row-meta">Select two versions to compare them against each other:</span>
+      <button class="btn btn-secondary btn-small" id="version-compare-btn-${slug}" type="button" disabled>Compare selected</button>
+    </div>
+    <div class="version-compare-result" id="version-compare-result-${slug}"></div>
+    <div class="version-history-list">${rows}</div>`;
+
+  const compareBtn = panel.querySelector(`#version-compare-btn-${slug}`);
+  const compareResultEl = panel.querySelector(`#version-compare-result-${slug}`);
+
+  panel.querySelectorAll(".version-compare-checkbox").forEach((checkbox) => {
+    checkbox.addEventListener("change", () => {
+      const checkedCount = panel.querySelectorAll(".version-compare-checkbox:checked").length;
+      compareBtn.disabled = checkedCount !== 2;
+    });
+  });
+
+  compareBtn.addEventListener("click", async () => {
+    const checked = [...panel.querySelectorAll(".version-compare-checkbox:checked")];
+    if (checked.length !== 2) return;
+    const [versionA, versionB] = checked.map((cb) => cb.dataset.versionId);
+
+    compareResultEl.innerHTML = `<p class="card-desc">Comparing…</p>`;
+    try {
+      const res = await fetch(`/api/pipelines/${slug}/versions/${versionA}/compare/${versionB}`);
+      const body = await res.json();
+      if (!res.ok) {
+        compareResultEl.innerHTML = `<p class="card-desc">${escapeHtml(body.detail || "Could not compare these versions.")}</p>`;
+        return;
+      }
+      const diffKeys = Object.keys(body.diff);
+      compareResultEl.innerHTML = diffKeys.length
+        ? diffKeys
+            .map(
+              (key) => `
+              <div class="schedule-row">
+                <div class="schedule-row-main">
+                  <strong>${escapeHtml(key)}</strong>
+                  <span class="schedule-row-meta">version ${escapeHtml(versionA)}: ${escapeHtml(JSON.stringify(body.diff[key].a))}</span>
+                  <span class="schedule-row-meta">version ${escapeHtml(versionB)}: ${escapeHtml(JSON.stringify(body.diff[key].b))}</span>
+                </div>
+              </div>`
+            )
+            .join("")
+        : `<p class="card-desc">These two versions are identical.</p>`;
+    } catch (err) {
+      compareResultEl.innerHTML = `<p class="card-desc">Compare failed: ${err}</p>`;
+    }
+  });
 
   panel.querySelectorAll("[data-view-version]").forEach((btn) => {
     btn.addEventListener("click", () => togglePipelineVersionDiff(slug, panel, btn.dataset.viewVersion));
@@ -3797,7 +3894,10 @@ async function loadArtifacts() {
           <span class="tag-chip-list">${tagChips}</span>
           <input type="text" class="tag-add-input" data-artifact="${escapeHtml(f.name)}" placeholder="+ tag" />
         </td>
-        <td><button class="btn btn-secondary btn-small artifact-view-btn" data-artifact="${escapeHtml(f.name)}" type="button">View</button></td>
+        <td>
+          <button class="btn btn-secondary btn-small artifact-view-btn" data-artifact="${escapeHtml(f.name)}" type="button">View</button>
+          <a class="btn btn-secondary btn-small" href="/api/artifacts/${encodeURIComponent(f.name)}/download" download title="Download the original file">⬇</a>
+        </td>
       </tr>
       <tr class="artifact-content-row hidden" data-content-for="${escapeHtml(f.name)}">
         <td colspan="6"></td>
@@ -4448,8 +4548,15 @@ async function loadSchedules() {
   if (!schedules.length) {
     schedulesListEl.className = "runs-empty";
     schedulesListEl.textContent = "No schedules yet — recurring runs will appear here.";
+    selectedScheduleIds.clear();
+    updateSchedulesBulkButtons();
     return;
   }
+
+  const liveIds = new Set(schedules.map((s) => s.id));
+  [...selectedScheduleIds].forEach((id) => {
+    if (!liveIds.has(id)) selectedScheduleIds.delete(id);
+  });
 
   schedulesListEl.className = "runs-table";
   schedulesListEl.innerHTML = schedules
@@ -4467,8 +4574,10 @@ async function loadSchedules() {
             : s.schedule_type === "once"
               ? `once at ${new Date(s.next_run_at).toLocaleString()}`
               : `every ${formatInterval(s.interval_seconds)}`;
+      const checked = selectedScheduleIds.has(s.id) ? "checked" : "";
       return `
         <div class="schedule-row">
+          <input type="checkbox" class="schedule-select-checkbox" data-schedule-id="${s.id}" ${checked} />
           <div class="schedule-row-main">
             <strong>${escapeHtml(label)}</strong>
             <span class="schedule-row-meta">${cadence} · next ${s.enabled ? timeUntil(s.next_run_at) : "paused"} · ${status}</span>
@@ -4483,6 +4592,16 @@ async function loadSchedules() {
         </div>`;
     })
     .join("");
+
+  schedulesListEl.querySelectorAll(".schedule-select-checkbox").forEach((checkbox) => {
+    checkbox.addEventListener("change", () => {
+      const id = Number(checkbox.dataset.scheduleId);
+      if (checkbox.checked) selectedScheduleIds.add(id);
+      else selectedScheduleIds.delete(id);
+      updateSchedulesBulkButtons();
+    });
+  });
+  updateSchedulesBulkButtons();
 
   schedulesListEl.querySelectorAll("[data-schedule-duplicate]").forEach((btn) => {
     btn.addEventListener("click", () => {
@@ -4512,6 +4631,34 @@ async function loadSchedules() {
     });
   });
 }
+
+async function bulkSetSelectedSchedulesEnabled(enabled) {
+  if (!selectedScheduleIds.size) return;
+  await fetch("/api/schedules/bulk-set-enabled", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ schedule_ids: [...selectedScheduleIds], enabled }),
+  });
+  showToast(`${enabled ? "Resumed" : "Paused"} ${selectedScheduleIds.size} schedule(s).`, "success");
+  await loadSchedules();
+}
+
+schedulesBulkPauseBtn.addEventListener("click", () => bulkSetSelectedSchedulesEnabled(false));
+schedulesBulkResumeBtn.addEventListener("click", () => bulkSetSelectedSchedulesEnabled(true));
+
+schedulesBulkDeleteBtn.addEventListener("click", async () => {
+  if (!selectedScheduleIds.size) return;
+  if (!confirm(`Delete ${selectedScheduleIds.size} selected schedule(s)? This cannot be undone.`)) return;
+
+  await fetch("/api/schedules/bulk-delete", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ schedule_ids: [...selectedScheduleIds] }),
+  });
+  showToast(`Deleted ${selectedScheduleIds.size} schedule(s).`, "success");
+  selectedScheduleIds.clear();
+  await loadSchedules();
+});
 
 function fillScheduleFormFrom(schedule) {
   scheduleFormEl.classList.remove("hidden");

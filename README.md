@@ -740,6 +740,23 @@ A few things live in the header/subheader on every page load:
 - **Bulk-delete saved pipelines** — checkbox-select multiple saved
   pipelines and remove them all at once with **Delete selected**.
 
+## Raw artifact downloads, schedule bulk actions, memory export, notification mute-all, and version-to-version pipeline diff
+
+- **Download an artifact's raw file** — a ⬇ button next to **View**
+  downloads the original uploaded bytes, distinct from the in-page
+  content viewer which shows extracted/derived content.
+- **Bulk pause/resume/delete schedules** — checkbox-select multiple
+  schedules and act on all of them at once.
+- **Export agent memory to CSV** — an **Export CSV** link in the Agent
+  Memory panel downloads every remembered key/value pair (secrets still
+  redacted).
+- **Mute-all/unmute-all notifications** — quick buttons in the bell
+  icon's Preferences section flip every notification kind's mute state
+  at once.
+- **Version-to-version pipeline diff** — checkbox-select any two
+  archived versions of a saved pipeline in its History panel to diff
+  them against each other, not just against the current definition.
+
 ## Tech stack
 
 - **Language:** Python 3.11+ — first-class async/sync support and native SDKs

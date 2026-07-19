@@ -1746,6 +1746,66 @@ only a JSON parse error or timeout falls back to an empty issue list.
      on a schedule and confirming the form reopens pre-filled, and
      checkbox-selecting two saved pipelines and confirming **Delete
      selected** removes both.
+147. **Add downloading an artifact's raw file**
+     (`GET /api/artifacts/{filename}/download` -- a `FileResponse` of the
+     original uploaded bytes as an attachment, distinct from the existing
+     `GET .../content`, which returns extracted/derived content (a CSV's
+     parsed rows, a PDF's stripped text) rather than the file itself). A
+     small ⬇ button sits next to each artifact's existing **View** button.
+148. **Add bulk pause/resume/delete for schedules**
+     (`POST /api/schedules/bulk-set-enabled` and
+     `POST /api/schedules/bulk-delete` -- mirror the existing per-schedule
+     `PATCH`/`DELETE` endpoints applied to a whole selection at once; an
+     unknown id is silently skipped for `bulk-set-enabled` (mirroring
+     bulk-tag's unknown-filename handling) and is simply a no-op delete
+     for `bulk-delete`, since `delete_schedule()` already tolerates that).
+     A checkbox per schedule row plus **Pause selected** / **Resume
+     selected** / **Delete selected** buttons, mirroring the existing
+     bulk-select pattern already used for Recent Runs, artifacts, and
+     saved pipelines.
+149. **Add exporting agent memory to CSV** (`GET /api/memory.csv` -- the
+     same `csv.DictWriter` + `StreamingResponse` pattern as every other
+     CSV export, over `key, value, updated_at`; goes through the same
+     `redact_secrets()` pass as `GET /api/memory` so a secret-shaped key
+     doesn't leak its value into the download either, and each value is
+     JSON-encoded into its own cell since a memory value can be any JSON
+     type, not just a scalar). An **Export CSV** link sits in the Agent
+     Memory panel's heading, next to the existing **Clear all** button.
+150. **Add mute-all/unmute-all notification preferences**
+     (`PUT /api/notifications/preferences` -- sets every kind in
+     `NOTIFICATION_KINDS` to the same muted state in one call, alongside
+     the existing per-kind `PUT .../preferences/{kind}`). **Mute all** /
+     **Unmute all** buttons sit next to the Preferences heading in the
+     bell-icon dropdown.
+151. **Add version-to-version pipeline diff**
+     (`GET /api/pipelines/{slug}/versions/{version_id}/compare/{other_version_id}`
+     -- diffs any two archived versions of the same pipeline against each
+     other, reusing the same `_diff_dicts()` shallow diff as the existing
+     version-vs-*current* diff at `GET .../versions/{version_id}`, which
+     only ever compares one archived version against what's live today).
+     A checkbox per version row in the History panel plus a **Compare
+     selected** button, enabled only once exactly two are checked,
+     rendering the diff inline -- mirroring the two-pipeline and
+     two-artifact compare UI patterns already used elsewhere.
+152. **Add tests for all of Batch 18**: downloading an artifact returns
+     its exact original bytes and 404s for an unknown filename or a
+     path-traversal attempt; bulk-set-enabled pausing and resuming a
+     selection and skipping an unknown id; bulk-delete removing every
+     selected schedule; memory.csv containing a plain entry while
+     redacting a secret-shaped one, and being valid-but-empty with
+     nothing stored; mute-all/unmute-all flipping every kind at once and
+     actually suppressing a new notification while muted; comparing two
+     pipeline versions reporting a differing `steps` key, an empty diff
+     for identical re-saves, and 404ing when either version id is
+     unknown. 473 tests total, stable across repeated clean full-suite
+     runs. Live-verified end to end with Playwright against a freshly
+     started server: downloading an artifact's raw bytes and confirming
+     the ⬇ link is present, bulk-pausing/resuming/deleting a pair of
+     schedules and confirming each API-level effect, downloading
+     `memory.csv` and confirming its **Export CSV** link, muting then
+     unmuting every notification kind via the bell icon's Preferences
+     section, and checkbox-comparing two archived pipeline versions and
+     reading the rendered diff.
 
 ## 9. Roadmap
 

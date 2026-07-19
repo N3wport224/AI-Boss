@@ -1156,6 +1156,23 @@ def get_pipeline_version(slug: str, version_id: str):
     return {"version": version, "diff": _diff_dicts(version, current)}
 
 
+@app.get("/api/pipelines/{slug}/versions/{version_id}/compare/{other_version_id}")
+def compare_pipeline_versions(slug: str, version_id: str, other_version_id: str):
+    """Diff any two archived versions of the same pipeline against each
+    other -- distinct from GET .../versions/{version_id}, which only ever
+    diffs one archived version against the pipeline's *current*
+    definition. Reuses the same _diff_dicts() shallow diff."""
+    try:
+        version_a = pipeline_store.load_pipeline_version(slug, version_id)
+    except FileNotFoundError:
+        raise HTTPException(status_code=404, detail=f"No version '{version_id}' for pipeline '{slug}'.")
+    try:
+        version_b = pipeline_store.load_pipeline_version(slug, other_version_id)
+    except FileNotFoundError:
+        raise HTTPException(status_code=404, detail=f"No version '{other_version_id}' for pipeline '{slug}'.")
+    return {"a": version_a, "b": version_b, "diff": _diff_dicts(version_a, version_b)}
+
+
 @app.post("/api/pipelines/{slug}/versions/{version_id}/restore")
 def restore_pipeline_version(slug: str, version_id: str):
     try:
@@ -1269,6 +1286,40 @@ def update_schedule(schedule_id: int, payload: ScheduleUpdate):
 def delete_schedule(schedule_id: int):
     store.delete_schedule(schedule_id)
     return {"deleted": schedule_id}
+
+
+class BulkScheduleIds(BaseModel):
+    schedule_ids: list[int]
+
+
+@app.post("/api/schedules/bulk-delete")
+def bulk_delete_schedules(payload: BulkScheduleIds):
+    """Delete a user-picked set of schedules in one action, mirroring the
+    existing bulk-delete pattern for runs and saved pipelines. An unknown
+    id is simply a no-op delete (delete_schedule() already tolerates
+    that), so every id in the request is reported as deleted."""
+    for schedule_id in payload.schedule_ids:
+        store.delete_schedule(schedule_id)
+    return {"deleted": payload.schedule_ids}
+
+
+class BulkScheduleSetEnabled(BaseModel):
+    schedule_ids: list[int]
+    enabled: bool
+
+
+@app.post("/api/schedules/bulk-set-enabled")
+def bulk_set_schedules_enabled(payload: BulkScheduleSetEnabled):
+    """Pause or resume a user-picked set of schedules at once -- the same
+    per-schedule enabled flag PATCH /api/schedules/{id} already flips,
+    just applied to a whole selection. An unknown id is skipped rather
+    than failing the whole batch."""
+    updated = []
+    for schedule_id in payload.schedule_ids:
+        schedule = store.set_schedule_enabled(schedule_id, payload.enabled)
+        if schedule is not None:
+            updated.append(schedule_id)
+    return {"updated": updated, "enabled": payload.enabled}
 
 
 @app.get("/api/scheduler/status")
@@ -1752,6 +1803,16 @@ def set_notification_preference(kind: str, payload: NotificationPreferenceUpdate
     return {"kind": kind, "muted": payload.muted}
 
 
+@app.put("/api/notifications/preferences")
+def set_all_notification_preferences(payload: NotificationPreferenceUpdate):
+    """Mute or unmute every notification kind in one action -- the same
+    per-kind PUT .../preferences/{kind} already does, just applied to the
+    whole fixed set of kinds at once instead of one at a time."""
+    for kind in NOTIFICATION_KINDS:
+        store.set_notification_kind_muted(kind, payload.muted)
+    return {kind: payload.muted for kind in NOTIFICATION_KINDS}
+
+
 @app.get("/api/memory")
 def list_memory():
     """Every key currently in the persistent cross-run memory store
@@ -1764,6 +1825,34 @@ def list_memory():
     # memory key even when its value is a bare string, not just a nested dict.
     redacted = redact_secrets({entry["key"]: entry["value"] for entry in entries})
     return [{**entry, "value": redacted[entry["key"]]} for entry in entries]
+
+
+@app.get("/api/memory.csv")
+def memory_csv():
+    """The persistent cross-run memory store as a downloadable CSV --
+    mirrors the audit-log/notifications/artifacts CSV export pattern. Goes
+    through the same redact_secrets() pass as GET /api/memory so a
+    secret-shaped key doesn't leak its value into the download either.
+    Each value is JSON-encoded into its own cell since a memory value can
+    be any JSON type (dict, list, string, number), not just a scalar."""
+    entries = store.all_memory()
+    redacted = redact_secrets({entry["key"]: entry["value"] for entry in entries})
+
+    buffer = io.StringIO()
+    writer = csv.DictWriter(buffer, fieldnames=["key", "value", "updated_at"])
+    writer.writeheader()
+    for entry in entries:
+        writer.writerow({
+            "key": entry["key"],
+            "value": json.dumps(redacted[entry["key"]]),
+            "updated_at": entry["updated_at"],
+        })
+
+    return StreamingResponse(
+        iter([buffer.getvalue()]),
+        media_type="text/csv",
+        headers={"Content-Disposition": "attachment; filename=memory.csv"},
+    )
 
 
 @app.delete("/api/memory/{key}")
@@ -2103,6 +2192,19 @@ def artifact_content(filename: str):
         return ingestion.read_artifact_content(safe_name)
     except FileNotFoundError:
         raise HTTPException(status_code=404, detail=f"No artifact named '{safe_name}'.")
+
+
+@app.get("/api/artifacts/{filename}/download")
+def download_artifact(filename: str):
+    """The original ingested file's raw bytes as a downloadable attachment --
+    distinct from GET .../content, which returns extracted/derived content
+    (a CSV's parsed rows, a PDF's stripped text) rather than the original
+    file a user could reopen in another program."""
+    safe_name = Path(filename).name  # strip any path components — filenames only, never a traversal target
+    path = ingestion.ARTIFACTS_DIR / safe_name
+    if not path.is_file():
+        raise HTTPException(status_code=404, detail=f"No artifact named '{safe_name}'.")
+    return FileResponse(path, filename=safe_name, media_type="application/octet-stream")
 
 
 @app.get("/api/watcher/status")

@@ -1054,6 +1054,79 @@ def test_saving_a_third_time_keeps_both_older_versions():
     assert saved_signups == [2, 1]
 
 
+def test_compare_two_pipeline_versions_reports_differing_steps():
+    for signups in (1, 2, 3):
+        client.post(
+            "/api/pipelines",
+            json={
+                "name": "Compare Versions",
+                "steps": [{"tier": "automation", "name": "fetch_raw_metrics", "inputs": {"signups": signups, "churn": 1, "revenue": 1}}],
+            },
+        )
+    versions = client.get("/api/pipelines/compare_versions/versions").json()
+    assert len(versions) == 2
+    newer_id = versions[0]["version_id"]  # signups=2
+    older_id = versions[1]["version_id"]  # signups=1
+
+    res = client.get(f"/api/pipelines/compare_versions/versions/{older_id}/compare/{newer_id}")
+    assert res.status_code == 200
+    body = res.json()
+    assert body["a"]["steps"][0]["inputs"]["signups"] == 1
+    assert body["b"]["steps"][0]["inputs"]["signups"] == 2
+    assert "steps" in body["diff"]
+
+
+def test_compare_two_pipeline_versions_is_empty_diff_for_identical_content():
+    client.post(
+        "/api/pipelines",
+        json={
+            "name": "Compare Identical",
+            "steps": [{"tier": "automation", "name": "fetch_raw_metrics", "inputs": {"signups": 5, "churn": 1, "revenue": 1}}],
+        },
+    )
+    # Re-save with the exact same steps (name change alone still archives a version).
+    client.post(
+        "/api/pipelines",
+        json={
+            "name": "Compare Identical",
+            "steps": [{"tier": "automation", "name": "fetch_raw_metrics", "inputs": {"signups": 5, "churn": 1, "revenue": 1}}],
+        },
+    )
+    client.post(
+        "/api/pipelines",
+        json={
+            "name": "Compare Identical",
+            "steps": [{"tier": "automation", "name": "fetch_raw_metrics", "inputs": {"signups": 5, "churn": 1, "revenue": 1}}],
+        },
+    )
+    versions = client.get("/api/pipelines/compare_identical/versions").json()
+    assert len(versions) == 2
+
+    res = client.get(
+        f"/api/pipelines/compare_identical/versions/{versions[0]['version_id']}/compare/{versions[1]['version_id']}"
+    )
+    assert res.status_code == 200
+    assert res.json()["diff"] == {}
+
+
+def test_compare_pipeline_versions_404s_on_an_unknown_version_on_either_side():
+    client.post(
+        "/api/pipelines",
+        json={"name": "Compare Unknown", "steps": [{"tier": "automation", "name": "fetch_raw_metrics"}]},
+    )
+    client.post(
+        "/api/pipelines",
+        json={
+            "name": "Compare Unknown",
+            "steps": [{"tier": "automation", "name": "fetch_raw_metrics", "inputs": {"signups": 2, "churn": 1, "revenue": 1}}],
+        },
+    )
+    real_id = client.get("/api/pipelines/compare_unknown/versions").json()[0]["version_id"]
+
+    assert client.get(f"/api/pipelines/compare_unknown/versions/does-not-exist/compare/{real_id}").status_code == 404
+    assert client.get(f"/api/pipelines/compare_unknown/versions/{real_id}/compare/does-not-exist").status_code == 404
+
+
 def test_restore_pipeline_version_brings_back_the_old_definition():
     client.post(
         "/api/pipelines",
