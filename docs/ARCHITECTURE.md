@@ -3276,6 +3276,41 @@ only a JSON parse error or timeout falls back to an empty issue list.
      module and confirming that pipeline's slug shows up in the module's
      `used_by` array in the downloaded file.
 
+269. **Add exporting module performance stats to JSON**
+     (`GET /api/modules/stats.json`, the downloadable-file counterpart to
+     the existing plain `GET /api/modules/stats` endpoint and its CSV
+     export -- the same JSON-mirrors-CSV pattern already used elsewhere.
+     An **Export JSON** link added next to the existing **Export CSV**
+     link in the Module Performance Stats panel).
+270. **Add exporting circuit breaker states to JSON**
+     (`GET /api/breakers.json`, the downloadable-file counterpart to
+     `GET /api/breakers` and its existing CSV export. An **Export
+     breakers JSON** link added next to the existing **Export breakers
+     CSV** link).
+271. **Add exporting the pipeline tag directory to JSON**
+     (`GET /api/pipelines/tags-summary.json`, the downloadable-file
+     counterpart to `GET /api/pipelines/tags-summary` and its existing
+     CSV export -- mirrors the artifact tags-summary JSON export from
+     Batch 43. An **Export tags JSON** link added next to the existing
+     **Export tags CSV** link in the pipeline tag directory).
+272. **Add tests for all of Batch 44**: a breakers.json test confirming it
+     returns exactly the same data as the plain `GET /api/breakers`
+     endpoint; a module-stats.json test confirming the same for
+     `GET /api/modules/stats` (fixed along the way: the first draft of
+     this test raced the module run's background thread against the
+     stats read, since standalone module runs return a `stream_id`
+     immediately rather than blocking until the run lands in the store --
+     fixed by collecting the run's SSE stream to completion before
+     reading stats, the same pattern already used throughout
+     `test_webapp.py`); a pipeline-tags-summary.json test mirroring the
+     artifact one from Batch 43. 674 tests total, stable across two
+     repeated clean full-suite runs. Live-verified end to end with
+     Playwright against a freshly started server: clicking each of the
+     three new **Export ... JSON** links (including tagging a fresh
+     pipeline first, for the pipeline tag directory export) and
+     confirming each downloaded file is well-formed JSON with the
+     expected data.
+
 ## 9. Roadmap
 
 The current engine is intentionally a single-process, synchronous, SQLite-backed

@@ -810,6 +810,18 @@ def module_stats_csv():
     )
 
 
+@app.get("/api/modules/stats.json")
+def module_stats_json():
+    """Same per-module run statistics as GET /api/modules/stats, as a
+    downloadable JSON file -- mirrors the JSON-mirrors-CSV pattern already
+    used by runs.json, memory.json, notifications.json, and audit-log.json."""
+    return StreamingResponse(
+        iter([json.dumps(store.module_stats(), indent=2)]),
+        media_type="application/json",
+        headers={"Content-Disposition": "attachment; filename=module_stats.json"},
+    )
+
+
 @app.post("/api/self-test")
 def run_self_test():
     """Actually run every enabled module once with its own manifest's default
@@ -933,6 +945,19 @@ def breakers_csv():
         iter([buffer.getvalue()]),
         media_type="text/csv",
         headers={"Content-Disposition": "attachment; filename=breakers.csv"},
+    )
+
+
+@app.get("/api/breakers.json")
+def breakers_json():
+    """Same breaker-state list as GET /api/breakers, as a downloadable JSON
+    file -- mirrors the JSON-mirrors-CSV pattern already used elsewhere. A
+    literal path, so no route-ordering conflict with
+    /api/breakers/{tier}/{name}/reset (a different HTTP method besides)."""
+    return StreamingResponse(
+        iter([json.dumps(store.all_module_health(), indent=2)]),
+        media_type="application/json",
+        headers={"Content-Disposition": "attachment; filename=breakers.json"},
     )
 
 
@@ -1736,6 +1761,18 @@ def pipeline_tags_summary_csv():
         iter([buffer.getvalue()]),
         media_type="text/csv",
         headers={"Content-Disposition": "attachment; filename=pipeline_tags.csv"},
+    )
+
+
+@app.get("/api/pipelines/tags-summary.json")
+def pipeline_tags_summary_json():
+    """Same tag/count directory as GET /api/pipelines/tags-summary, as a
+    downloadable JSON file -- mirrors the artifact tags-summary JSON export
+    and the JSON-mirrors-CSV pattern used throughout this app."""
+    return StreamingResponse(
+        iter([json.dumps(pipeline_tags_summary(), indent=2)]),
+        media_type="application/json",
+        headers={"Content-Disposition": "attachment; filename=pipeline_tags.json"},
     )
 
 

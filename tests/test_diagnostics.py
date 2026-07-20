@@ -1345,6 +1345,23 @@ def test_pipeline_tags_summary_csv_export_has_a_header_and_matches_the_json_summ
     assert any(line.startswith("csv_export_marker,") for line in lines[1:])
 
 
+def test_pipeline_tags_summary_json_export_matches_the_plain_json_summary():
+    client.post(
+        "/api/pipelines",
+        json={"name": "Tagdir Json Pipeline", "steps": [{"tier": "automation", "name": "fetch_raw_metrics"}]},
+    )
+    client.put("/api/pipelines/tagdir_json_pipeline/tags", json={"tags": ["json_export_marker"]})
+
+    res = client.get("/api/pipelines/tags-summary.json")
+    assert res.status_code == 200
+    assert res.headers["content-type"].startswith("application/json")
+    assert "attachment; filename=pipeline_tags.json" in res.headers["content-disposition"]
+
+    rows = res.json()
+    assert rows == client.get("/api/pipelines/tags-summary").json()
+    assert any(entry["tag"] == "json_export_marker" for entry in rows)
+
+
 def test_pipeline_tags_summary_excludes_tags_on_deleted_pipelines():
     client.post(
         "/api/pipelines",

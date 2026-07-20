@@ -1086,3 +1086,20 @@ def test_module_stats_csv_export_has_a_header_and_a_row_for_a_run_module():
     lines = res.text.strip().splitlines()
     assert lines[0] == "tier,name,total_runs,success_count,success_rate,avg_duration_seconds"
     assert any("fetch_raw_metrics" in line for line in lines[1:])
+
+
+def test_module_stats_json_export_matches_the_plain_json_listing():
+    run_res = client.post(
+        "/api/modules/automation/fetch_raw_metrics/run",
+        json={"inputs": {"signups": 4, "churn": 1, "revenue": 40}, "force_refresh": True},
+    )
+    _collect_stream(run_res.json()["stream_id"])  # wait for the background run to actually land in the store
+
+    res = client.get("/api/modules/stats.json")
+    assert res.status_code == 200
+    assert res.headers["content-type"].startswith("application/json")
+    assert "attachment; filename=module_stats.json" in res.headers["content-disposition"]
+
+    rows = res.json()
+    assert rows == client.get("/api/modules/stats").json()
+    assert any(r["tier"] == "automation" and r["name"] == "fetch_raw_metrics" for r in rows)

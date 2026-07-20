@@ -203,6 +203,19 @@ def test_breakers_csv_export_has_a_header_and_a_row_for_a_tracked_module():
     assert any(line.startswith("automation,http_request,") for line in lines[1:])
 
 
+def test_breakers_json_export_matches_the_plain_json_listing():
+    _fail_http_request_once()
+
+    res = client.get("/api/breakers.json")
+    assert res.status_code == 200
+    assert res.headers["content-type"].startswith("application/json")
+    assert "attachment; filename=breakers.json" in res.headers["content-disposition"]
+
+    rows = res.json()
+    assert rows == client.get("/api/breakers").json()
+    assert any(e["tier"] == "automation" and e["name"] == "http_request" for e in rows)
+
+
 def test_saved_pipeline_containing_a_tripped_module_is_blocked():
     for _ in range(3):
         _fail_http_request_once()

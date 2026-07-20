@@ -261,6 +261,7 @@
         <input type="text" id="pipelines-rename-tag-new" class="artifact-search-input" placeholder="…to" />
         <button id="pipelines-rename-tag-btn" class="btn btn-secondary btn-small" type="button" title="Rename this tag across every saved pipeline that carries it">Rename tag everywhere</button>
         <a class="btn btn-secondary btn-small" href="/api/pipelines/tags-summary.csv" download title="Every tag in use across saved pipelines and how many carry it, as a CSV">Export tags CSV</a>
+        <a class="btn btn-secondary btn-small" href="/api/pipelines/tags-summary.json" download title="Every tag in use across saved pipelines and how many carry it, as JSON">Export tags JSON</a>
       </div>
       <div id="pipeline-tag-directory" class="tag-directory hidden"></div>
       <div id="pipeline-deep-search-results" class="hidden"></div>
@@ -420,6 +421,7 @@
         <div class="notification-section-head">
           <h4>Module Performance Stats</h4>
           <a class="btn btn-secondary btn-small" href="/api/modules/stats.csv" download>Export CSV</a>
+          <a class="btn btn-secondary btn-small" href="/api/modules/stats.json" download>Export JSON</a>
         </div>
         <div id="module-stats-list" class="runs-empty">No runs recorded yet.</div>
       </div>
@@ -570,6 +572,7 @@
       <a class="btn btn-secondary btn-small" href="/api/modules/used-by.csv" download title="Which saved pipelines use each module, as a CSV">Export used-by CSV</a>
       <a class="btn btn-secondary btn-small" href="/api/modules/used-by.json" download title="Which saved pipelines use each module, as JSON">Export used-by JSON</a>
       <a class="btn btn-secondary btn-small" href="/api/breakers.csv" download title="Every module's circuit breaker state, as a CSV">Export breakers CSV</a>
+      <a class="btn btn-secondary btn-small" href="/api/breakers.json" download title="Every module's circuit breaker state, as JSON">Export breakers JSON</a>
       <a class="btn btn-secondary btn-small" href="/api/modules/directory.csv" download title="Every module's name, tier, description, enabled state, and status in one CSV">Export directory CSV</a>
       <a class="btn btn-secondary btn-small" href="/api/modules/directory.json" download title="Every module's name, tier, description, enabled state, and status, as JSON">Export directory JSON</a>
       <label class="schedule-select-all-label">

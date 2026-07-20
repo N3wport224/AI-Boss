@@ -1157,6 +1157,17 @@ A few things live in the header/subheader on every page load:
   directory already had a CSV export; an **Export tags JSON** link now
   sits next to it too.
 
+## More JSON export symmetry: module stats, breakers, pipeline tags
+
+- **Export module performance stats to JSON** — an **Export JSON** link
+  joins the existing **Export CSV** link in the Module Performance Stats
+  panel.
+- **Export circuit breaker states to JSON** — an **Export breakers JSON**
+  link joins the existing **Export breakers CSV** link.
+- **Export the pipeline tag directory to JSON** — an **Export tags JSON**
+  link joins the existing **Export tags CSV** link, mirroring the artifact
+  tag directory's JSON export.
+
 ## Tech stack
 
 - **Language:** Python 3.11+ — first-class async/sync support and native SDKs
