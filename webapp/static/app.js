@@ -4955,6 +4955,51 @@ artifactSearchInput.addEventListener("input", () => {
   artifactSearchDebounce = setTimeout(() => runArtifactSearch(query), 250);
 });
 
+// ---- Search across artifact notes (distinct from ingested-content search above) ----
+
+const artifactNotesSearchInput = document.getElementById("artifact-notes-search-input");
+const artifactNotesSearchBtn = document.getElementById("artifact-notes-search-btn");
+const artifactNotesSearchResultsEl = document.getElementById("artifact-notes-search-results");
+
+async function searchArtifactNotes() {
+  const query = artifactNotesSearchInput.value.trim();
+  if (!query) {
+    artifactNotesSearchResultsEl.classList.add("hidden");
+    artifactNotesSearchResultsEl.innerHTML = "";
+    return;
+  }
+
+  const res = await fetch(`/api/artifacts/search-notes?q=${encodeURIComponent(query)}`);
+  const body = await res.json();
+  artifactNotesSearchResultsEl.classList.remove("hidden");
+
+  if (!body.results.length) {
+    artifactNotesSearchResultsEl.innerHTML = `<div class="runs-empty">No artifact notes match "${escapeHtml(query)}".</div>`;
+    return;
+  }
+
+  artifactNotesSearchResultsEl.innerHTML = body.results
+    .map(
+      (r) => `
+      <div class="runs-search-hit">
+        <span class="hit-meta">${escapeHtml(r.filename)}</span>
+        <span class="hit-snippet">${escapeHtml(r.note)}</span>
+      </div>`
+    )
+    .join("");
+}
+
+artifactNotesSearchBtn.addEventListener("click", searchArtifactNotes);
+artifactNotesSearchInput.addEventListener("keydown", (e) => {
+  if (e.key === "Enter") searchArtifactNotes();
+});
+artifactNotesSearchInput.addEventListener("input", () => {
+  if (!artifactNotesSearchInput.value.trim()) {
+    artifactNotesSearchResultsEl.classList.add("hidden");
+    artifactNotesSearchResultsEl.innerHTML = "";
+  }
+});
+
 async function uploadFile(file) {
   const lowerName = file.name.toLowerCase();
   const isPdf = lowerName.endsWith(".pdf");
@@ -6263,6 +6308,7 @@ async function loadAutoBackupSnapshots() {
           <input type="checkbox" class="snapshot-select-checkbox" data-snapshot="${escapeHtml(s.filename)}" ${selectedSnapshotFilenames.has(s.filename) ? "checked" : ""} title="Select for comparison" />
           <span>${escapeHtml(s.filename)}</span>
           <span class="runs-purge-label">${formatBytes(s.size_bytes)} — ${new Date(s.modified_at).toLocaleString()}</span>
+          <a class="btn btn-secondary btn-small" href="/api/backup/auto/snapshot/${encodeURIComponent(s.filename)}" download title="Download this snapshot's raw JSON file">⬇ Download</a>
           <button class="btn btn-secondary btn-small" data-auto-backup-restore="${escapeHtml(s.filename)}">Restore</button>
           <button class="btn btn-danger btn-small" data-auto-backup-delete="${escapeHtml(s.filename)}">Delete</button>
         </div>`

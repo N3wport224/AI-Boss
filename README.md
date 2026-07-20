@@ -1049,6 +1049,25 @@ A few things live in the header/subheader on every page load:
   free-text note (added last batch) on every selected file at once,
   mirroring the existing bulk-clear-schedule-labels pattern.
 
+## Single-snapshot downloads, artifact-note search, and a module directory CSV
+
+- **Download a single automatic backup snapshot file** — each row in the
+  automatic backup snapshot list gets a **⬇ Download** link that hands
+  back that one snapshot's raw JSON file as-is, distinct from **Restore**
+  (which merges its contents into the live store) and from the existing
+  "download all as zip" bundle.
+- **Search across artifact notes** — a **Search notes** box searches the
+  free-text notes attached to artifacts (added in an earlier batch),
+  mirroring the existing run-notes search; distinct from the ingested-
+  content search box above it, which only searches extracted `.json`/
+  `.txt` file content and never looks at the note field.
+- **Export the full module directory to CSV** — an **Export directory
+  CSV** link joins the existing used-by and breakers CSV exports, giving
+  one CSV with every enabled module's tier, name, description, runtime
+  enabled state, live status, and breaker-tripped flag together — none of
+  the other module CSV exports carries the description and status fields
+  in the same row.
+
 ## Tech stack
 
 - **Language:** Python 3.11+ — first-class async/sync support and native SDKs

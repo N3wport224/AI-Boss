@@ -1802,3 +1802,21 @@ def test_module_used_by_csv_export_leaves_used_by_blank_for_an_unused_module():
     lines = res.text.strip().splitlines()
     escalation_line = next(line for line in lines[1:] if line.startswith("agent,escalation_agent,"))
     assert escalation_line == "agent,escalation_agent,"
+
+
+def test_module_directory_csv_export_has_a_header_and_a_row_per_enabled_module():
+    import csv as csv_module
+    import io as io_module
+
+    res = client.get("/api/modules/directory.csv")
+    assert res.status_code == 200
+    assert res.headers["content-type"].startswith("text/csv")
+    assert "attachment; filename=modules_directory.csv" in res.headers["content-disposition"]
+
+    rows = list(csv_module.DictReader(io_module.StringIO(res.text)))
+    assert set(rows[0].keys()) == {"tier", "name", "description", "enabled", "status", "breaker_tripped"}
+    escalation_row = next(r for r in rows if r["tier"] == "agent" and r["name"] == "escalation_agent")
+    assert escalation_row["description"]
+    assert escalation_row["enabled"] in ("True", "False")
+    assert escalation_row["status"] in ("ready", "error")
+    assert escalation_row["breaker_tripped"] in ("True", "False")

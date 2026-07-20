@@ -166,6 +166,11 @@
         <div id="artifact-tag-directory" class="tag-directory hidden"></div>
         <div id="artifact-compare-result" class="hidden"></div>
         <div id="artifact-search-results" class="hidden"></div>
+        <div class="artifacts-controls">
+          <input type="search" id="artifact-notes-search-input" placeholder="Search your notes on artifacts…" class="artifact-search-input" />
+          <button id="artifact-notes-search-btn" class="btn btn-secondary btn-small" type="button">Search notes</button>
+        </div>
+        <div id="artifact-notes-search-results" class="hidden"></div>
         <div id="artifacts-list" class="runs-table"></div>
 
         <div class="artifacts-row">
@@ -542,6 +547,7 @@
     <div class="artifacts-bulk-tag-row" id="modules-bulk-row">
       <a class="btn btn-secondary btn-small" href="/api/modules/used-by.csv" download title="Which saved pipelines use each module, as a CSV">Export used-by CSV</a>
       <a class="btn btn-secondary btn-small" href="/api/breakers.csv" download title="Every module's circuit breaker state, as a CSV">Export breakers CSV</a>
+      <a class="btn btn-secondary btn-small" href="/api/modules/directory.csv" download title="Every module's name, tier, description, enabled state, and status in one CSV">Export directory CSV</a>
       <label class="schedule-select-all-label">
         <input type="checkbox" id="modules-select-all" />
         Select all modules

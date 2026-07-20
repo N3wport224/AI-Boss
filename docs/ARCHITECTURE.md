@@ -2921,6 +2921,57 @@ only a JSON parse error or timeout falls back to an empty issue list.
      `breaker_tripped` notification to that same server; uploading a CSV,
      setting its note via the API, checkbox-selecting it, and clicking
      **Clear notes** blanked the note, confirmed via `GET /api/artifacts`.
+241. **Add downloading a single automatic backup snapshot file**
+     (`GET /api/backup/auto/snapshot/{filename}`, returning
+     `FileResponse(path, filename=filename, media_type="application/json")`
+     for the raw snapshot -- distinct from the existing
+     `POST /api/backup/auto/restore/{filename}`, which merges the
+     snapshot's contents into the live store rather than just handing
+     back the file, and from the existing "download all as zip" bundle,
+     which packages every snapshot rather than just one. Reuses the
+     existing `_resolve_auto_backup_path()` filename-validation helper, so
+     it inherits the same path-traversal and unknown-filename 404
+     protections as the sibling `DELETE` handler on the identical path --
+     no conflict, since FastAPI dispatches by HTTP method first. A plain
+     **⬇ Download** link (no JS wiring needed) added to each snapshot row,
+     right before the existing **Restore** button).
+242. **Add searching across artifact notes**
+     (`StateStore.search_artifact_notes()` and
+     `GET /api/artifacts/search-notes`, mirroring `search_run_notes()`'s
+     exact SQL LIKE-with-escaped-wildcards pattern -- an artifact without
+     a note is never a match. Distinct from the existing
+     `ingestion.search_artifacts()` / `GET /api/artifacts/search`, which
+     only searches extracted `.json`/`.txt` file content and never looks
+     at the separately-stored `note` field. A **Search notes** box and
+     results list added to the Data Ingestion panel, below the existing
+     ingested-content search box, mirroring the run-notes search UI from
+     Batch 15).
+243. **Add exporting the full module directory to CSV**
+     (`GET /api/modules/directory.csv`, one row per enabled module with
+     tier, name, description, runtime-enabled state, live status, and
+     breaker-tripped flag together -- the one module CSV export that
+     carries the description and status fields, which none of the
+     existing `used-by.csv`, `stats.csv`, or `breakers.csv` exports do. An
+     **Export directory CSV** link joins the other two module CSV export
+     links in the modules panel's bulk-action row).
+244. **Add tests for all of Batch 37**: a snapshot-download round trip
+     (content matches the on-disk file's JSON, correct content-type and
+     content-disposition) plus the existing 404-on-unknown/unsafe-filename
+     pattern reused for the new endpoint; an artifact-notes search test
+     confirming only the noted, matching file comes back and an unrelated
+     note is excluded, plus a blank-query-returns-empty test; a module-
+     directory CSV test parsing the response with `csv.DictReader` and
+     checking every expected column is present and correctly typed for a
+     known module. 633 tests total, stable across two repeated clean
+     full-suite runs. Live-verified end to end with Playwright against a
+     freshly started server: triggering a real backup snapshot then
+     confirming both the rendered **⬇ Download** link's href and a direct
+     GET against it return matching JSON; ingesting a CSV, setting a
+     unique note on it via the API, typing a matching keyword into the
+     new **Search notes** box, and confirming the result list shows the
+     right filename and note text; and confirming the **Export directory
+     CSV** link's target returns a well-formed CSV with the expected
+     header row and at least one data row.
 
 ## 9. Roadmap
 

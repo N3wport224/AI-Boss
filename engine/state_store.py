@@ -985,6 +985,25 @@ class StateStore:
             )
             self._conn.commit()
 
+    def search_artifact_notes(self, query: str, limit: int = 20) -> list[dict]:
+        """Case-insensitive keyword search across every artifact's own note --
+        mirrors search_run_notes()'s content-search pattern, applied to
+        artifact annotations rather than run annotations. This is distinct
+        from ingestion.search_artifacts(), which only searches extracted
+        .json/.txt file content and never looks at the separately-stored
+        note field. An artifact without a note is never a match."""
+        query_stripped = query.strip()
+        if not query_stripped:
+            return []
+        like_pattern = "%" + query_stripped.replace("%", r"\%").replace("_", r"\_") + "%"
+        with self._lock:
+            rows = self._conn.execute(
+                "SELECT filename, note FROM artifact_notes WHERE note LIKE ? ESCAPE '\\' "
+                "ORDER BY filename LIMIT ?",
+                (like_pattern, limit),
+            ).fetchall()
+        return [{"filename": filename, "note": note} for filename, note in rows]
+
     def set_pipeline_tags(self, slug: str, tags: list[str]) -> list[str]:
         """Replace the full tag set for a saved pipeline (keyed by its slug).
         An empty list clears tagging entirely."""

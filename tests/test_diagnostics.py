@@ -611,6 +611,35 @@ def test_delete_auto_backup_snapshot_404s_for_an_unknown_or_unsafe_filename():
     assert res.status_code == 404
 
 
+def test_download_an_individual_automatic_backup_snapshot_file():
+    from webapp.main import BACKUPS_DIR, _auto_backup
+    import shutil
+
+    shutil.rmtree(BACKUPS_DIR, ignore_errors=True)
+    try:
+        client.post("/api/backup/auto/run-now")
+        files = list(BACKUPS_DIR.glob("backup_*.json"))
+        assert len(files) == 1
+        filename = files[0].name
+
+        res = client.get(f"/api/backup/auto/snapshot/{filename}")
+        assert res.status_code == 200
+        assert res.headers["content-type"].startswith("application/json")
+        assert filename in res.headers["content-disposition"]
+        assert res.json() == json.loads(files[0].read_text())
+    finally:
+        _auto_backup.configure(enabled=False, interval_hours=24.0, keep_count=7)
+        shutil.rmtree(BACKUPS_DIR, ignore_errors=True)
+
+
+def test_download_auto_backup_snapshot_404s_for_an_unknown_or_unsafe_filename():
+    res = client.get("/api/backup/auto/snapshot/does-not-exist.json")
+    assert res.status_code == 404
+
+    res = client.get("/api/backup/auto/snapshot/..%2F..%2Fetc%2Fpasswd")
+    assert res.status_code == 404
+
+
 def test_auto_backup_list_csv_export_has_a_header_and_matches_the_json_list():
     from webapp.main import BACKUPS_DIR, _auto_backup
     import shutil

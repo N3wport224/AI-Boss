@@ -643,6 +643,46 @@ def modules_used_by_csv():
     )
 
 
+@app.get("/api/modules/directory.csv")
+def modules_directory_csv():
+    """The full module directory as a single downloadable CSV -- name,
+    tier, description, whether it's currently enabled, and its live
+    status/breaker state all in one row per module. Distinct from
+    used-by.csv (just the pipeline reverse lookup), stats.csv (just run
+    counters), and breakers.csv (just breaker state): none of those three
+    carries the description or the enabled/runtime-status fields together,
+    so this is the one CSV that captures "what modules exist and are they
+    healthy" at a glance."""
+    buffer = io.StringIO()
+    writer = csv.DictWriter(
+        buffer,
+        fieldnames=["tier", "name", "description", "enabled", "status", "breaker_tripped"],
+    )
+    writer.writeheader()
+    for tier, directory in TIER_DIRS.items():
+        for manifest in load_manifests(directory):
+            if not manifest.get("enabled", True):
+                continue
+            last_success = store.latest_step_status(manifest["name"])
+            health = store.get_module_health(tier, manifest["name"])
+            writer.writerow(
+                {
+                    "tier": tier,
+                    "name": manifest["name"],
+                    "description": manifest.get("description", ""),
+                    "enabled": _is_module_effectively_enabled(tier, manifest["name"]),
+                    "status": "error" if last_success is False else "ready",
+                    "breaker_tripped": health["tripped"],
+                }
+            )
+
+    return StreamingResponse(
+        iter([buffer.getvalue()]),
+        media_type="text/csv",
+        headers={"Content-Disposition": "attachment; filename=modules_directory.csv"},
+    )
+
+
 class ModuleScaffoldRequest(BaseModel):
     tier: str
     name: str
@@ -2493,6 +2533,19 @@ def restore_auto_backup(filename: str):
     return counts
 
 
+@app.get("/api/backup/auto/snapshot/{filename}")
+def download_auto_backup_snapshot(filename: str):
+    """Download one automatic backup snapshot's raw JSON file as-is --
+    distinct from POST /api/backup/auto/restore/{filename}, which merges
+    its contents into the live store instead of just handing you the
+    file. Same GET/DELETE method-based dispatch as every other pair of
+    routes sharing this path in this file (FastAPI dispatches by HTTP
+    method first, so there's no ordering conflict with the DELETE handler
+    below)."""
+    path = _resolve_auto_backup_path(filename)
+    return FileResponse(path, filename=filename, media_type="application/json")
+
+
 @app.delete("/api/backup/auto/snapshot/{filename}")
 def delete_auto_backup_snapshot(filename: str):
     """Remove a single automatic backup snapshot early, without waiting for
@@ -3279,6 +3332,14 @@ async def import_artifacts_zip(file: UploadFile = File(...)):
 @app.get("/api/artifacts/search")
 def search_artifacts(q: str = ""):
     return {"query": q, "results": ingestion.search_artifacts(q)}
+
+
+@app.get("/api/artifacts/search-notes")
+def search_artifact_notes(q: str = "", limit: int = 20):
+    """Keyword search across the free-text notes attached to artifacts
+    (Batch 33) -- distinct from /api/artifacts/search, which searches
+    extracted .json/.txt file content, not the user's own annotations."""
+    return {"query": q, "results": store.search_artifact_notes(q, limit)}
 
 
 class ArtifactTagsUpdate(BaseModel):

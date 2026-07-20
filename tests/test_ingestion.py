@@ -365,6 +365,32 @@ def test_bulk_clear_artifact_notes_is_a_no_op_on_an_empty_selection():
     assert res.json() == {"cleared": []}
 
 
+# ---- Batch 37: search across artifact notes ----
+
+
+def test_search_artifact_notes_matches_only_noted_files():
+    client.post("/api/ingest/csv", files={"file": ("searchnote_a.csv", b"x,y\n1401,1402\n", "text/csv")})
+    client.post("/api/ingest/csv", files={"file": ("searchnote_b.csv", b"x,y\n1403,1404\n", "text/csv")})
+    files = client.get("/api/artifacts").json()
+    a_name = next(f["name"] for f in files if f["name"].endswith("searchnote_a.csv"))
+    b_name = next(f["name"] for f in files if f["name"].endswith("searchnote_b.csv"))
+    client.put(f"/api/artifacts/{a_name}/note", json={"note": "quarterly finance rollup"})
+    client.put(f"/api/artifacts/{b_name}/note", json={"note": "unrelated marketing notes"})
+
+    res = client.get("/api/artifacts/search-notes?q=finance")
+    assert res.status_code == 200
+    body = res.json()
+    assert body["query"] == "finance"
+    assert len(body["results"]) == 1
+    assert body["results"][0] == {"filename": a_name, "note": "quarterly finance rollup"}
+
+
+def test_search_artifact_notes_is_empty_for_a_blank_query():
+    res = client.get("/api/artifacts/search-notes?q=")
+    assert res.status_code == 200
+    assert res.json()["results"] == []
+
+
 def test_filter_artifacts_by_tag():
     client.post("/api/ingest/csv", files={"file": ("filterme_a.csv", b"x,y\n131,231\n", "text/csv")})
     client.post("/api/ingest/csv", files={"file": ("filterme_b.csv", b"x,y\n141,241\n", "text/csv")})
