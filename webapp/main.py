@@ -45,6 +45,7 @@ from . import cache, graph, health, ingestion, linting, perf, pipelines as pipel
 from .templates import PIPELINE_TEMPLATES
 from .events import RunEventBus
 from .ratelimit import RateLimiter
+from .auto_backup import AutoBackup
 from .scheduler import Scheduler, next_daily_run_at, next_weekly_run_at
 from .watcher import FilesystemWatcher, WATCH_DIR, ensure_watch_dir
 
@@ -101,6 +102,7 @@ async def lifespan(app: FastAPI):
         thread.join(timeout=5.0)
     _watcher.stop()
     _scheduler.stop()
+    _auto_backup.stop()
     store.close()
 
 
@@ -553,6 +555,22 @@ def _notify_once_schedule_fired(schedule: dict) -> None:
 
 _scheduler = Scheduler(store, _trigger_schedule, on_error=_notify_schedule_error, on_once_fired=_notify_once_schedule_fired)
 _scheduler.start()
+
+
+BACKUPS_DIR = ROOT / "backups"
+
+
+def _build_backup_snapshot() -> dict:
+    """The same snapshot shape GET /api/backup/export downloads on demand,
+    reused here so the automatic timer and the manual export can never
+    drift apart into two different backup formats."""
+    snapshot = store.export_snapshot()
+    snapshot["pipelines"] = pipeline_store.list_pipelines()
+    return snapshot
+
+
+_auto_backup = AutoBackup(BACKUPS_DIR, _build_backup_snapshot)
+_auto_backup.start()
 
 
 @app.get("/api/modules")
@@ -1788,6 +1806,33 @@ def bulk_set_schedules_enabled(payload: BulkScheduleSetEnabled):
     return {"updated": updated, "enabled": payload.enabled}
 
 
+@app.post("/api/schedules/bulk-run-now")
+def bulk_run_schedules_now(payload: BulkScheduleIds):
+    """The same immediate, cadence-preserving fire as
+    POST /api/schedules/{id}/run-now, applied to a whole checkbox
+    selection at once. Best-effort: one schedule blocked by an open
+    breaker (or any other trigger failure) doesn't stop the rest of the
+    selection from running -- each id succeeds or fails independently,
+    same as every other bulk action in this app."""
+    schedules_by_id = {s["id"]: s for s in store.list_schedules()}
+    triggered = []
+    failed = {}
+    for schedule_id in payload.schedule_ids:
+        schedule = schedules_by_id.get(schedule_id)
+        if schedule is None:
+            failed[schedule_id] = "No schedule with this id."
+            continue
+        try:
+            _trigger_schedule(schedule)
+            triggered.append(schedule_id)
+        except Exception as exc:
+            failed[schedule_id] = str(exc)
+    store.record_audit_event(
+        "schedule_bulk_run_now", f"Manually ran {len(triggered)} selected schedule(s) now."
+    )
+    return {"triggered": triggered, "failed": failed}
+
+
 @app.post("/api/schedules/bulk-export")
 def bulk_export_schedules(payload: BulkScheduleIds):
     """Download a user-picked set of schedules as a JSON file -- the
@@ -2151,13 +2196,49 @@ def export_backup():
     """A portable JSON snapshot of every run, step, schedule, ingested-file
     record, and saved pipeline — for basic diagnostics/maintenance backup,
     not a byte-for-byte database copy (see /api/backup/db for that)."""
-    snapshot = store.export_snapshot()
-    snapshot["pipelines"] = pipeline_store.list_pipelines()
+    snapshot = _build_backup_snapshot()
     return StreamingResponse(
         iter([json.dumps(snapshot, indent=2, default=str)]),
         media_type="application/json",
         headers={"Content-Disposition": "attachment; filename=ai-boss-backup.json"},
     )
+
+
+@app.get("/api/backup/auto/status")
+def auto_backup_status():
+    """Whether the automatic periodic backup timer is on, its interval and
+    retention, and when it last (and will next) run."""
+    return _auto_backup.status()
+
+
+class AutoBackupConfig(BaseModel):
+    enabled: bool
+    interval_hours: float = 24.0
+    keep_count: int = 7
+
+
+@app.patch("/api/backup/auto")
+def configure_auto_backup(payload: AutoBackupConfig):
+    if payload.interval_hours <= 0:
+        raise HTTPException(status_code=400, detail="interval_hours must be greater than 0.")
+    if payload.keep_count < 1:
+        raise HTTPException(status_code=400, detail="keep_count must be at least 1.")
+    _auto_backup.configure(payload.enabled, payload.interval_hours, payload.keep_count)
+    store.record_audit_event(
+        "auto_backup_configured",
+        f"Automatic backup {'enabled' if payload.enabled else 'disabled'} "
+        f"(every {payload.interval_hours}h, keep last {payload.keep_count}).",
+    )
+    return _auto_backup.status()
+
+
+@app.post("/api/backup/auto/run-now")
+def run_auto_backup_now():
+    """Write a snapshot immediately, outside the timer's own interval --
+    for "back this up right now" without waiting or changing the
+    configured cadence."""
+    timestamp = _auto_backup.run_now()
+    return {"backed_up_at": timestamp}
 
 
 @app.get("/api/backup/db")

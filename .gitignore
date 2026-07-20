@@ -10,5 +10,6 @@ orchestrator.db
 *.db
 artifacts/
 watched_input/
+backups/
 
 .DS_Store

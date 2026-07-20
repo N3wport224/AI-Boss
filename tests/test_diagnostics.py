@@ -482,6 +482,60 @@ def test_backup_db_download_is_a_valid_sqlite_file(tmp_path):
     assert {"runs", "steps", "schedules"}.issubset(tables)
 
 
+# ---- Batch 31: automatic periodic backup snapshot to disk ----
+
+
+def test_auto_backup_status_defaults_to_disabled():
+    from webapp.main import _auto_backup
+
+    _auto_backup.configure(enabled=False, interval_hours=24.0, keep_count=7)
+    res = client.get("/api/backup/auto/status")
+    assert res.status_code == 200
+    body = res.json()
+    assert body["enabled"] is False
+    assert body["interval_hours"] == 24.0
+    assert body["keep_count"] == 7
+
+
+def test_configure_auto_backup_rejects_invalid_values():
+    res = client.patch("/api/backup/auto", json={"enabled": True, "interval_hours": 0, "keep_count": 3})
+    assert res.status_code == 400
+    res2 = client.patch("/api/backup/auto", json={"enabled": True, "interval_hours": 1, "keep_count": 0})
+    assert res2.status_code == 400
+
+
+def test_configure_and_run_auto_backup_writes_a_snapshot_file():
+    from webapp.main import BACKUPS_DIR, _auto_backup
+    import shutil
+
+    shutil.rmtree(BACKUPS_DIR, ignore_errors=True)
+    try:
+        res = client.patch("/api/backup/auto", json={"enabled": True, "interval_hours": 12, "keep_count": 4})
+        assert res.status_code == 200
+        assert res.json() == {
+            "enabled": True,
+            "interval_hours": 12.0,
+            "keep_count": 4,
+            "last_backup_at": None,
+            "next_backup_at": None,
+        }
+
+        run_res = client.post("/api/backup/auto/run-now")
+        assert run_res.status_code == 200
+        assert run_res.json()["backed_up_at"] is not None
+
+        files = list(BACKUPS_DIR.glob("backup_*.json"))
+        assert len(files) == 1
+
+        status_res = client.get("/api/backup/auto/status")
+        status_body = status_res.json()
+        assert status_body["last_backup_at"] is not None
+        assert status_body["next_backup_at"] is not None
+    finally:
+        _auto_backup.configure(enabled=False, interval_hours=24.0, keep_count=7)
+        shutil.rmtree(BACKUPS_DIR, ignore_errors=True)
+
+
 def test_metrics_reflect_a_completed_run():
     before = client.get("/api/metrics").json()
 

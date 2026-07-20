@@ -221,6 +221,7 @@ const schedulerPauseToggleBtn = document.getElementById("scheduler-pause-toggle"
 const schedulerPausedBannerEl = document.getElementById("scheduler-paused-banner");
 const schedulesBulkPauseBtn = document.getElementById("schedules-bulk-pause-btn");
 const schedulesBulkResumeBtn = document.getElementById("schedules-bulk-resume-btn");
+const schedulesBulkRunNowBtn = document.getElementById("schedules-bulk-run-now-btn");
 const schedulesBulkFavoriteBtn = document.getElementById("schedules-bulk-favorite-btn");
 const schedulesBulkClearLabelBtn = document.getElementById("schedules-bulk-clear-label-btn");
 const schedulesBulkExportBtn = document.getElementById("schedules-bulk-export-btn");
@@ -241,6 +242,7 @@ function updateSchedulesBulkButtons() {
   schedulesBulkFavoriteBtn.disabled = disabled;
   schedulesBulkClearLabelBtn.disabled = disabled;
   schedulesBulkExportBtn.disabled = disabled;
+  schedulesBulkRunNowBtn.disabled = disabled;
   schedulesBulkDeleteBtn.disabled = disabled;
   const suffix = selectedScheduleIds.size ? ` (${selectedScheduleIds.size})` : "";
   schedulesBulkPauseBtn.textContent = `Pause selected${suffix}`;
@@ -248,6 +250,7 @@ function updateSchedulesBulkButtons() {
   schedulesBulkFavoriteBtn.textContent = `★ Favorite selected${suffix}`;
   schedulesBulkClearLabelBtn.textContent = `Clear labels${suffix}`;
   schedulesBulkExportBtn.textContent = `⬇ Export selected JSON${suffix}`;
+  schedulesBulkRunNowBtn.textContent = `▶ Run now selected${suffix}`;
   schedulesBulkDeleteBtn.textContent = `Delete selected${suffix}`;
 }
 
@@ -413,6 +416,41 @@ let persistentUnreadCount = 0;
 let persistentNotifications = [];
 const selectedNotificationIds = new Set();
 let notificationSortMode = "newest";
+
+// ---- Desktop browser notifications for critical alerts ----
+// Opt-in, since a browser Notification permission prompt is intrusive --
+// complements the existing in-app toast/bell system rather than
+// replacing it, for the case where the dashboard tab isn't focused.
+const DESKTOP_NOTIF_STORAGE_KEY = "aiboss-desktop-notifications-enabled";
+const CRITICAL_NOTIFICATION_KINDS = new Set(["breaker_tripped", "schedule_failed"]);
+let desktopNotificationsEnabled = localStorage.getItem(DESKTOP_NOTIF_STORAGE_KEY) === "true";
+let lastSeenDesktopNotificationId = null;
+
+async function pollDesktopNotifications() {
+  if (!desktopNotificationsEnabled || typeof Notification === "undefined") return;
+  try {
+    const res = await fetch("/api/notifications?limit=20");
+    const list = await res.json();
+    const maxId = list.length ? Math.max(...list.map((n) => n.id)) : 0;
+    if (lastSeenDesktopNotificationId === null) {
+      // First poll after enabling: establish a baseline so pre-existing
+      // alerts don't all fire as desktop notifications at once.
+      lastSeenDesktopNotificationId = maxId;
+      return;
+    }
+    const newCritical = list.filter(
+      (n) => n.id > lastSeenDesktopNotificationId && CRITICAL_NOTIFICATION_KINDS.has(n.kind)
+    );
+    if (Notification.permission === "granted") {
+      newCritical.forEach((n) => new Notification("AI-Boss alert", { body: n.message }));
+    }
+    lastSeenDesktopNotificationId = Math.max(lastSeenDesktopNotificationId, maxId);
+  } catch (err) {
+    // best-effort — a failed poll just tries again next tick
+  }
+}
+
+setInterval(pollDesktopNotifications, 5000);
 
 function renderNotificationRows(notifications, emptyMessage) {
   if (!notifications.length) return `<div class="dropdown-empty">${emptyMessage}</div>`;
@@ -640,7 +678,11 @@ function renderNotificationsPanel() {
         <button class="btn btn-secondary btn-small" id="notifications-unmute-all-btn" type="button">Unmute all</button>
       </div>
     </div>
-    ${preferencesHtml}`;
+    ${preferencesHtml}
+    <label class="notification-pref-row">
+      <input type="checkbox" id="desktop-notifications-toggle" ${desktopNotificationsEnabled ? "checked" : ""} />
+      Desktop notifications for breaker trips &amp; scheduled-run failures
+    </label>`;
 
   notificationsPanel.querySelector("#notifications-mute-all-btn")?.addEventListener("click", async (e) => {
     e.stopPropagation();
@@ -649,6 +691,29 @@ function renderNotificationsPanel() {
   notificationsPanel.querySelector("#notifications-unmute-all-btn")?.addEventListener("click", async (e) => {
     e.stopPropagation();
     await setAllNotificationPreferences(false);
+  });
+
+  const desktopToggle = notificationsPanel.querySelector("#desktop-notifications-toggle");
+  desktopToggle?.addEventListener("click", (e) => e.stopPropagation());
+  desktopToggle?.addEventListener("change", async () => {
+    if (desktopToggle.checked) {
+      if (typeof Notification === "undefined") {
+        showToast("This browser doesn't support desktop notifications.", "error");
+        desktopToggle.checked = false;
+        return;
+      }
+      const permission = await Notification.requestPermission();
+      if (permission !== "granted") {
+        showToast("Desktop notification permission was not granted.", "error");
+        desktopToggle.checked = false;
+        return;
+      }
+      desktopNotificationsEnabled = true;
+      lastSeenDesktopNotificationId = null; // re-establish baseline on the next poll
+    } else {
+      desktopNotificationsEnabled = false;
+    }
+    localStorage.setItem(DESKTOP_NOTIF_STORAGE_KEY, String(desktopNotificationsEnabled));
   });
 
   let notificationSearchDebounce = null;
@@ -5543,6 +5608,33 @@ schedulesBulkExportBtn.addEventListener("click", async () => {
   }
 });
 
+schedulesBulkRunNowBtn.addEventListener("click", async () => {
+  if (!selectedScheduleIds.size) return;
+  schedulesBulkRunNowBtn.disabled = true;
+  try {
+    const res = await fetch("/api/schedules/bulk-run-now", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ schedule_ids: [...selectedScheduleIds] }),
+    });
+    const body = await res.json();
+    const failedCount = Object.keys(body.failed || {}).length;
+    if (body.triggered.length) {
+      showToast(
+        `Ran ${body.triggered.length} schedule(s) now.${failedCount ? ` ${failedCount} failed.` : ""}`,
+        failedCount ? "error" : "success"
+      );
+    } else {
+      showToast("None of the selected schedules could be run.", "error");
+    }
+    await loadRecentRuns();
+  } catch (err) {
+    showToast(`Run now failed: ${err}`, "error");
+  } finally {
+    updateSchedulesBulkButtons();
+  }
+});
+
 schedulesSelectAllEl.addEventListener("change", () => {
   const checkboxes = schedulesListEl.querySelectorAll(".schedule-select-checkbox");
   checkboxes.forEach((checkbox) => {
@@ -5899,6 +5991,58 @@ ratelimitResetBtn.addEventListener("click", async () => {
   showToast(`Reverted to the default rate limit: ${body.max_requests} requests / ${body.window_seconds}s.`, "success");
   await loadRateLimitConfig();
   await loadEnvironment();
+});
+
+// ---- Automatic periodic backup snapshot to disk ----
+
+const autoBackupEnabledInput = document.getElementById("auto-backup-enabled");
+const autoBackupIntervalInput = document.getElementById("auto-backup-interval-hours");
+const autoBackupKeepCountInput = document.getElementById("auto-backup-keep-count");
+const autoBackupSaveBtn = document.getElementById("auto-backup-save-btn");
+const autoBackupRunNowBtn = document.getElementById("auto-backup-run-now-btn");
+const autoBackupStatusEl = document.getElementById("auto-backup-status");
+
+function renderAutoBackupStatus(status) {
+  autoBackupEnabledInput.checked = status.enabled;
+  autoBackupIntervalInput.value = status.interval_hours;
+  autoBackupKeepCountInput.value = status.keep_count;
+  const lastText = status.last_backup_at ? new Date(status.last_backup_at).toLocaleString() : "never";
+  autoBackupStatusEl.textContent = `Last backup: ${lastText}`;
+}
+
+async function loadAutoBackupStatus() {
+  const res = await fetch("/api/backup/auto/status");
+  renderAutoBackupStatus(await res.json());
+}
+
+autoBackupSaveBtn.addEventListener("click", async () => {
+  const res = await fetch("/api/backup/auto", {
+    method: "PATCH",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({
+      enabled: autoBackupEnabledInput.checked,
+      interval_hours: Number(autoBackupIntervalInput.value),
+      keep_count: Number(autoBackupKeepCountInput.value),
+    }),
+  });
+  const body = await res.json();
+  if (!res.ok) {
+    showToast(body.detail || "Failed to update auto backup settings.", "error");
+    return;
+  }
+  showToast(body.enabled ? "Auto backup enabled." : "Auto backup disabled.", "success");
+  renderAutoBackupStatus(body);
+});
+
+autoBackupRunNowBtn.addEventListener("click", async () => {
+  const res = await fetch("/api/backup/auto/run-now", { method: "POST" });
+  const body = await res.json();
+  if (!res.ok) {
+    showToast(body.detail || "Backup failed.", "error");
+    return;
+  }
+  showToast("Backup snapshot written to disk.", "success");
+  await loadAutoBackupStatus();
 });
 
 // ---- Recent actions audit trail ----
@@ -6344,4 +6488,5 @@ loadMemory();
 loadModuleStats();
 loadEnvironment();
 loadRateLimitConfig();
+loadAutoBackupStatus();
 loadAuditLog();

@@ -329,6 +329,7 @@
         </label>
         <button id="schedules-bulk-pause-btn" class="btn btn-secondary btn-small" type="button" disabled>Pause selected</button>
         <button id="schedules-bulk-resume-btn" class="btn btn-secondary btn-small" type="button" disabled>Resume selected</button>
+        <button id="schedules-bulk-run-now-btn" class="btn btn-secondary btn-small" type="button" disabled>▶ Run now selected</button>
         <button id="schedules-bulk-favorite-btn" class="btn btn-secondary btn-small" type="button" disabled>★ Favorite selected</button>
         <button id="schedules-bulk-clear-label-btn" class="btn btn-secondary btn-small" type="button" disabled>Clear labels</button>
         <button id="schedules-bulk-export-btn" class="btn btn-secondary btn-small" type="button" disabled>⬇ Export selected JSON</button>
@@ -442,6 +443,18 @@
         <input type="number" id="ratelimit-window-seconds" min="0.1" step="0.1" />
         <button id="ratelimit-save-btn" class="btn btn-secondary btn-small" type="button">Save</button>
         <button id="ratelimit-reset-btn" class="btn btn-secondary btn-small" type="button">Use default</button>
+      </div>
+      <div class="ratelimit-config-row">
+        <label class="schedule-select-all-label">
+          <input type="checkbox" id="auto-backup-enabled" />
+          Auto backup every
+        </label>
+        <input type="number" id="auto-backup-interval-hours" min="0.01" step="1" style="width: 4.5em" />
+        <span>hours, keep last</span>
+        <input type="number" id="auto-backup-keep-count" min="1" step="1" style="width: 4.5em" />
+        <button id="auto-backup-save-btn" class="btn btn-secondary btn-small" type="button">Save</button>
+        <button id="auto-backup-run-now-btn" class="btn btn-secondary btn-small" type="button">Back up now</button>
+        <span id="auto-backup-status" class="runs-purge-label"></span>
       </div>
     </section>
 

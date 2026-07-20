@@ -936,6 +936,24 @@ A few things live in the header/subheader on every page load:
   Runs/Ingestion" section shortcuts and a per-schedule jump command join
   the existing Run/Pipeline-jump/theme/density commands.
 
+## Desktop alerts, automatic backups, and bulk schedule run-now
+
+- **Desktop browser notifications for critical alerts** — an opt-in checkbox
+  in the notifications panel requests browser notification permission and,
+  once granted, pops a native desktop notification whenever a `breaker_tripped`
+  or `schedule_failed` alert lands, even if the dashboard tab isn't focused.
+- **Automatic periodic backup snapshot to disk** — a background timer
+  (mirroring the existing scheduler's architecture) writes a full state
+  snapshot to `backups/` on a configurable interval, pruning down to a
+  configurable number of most-recent files. A new Environment & Config panel
+  row lets you enable/disable it, set the interval and retention count, and
+  trigger an immediate backup on demand.
+- **Bulk "Run now" for selected schedules** — the existing per-schedule
+  **▶ Run now** action is now also available as a bulk button across a
+  checkbox selection, firing every selected schedule's target immediately
+  (independently — one failure doesn't block the rest) without touching any
+  of their next-run cadences.
+
 ## Tech stack
 
 - **Language:** Python 3.11+ — first-class async/sync support and native SDKs

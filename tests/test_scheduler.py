@@ -166,11 +166,18 @@ def test_scheduler_fires_a_weekly_schedule_whose_day_and_time_are_already_due(tm
     calls = []
     scheduler = Scheduler(store, trigger=lambda schedule: calls.append(schedule["id"]), poll_interval=0.05)
 
+    # next_run_at must be the real current time so the live background
+    # thread actually considers this schedule due right now. daily_time is
+    # set to local midnight rather than a hardcoded "09:00" -- local
+    # midnight is guaranteed to be at-or-before "now" for the rest of
+    # today, so the post-fire reschedule always rolls a full week forward
+    # regardless of what time of day the suite happens to run (a
+    # hardcoded clock time could itself still be in the future).
     now = datetime.now(timezone.utc)
     store.create_schedule(
         kind="module", name="fake_weekly", interval_seconds=None,
         next_run_at=now.isoformat(), tier="automation", inputs={},
-        schedule_type="weekly", daily_time="09:00", day_of_week=now.astimezone().weekday(),
+        schedule_type="weekly", daily_time="00:00", day_of_week=now.astimezone().weekday(),
     )
 
     scheduler.start()

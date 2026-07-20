@@ -2559,6 +2559,73 @@ only a JSON parse error or timeout falls back to an empty issue list.
      its tag to the new name in `GET /api/artifacts`; opening the command
      palette (Ctrl/Cmd+K) and typing found both "Jump to Schedules" and
      "Jump to Agent Memory" entries.
+216. **Add desktop browser notifications for critical alerts**
+     (frontend-only -- a `#desktop-notifications-toggle` checkbox in the
+     notifications panel's Preferences section requests
+     `Notification.requestPermission()` on first enable and persists the
+     opt-in to `localStorage`. A `setInterval` poll every 5s fetches
+     `GET /api/notifications?limit=20` and fires a native
+     `new Notification(...)` for any notification newer than the last one
+     seen whose `kind` is in a small critical set
+     (`breaker_tripped`, `schedule_failed`) -- not every notification kind,
+     since desktop popups for routine events would just be noise).
+217. **Add automatic periodic backup snapshot to disk**
+     (`webapp/auto_backup.py`, a new `AutoBackup` class mirroring the
+     existing `Scheduler`'s background-thread-timer architecture:
+     `configure(enabled, interval_hours, keep_count)`,
+     `status()`, `start()`/`stop()`, `run_now()` (bypasses the interval
+     check, used by both the manual endpoint and tests), a `_tick()` that
+     checks whether `interval_hours` has elapsed since `last_backup_at`, a
+     `_write_snapshot()` that writes `backup_<UTC-timestamp>.json` into a
+     new `backups/` directory via the same `build_snapshot` callable the
+     existing `GET /api/backup/export` endpoint uses, and a `_prune()` that
+     keeps only the `keep_count` most recent files by filename sort.
+     Config is in-memory-only and resets to disabled on restart, the same
+     precedent as the existing scheduler's `paused` flag. New endpoints:
+     `GET /api/backup/auto/status`, `PATCH /api/backup/auto`,
+     `POST /api/backup/auto/run-now`. A new Environment & Config panel row
+     exposes an enable checkbox, interval-hours and keep-count number
+     inputs, a **Save** button, and a **Back up now** button, with a status
+     line showing when the last backup ran).
+218. **Add bulk "Run now" for selected schedules**
+     (`POST /api/schedules/bulk-run-now`, reusing the same
+     `_trigger_schedule()` function the real scheduler and the single-
+     schedule `POST /api/schedules/{id}/run-now` (Batch 30) both call, so a
+     bulk run goes through identical breaker/enabled checks and lands in
+     Recent Runs identically to a real fire, without touching any selected
+     schedule's own `next_run_at`/`last_run_at`/`last_status` bookkeeping.
+     Best-effort per id: one schedule failing to trigger doesn't stop the
+     rest of the selection, matching every other bulk action in this app.
+     A **▶ Run now selected** button joins the existing bulk pause/resume/
+     favorite/clear-label/export/delete buttons above the schedule list).
+219. **Add tests for all of Batch 31**: `AutoBackup` unit tests covering
+     `run_now()` writing a snapshot and updating `last_backup_at`, pruning
+     down to `keep_count`, `status()` computing `next_backup_at`, the
+     background loop firing when enabled and due, and never firing while
+     disabled; webapp-level tests for the default-disabled status, invalid
+     `interval_hours`/`keep_count` rejection, and a configure-then-run-now
+     round trip that leaves a real file in `backups/`; bulk-run-now tests
+     covering triggering every selected id (reporting unknown ids in
+     `failed` without blocking the rest) and a no-op empty selection. Also
+     fixed a newly-surfaced flaky weekly-scheduler integration test
+     (`test_scheduler_fires_a_weekly_schedule_whose_day_and_time_are_already_due`)
+     that failed whenever the suite happened to run before 09:00 local
+     time -- its hardcoded `daily_time="09:00"` was sometimes still in the
+     future relative to the real wall clock the live background thread
+     compares against (unlike the pure-function unit tests, this one can't
+     fake `now`, since a real thread has to actually pick the schedule up),
+     so the fix changed the anchor to local midnight (`"00:00"`), which is
+     guaranteed to already be "due" no matter the real time of day. 580
+     tests total, stable across multiple repeated full-suite runs.
+     Live-verified end to end with Playwright against a freshly started
+     server: toggling the desktop notifications checkbox flipped its
+     checked state and persisted; enabling auto backup, saving a 2-hour/
+     keep-3 config, and clicking **Back up now** updated the status line
+     away from "Last backup: never" and produced a real
+     `backup_<timestamp>.json` file in `backups/` on disk; seeding two
+     interval schedules via the API, checkbox-selecting both, and clicking
+     **▶ Run now selected** launched real runs for both, visible in
+     `GET /api/runs`.
 
 ## 9. Roadmap
 
