@@ -649,6 +649,32 @@ def modules_used_by_csv():
     )
 
 
+@app.get("/api/modules/used-by.json")
+def modules_used_by_json():
+    """Same module-to-pipeline reverse lookup as modules_used_by_csv(), as a
+    downloadable JSON array -- unlike the CSV export, used_by is a real JSON
+    list here rather than a semicolon-joined string, since JSON has no
+    column-separator collision to work around."""
+    rows = []
+    for tier, directory in TIER_DIRS.items():
+        for manifest in load_manifests(directory):
+            if not manifest.get("enabled", True):
+                continue
+            rows.append(
+                {
+                    "tier": tier,
+                    "name": manifest["name"],
+                    "used_by": pipeline_store.pipelines_using_module(tier, manifest["name"]),
+                }
+            )
+
+    return StreamingResponse(
+        iter([json.dumps(rows, indent=2)]),
+        media_type="application/json",
+        headers={"Content-Disposition": "attachment; filename=modules_used_by.json"},
+    )
+
+
 @app.get("/api/modules/directory.csv")
 def modules_directory_csv():
     """The full module directory as a single downloadable CSV -- name,
@@ -693,6 +719,37 @@ class ModuleScaffoldRequest(BaseModel):
     tier: str
     name: str
     description: str = ""
+
+
+@app.get("/api/modules/directory.json")
+def modules_directory_json():
+    """Same row shape as modules_directory_csv() (name, tier, description,
+    enabled, status, breaker_tripped, one row per enabled module), as a
+    downloadable JSON array instead -- mirrors the JSON-mirrors-CSV pattern
+    already used by runs.json/memory.json/notifications.json/audit-log.json."""
+    rows = []
+    for tier, directory in TIER_DIRS.items():
+        for manifest in load_manifests(directory):
+            if not manifest.get("enabled", True):
+                continue
+            last_success = store.latest_step_status(manifest["name"])
+            health = store.get_module_health(tier, manifest["name"])
+            rows.append(
+                {
+                    "tier": tier,
+                    "name": manifest["name"],
+                    "description": manifest.get("description", ""),
+                    "enabled": _is_module_effectively_enabled(tier, manifest["name"]),
+                    "status": "error" if last_success is False else "ready",
+                    "breaker_tripped": health["tripped"],
+                }
+            )
+
+    return StreamingResponse(
+        iter([json.dumps(rows, indent=2)]),
+        media_type="application/json",
+        headers={"Content-Disposition": "attachment; filename=modules_directory.json"},
+    )
 
 
 @app.post("/api/modules/scaffold")
@@ -3451,6 +3508,20 @@ def artifact_tags_summary_csv():
         iter([buffer.getvalue()]),
         media_type="text/csv",
         headers={"Content-Disposition": "attachment; filename=artifact_tags.csv"},
+    )
+
+
+@app.get("/api/artifacts/tags-summary.json")
+def artifact_tags_summary_json():
+    """Same tag/count directory as GET /api/artifacts/tags-summary, as a
+    downloadable JSON file -- mirrors the JSON-mirrors-CSV pattern already
+    used elsewhere (runs.json, memory.json, notifications.json,
+    audit-log.json). A literal path, so no route-ordering conflict with any
+    /api/artifacts/{name}-style route."""
+    return StreamingResponse(
+        iter([json.dumps(artifact_tags_summary(), indent=2)]),
+        media_type="application/json",
+        headers={"Content-Disposition": "attachment; filename=artifact_tags.json"},
     )
 
 

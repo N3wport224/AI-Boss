@@ -647,6 +647,21 @@ def test_tags_summary_csv_export_has_a_header_and_matches_the_json_summary():
     assert any(line.startswith("csv_export_marker,") for line in lines[1:])
 
 
+def test_tags_summary_json_export_matches_the_plain_json_summary():
+    client.post("/api/ingest/csv", files={"file": ("tagdir_json_a.csv", b"x,y\n983,984\n", "text/csv")})
+    a_name = next(f["name"] for f in client.get("/api/artifacts").json() if f["name"].endswith("tagdir_json_a.csv"))
+    client.put(f"/api/artifacts/{a_name}/tags", json={"tags": ["json_export_marker"]})
+
+    res = client.get("/api/artifacts/tags-summary.json")
+    assert res.status_code == 200
+    assert res.headers["content-type"].startswith("application/json")
+    assert "attachment; filename=artifact_tags.json" in res.headers["content-disposition"]
+
+    rows = res.json()
+    assert rows == client.get("/api/artifacts/tags-summary").json()
+    assert any(entry["tag"] == "json_export_marker" for entry in rows)
+
+
 def test_tags_summary_is_sorted_by_count_descending():
     client.post("/api/ingest/csv", files={"file": ("tagdir_c.csv", b"x,y\n965,966\n", "text/csv")})
     client.post("/api/ingest/csv", files={"file": ("tagdir_d.csv", b"x,y\n967,968\n", "text/csv")})

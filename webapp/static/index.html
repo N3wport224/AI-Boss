@@ -155,6 +155,7 @@
             <button id="purge-btn" class="btn btn-secondary btn-small" type="button">Purge</button>
             <a class="btn btn-secondary btn-small" href="/api/artifacts.csv" download>Export CSV</a>
             <a class="btn btn-secondary btn-small" href="/api/artifacts/tags-summary.csv" download title="Every tag in use and how many files carry it, as a CSV">Export tags CSV</a>
+            <a class="btn btn-secondary btn-small" href="/api/artifacts/tags-summary.json" download title="Every tag in use and how many files carry it, as JSON">Export tags JSON</a>
           </div>
         </div>
         <div class="artifacts-bulk-tag-row">
@@ -567,8 +568,10 @@
     <div id="pipeline-result" class="pipeline-result hidden"></div>
     <div class="artifacts-bulk-tag-row" id="modules-bulk-row">
       <a class="btn btn-secondary btn-small" href="/api/modules/used-by.csv" download title="Which saved pipelines use each module, as a CSV">Export used-by CSV</a>
+      <a class="btn btn-secondary btn-small" href="/api/modules/used-by.json" download title="Which saved pipelines use each module, as JSON">Export used-by JSON</a>
       <a class="btn btn-secondary btn-small" href="/api/breakers.csv" download title="Every module's circuit breaker state, as a CSV">Export breakers CSV</a>
       <a class="btn btn-secondary btn-small" href="/api/modules/directory.csv" download title="Every module's name, tier, description, enabled state, and status in one CSV">Export directory CSV</a>
+      <a class="btn btn-secondary btn-small" href="/api/modules/directory.json" download title="Every module's name, tier, description, enabled state, and status, as JSON">Export directory JSON</a>
       <label class="schedule-select-all-label">
         <input type="checkbox" id="modules-select-all" />
         Select all modules

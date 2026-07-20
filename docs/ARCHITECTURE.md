@@ -3240,6 +3240,42 @@ only a JSON parse error or timeout falls back to an empty issue list.
      control to **Sort: name**, and confirming they render in alphabetical
      order.
 
+265. **Add exporting the module directory to JSON**
+     (`GET /api/modules/directory.json`, the same name/tier/description/
+     enabled/status/breaker_tripped row shape as the existing
+     `GET /api/modules/directory.csv` -- just the JSON-mirrors-CSV pattern
+     already used elsewhere (runs.json, memory.json, notifications.json,
+     audit-log.json) filling in the one remaining CSV-only export gap. An
+     **Export directory JSON** link added next to the existing **Export
+     directory CSV** link).
+266. **Add exporting the module used-by lookup to JSON**
+     (`GET /api/modules/used-by.json`, the JSON counterpart to
+     `GET /api/modules/used-by.csv` -- unlike the CSV export, `used_by` is
+     a real JSON list per module rather than a semicolon-joined string,
+     since JSON has no column-separator collision to work around. An
+     **Export used-by JSON** link added next to the existing **Export
+     used-by CSV** link).
+267. **Add exporting the artifact tag directory to JSON**
+     (`GET /api/artifacts/tags-summary.json`, the JSON counterpart to
+     `GET /api/artifacts/tags-summary.csv` -- same tag/count rows as the
+     existing plain `GET /api/artifacts/tags-summary` endpoint, just served
+     as a downloadable attachment. An **Export tags JSON** link added next
+     to the existing **Export tags CSV** link in the artifact tag directory
+     UI).
+268. **Add tests for all of Batch 43**: a used-by.json round trip
+     confirming `used_by` is a real JSON list (not semicolon-joined) and
+     matches the CSV export's data; a directory.json round trip confirming
+     the row shape and types (booleans, not CSV's string "True"/"False");
+     an artifact-tags-summary.json test confirming it returns exactly the
+     same data as the existing non-download endpoint. 671 tests total,
+     stable across two repeated clean full-suite runs. Live-verified end
+     to end with Playwright against a freshly started server: clicking
+     each of the three new **Export ... JSON** links and confirming the
+     downloaded file is well-formed JSON with the expected shape --
+     including, for the used-by export, tagging a fresh pipeline to a
+     module and confirming that pipeline's slug shows up in the module's
+     `used_by` array in the downloaded file.
+
 ## 9. Roadmap
 
 The current engine is intentionally a single-process, synchronous, SQLite-backed

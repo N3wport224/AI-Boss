@@ -1874,3 +1874,37 @@ def test_module_directory_csv_export_has_a_header_and_a_row_per_enabled_module()
     assert escalation_row["enabled"] in ("True", "False")
     assert escalation_row["status"] in ("ready", "error")
     assert escalation_row["breaker_tripped"] in ("True", "False")
+
+
+def test_module_used_by_json_export_matches_the_csv_export_as_a_real_list():
+    client.post(
+        "/api/pipelines",
+        json={"name": "Json Uses Fetch Metrics", "steps": [{"tier": "automation", "name": "fetch_raw_metrics"}]},
+    )
+    res = client.get("/api/modules/used-by.json")
+    assert res.status_code == 200
+    assert res.headers["content-type"].startswith("application/json")
+    assert "attachment; filename=modules_used_by.json" in res.headers["content-disposition"]
+
+    rows = res.json()
+    fetch_metrics_row = next(r for r in rows if r["tier"] == "automation" and r["name"] == "fetch_raw_metrics")
+    assert isinstance(fetch_metrics_row["used_by"], list)
+    assert "json_uses_fetch_metrics" in fetch_metrics_row["used_by"]
+
+    escalation_row = next(r for r in rows if r["tier"] == "agent" and r["name"] == "escalation_agent")
+    assert escalation_row["used_by"] == []
+
+
+def test_module_directory_json_export_has_a_row_per_enabled_module():
+    res = client.get("/api/modules/directory.json")
+    assert res.status_code == 200
+    assert res.headers["content-type"].startswith("application/json")
+    assert "attachment; filename=modules_directory.json" in res.headers["content-disposition"]
+
+    rows = res.json()
+    assert set(rows[0].keys()) == {"tier", "name", "description", "enabled", "status", "breaker_tripped"}
+    escalation_row = next(r for r in rows if r["tier"] == "agent" and r["name"] == "escalation_agent")
+    assert escalation_row["description"]
+    assert isinstance(escalation_row["enabled"], bool)
+    assert escalation_row["status"] in ("ready", "error")
+    assert isinstance(escalation_row["breaker_tripped"], bool)

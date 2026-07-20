@@ -1145,6 +1145,18 @@ A few things live in the header/subheader on every page load:
   Saved Pipelines filter row mirrors the existing artifact sort control,
   defaulting to newest-modified-first.
 
+## Filling in the remaining JSON export gaps
+
+- **Export the module directory to JSON** — the module directory (name,
+  tier, description, enabled state, status, breaker state) already had a
+  CSV export; an **Export directory JSON** link now sits next to it.
+- **Export the module used-by lookup to JSON** — same reverse lookup as
+  the existing CSV export, but `used_by` is a real JSON list per module
+  rather than a semicolon-joined string.
+- **Export the artifact tag directory to JSON** — the artifact tag/count
+  directory already had a CSV export; an **Export tags JSON** link now
+  sits next to it too.
+
 ## Tech stack
 
 - **Language:** Python 3.11+ — first-class async/sync support and native SDKs
