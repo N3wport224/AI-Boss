@@ -71,6 +71,43 @@ DEFAULT_STEP_TIMEOUT_SECONDS = 60.0
 store = StateStore(os.environ.get("AIBOSS_DB_PATH", str(ROOT / "orchestrator.db")))
 bus = RunEventBus()
 
+
+# Cells beginning with any of these are interpreted as a formula by Excel /
+# LibreOffice / Google Sheets when the CSV is opened, so a user-supplied
+# value like "=cmd|'/c calc'!A1" or "@SUM(...)" would execute on open. Much
+# of what these exports contain is user-controlled (memory values, artifact
+# names/notes/tags, run notes, schedule labels, audit-log detail), so every
+# exported cell is neutralized centrally rather than trusting each call site.
+_CSV_INJECTION_PREFIXES = ("=", "+", "-", "@", "\t", "\r")
+
+
+def _csv_safe(value):
+    """Prefix a formula-shaped string cell with a single quote so a
+    spreadsheet renders it literally instead of evaluating it. Non-strings
+    (ints, floats, None) pass through untouched."""
+    if isinstance(value, str) and value and value[0] in _CSV_INJECTION_PREFIXES:
+        return "'" + value
+    return value
+
+
+class _SafeCsvDictWriter:
+    """Drop-in for csv.DictWriter that runs every data cell through
+    _csv_safe() before writing. Header names are static, developer-authored
+    strings, so writeheader() is left alone."""
+
+    def __init__(self, buffer, fieldnames, **kwargs):
+        self._writer = csv.DictWriter(buffer, fieldnames=fieldnames, **kwargs)
+
+    def writeheader(self):
+        self._writer.writeheader()
+
+    def writerow(self, row):
+        self._writer.writerow({key: _csv_safe(val) for key, val in row.items()})
+
+    def writerows(self, rows):
+        for row in rows:
+            self.writerow(row)
+
 # Guards every run-triggering endpoint against an accidental request storm —
 # generous enough for normal interactive use, tight enough to catch a stuck
 # retry loop or a misconfigured schedule hammering the thread pool.
@@ -648,7 +685,7 @@ def modules_used_by_csv():
     (a plain comma would collide with the CSV column separator).
     Mirrors every other CSV export in this app."""
     buffer = io.StringIO()
-    writer = csv.DictWriter(buffer, fieldnames=["tier", "name", "used_by"])
+    writer = _SafeCsvDictWriter(buffer, fieldnames=["tier", "name", "used_by"])
     writer.writeheader()
     for tier, directory in TIER_DIRS.items():
         for manifest in load_manifests(directory):
@@ -701,7 +738,7 @@ def modules_directory_csv():
     so this is the one CSV that captures "what modules exist and are they
     healthy" at a glance."""
     buffer = io.StringIO()
-    writer = csv.DictWriter(
+    writer = _SafeCsvDictWriter(
         buffer,
         fieldnames=["tier", "name", "description", "enabled", "status", "breaker_tripped"],
     )
@@ -811,7 +848,7 @@ def module_stats_csv():
     """Same per-module run statistics as GET /api/modules/stats, as a
     downloadable CSV -- mirrors every other CSV export in this app."""
     buffer = io.StringIO()
-    writer = csv.DictWriter(
+    writer = _SafeCsvDictWriter(
         buffer, fieldnames=["tier", "name", "total_runs", "success_count", "success_rate", "avg_duration_seconds"]
     )
     writer.writeheader()
@@ -950,7 +987,7 @@ def breakers_csv():
     suffix on a dynamic segment, so there's no route-ordering conflict
     with /api/breakers/{tier}/{name}/reset (also a different HTTP method)."""
     buffer = io.StringIO()
-    writer = csv.DictWriter(
+    writer = _SafeCsvDictWriter(
         buffer, fieldnames=["tier", "name", "consecutive_failures", "tripped", "updated_at"]
     )
     writer.writeheader()
@@ -1204,7 +1241,7 @@ def bulk_export_modules_csv(payload: BulkExportModules):
     the whole export."""
     wanted = {(ref.tier, ref.name) for ref in payload.modules}
     buffer = io.StringIO()
-    writer = csv.DictWriter(
+    writer = _SafeCsvDictWriter(
         buffer,
         fieldnames=["tier", "name", "description", "enabled", "status", "breaker_tripped"],
     )
@@ -1306,7 +1343,7 @@ def saved_pipelines_csv():
     tags_by_slug = store.all_pipeline_tags()
 
     buffer = io.StringIO()
-    writer = csv.DictWriter(buffer, fieldnames=["slug", "name", "description", "tags", "step_count", "modified_at"])
+    writer = _SafeCsvDictWriter(buffer, fieldnames=["slug", "name", "description", "tags", "step_count", "modified_at"])
     writer.writeheader()
     for p in pipelines:
         writer.writerow(
@@ -1850,7 +1887,7 @@ def pipeline_tags_summary_csv():
     """Same tag/count directory as GET /api/pipelines/tags-summary, as a
     downloadable CSV -- mirrors the artifact tags-summary CSV export."""
     buffer = io.StringIO()
-    writer = csv.DictWriter(buffer, fieldnames=["tag", "count"])
+    writer = _SafeCsvDictWriter(buffer, fieldnames=["tag", "count"])
     writer.writeheader()
     for entry in pipeline_tags_summary():
         writer.writerow(entry)
@@ -2034,7 +2071,7 @@ def schedules_csv():
         "id", "kind", "tier", "name", "label", "schedule_type", "interval_seconds",
         "daily_time", "day_of_week", "enabled", "next_run_at", "last_run_at", "last_status",
     ]
-    writer = csv.DictWriter(buffer, fieldnames=fieldnames, extrasaction="ignore")
+    writer = _SafeCsvDictWriter(buffer, fieldnames=fieldnames, extrasaction="ignore")
     writer.writeheader()
     for schedule in store.list_schedules():
         writer.writerow(schedule)
@@ -2320,7 +2357,7 @@ def bulk_export_schedules_csv(payload: BulkScheduleIds):
         "id", "kind", "tier", "name", "label", "schedule_type", "interval_seconds",
         "daily_time", "day_of_week", "enabled", "next_run_at", "last_run_at", "last_status",
     ]
-    writer = csv.DictWriter(buffer, fieldnames=fieldnames, extrasaction="ignore")
+    writer = _SafeCsvDictWriter(buffer, fieldnames=fieldnames, extrasaction="ignore")
     writer.writeheader()
     for schedule in selected:
         writer.writerow(schedule)
@@ -2416,7 +2453,7 @@ def recent_runs(limit: int = 10):
 @app.get("/api/runs.csv")
 def recent_runs_csv(limit: int = 100):
     buffer = io.StringIO()
-    writer = csv.DictWriter(buffer, fieldnames=["id", "started_at", "finished_at", "status", "duration_seconds"])
+    writer = _SafeCsvDictWriter(buffer, fieldnames=["id", "started_at", "finished_at", "status", "duration_seconds"])
     writer.writeheader()
     for run in store.recent_runs(limit):
         duration = None
@@ -2590,7 +2627,7 @@ def bulk_export_runs_csv(payload: BulkExportRuns):
     schedules/memory's existing bulk-export-csv pattern."""
     wanted = set(payload.run_ids)
     buffer = io.StringIO()
-    writer = csv.DictWriter(buffer, fieldnames=["id", "started_at", "finished_at", "status", "duration_seconds"])
+    writer = _SafeCsvDictWriter(buffer, fieldnames=["id", "started_at", "finished_at", "status", "duration_seconds"])
     writer.writeheader()
     for run in store.recent_runs(limit=100000):
         if run["id"] not in wanted:
@@ -2931,7 +2968,7 @@ def list_auto_backups_csv():
     """Same snapshot listing as GET /api/backup/auto/list, as a downloadable
     CSV -- mirroring every other list-to-CSV export in this app."""
     buffer = io.StringIO()
-    writer = csv.DictWriter(buffer, fieldnames=["filename", "size_bytes", "modified_at", "protected"])
+    writer = _SafeCsvDictWriter(buffer, fieldnames=["filename", "size_bytes", "modified_at", "protected"])
     writer.writeheader()
     writer.writerows(_list_auto_backups())
     return StreamingResponse(
@@ -3099,7 +3136,7 @@ def bulk_export_auto_backups_csv(payload: BackupBulkExport):
     the whole export, same as bulk-protect."""
     wanted = set(payload.filenames)
     buffer = io.StringIO()
-    writer = csv.DictWriter(buffer, fieldnames=["filename", "size_bytes", "modified_at", "protected"])
+    writer = _SafeCsvDictWriter(buffer, fieldnames=["filename", "size_bytes", "modified_at", "protected"])
     writer.writeheader()
     for snapshot in _list_auto_backups():
         if snapshot["filename"] in wanted:
@@ -3184,7 +3221,7 @@ def audit_log_csv(limit: int = 1000):
     """Same audit trail as the dashboard panel, as a downloadable CSV --
     mirrors the run-history CSV export pattern (GET /api/runs.csv)."""
     buffer = io.StringIO()
-    writer = csv.DictWriter(buffer, fieldnames=["id", "action", "detail", "created_at"])
+    writer = _SafeCsvDictWriter(buffer, fieldnames=["id", "action", "detail", "created_at"])
     writer.writeheader()
     for event in store.list_audit_events(limit):
         writer.writerow(event)
@@ -3211,7 +3248,7 @@ def bulk_export_audit_log_csv(payload: BulkExportAuditLog):
     to keep the trail's integrity simple to reason about."""
     wanted = set(payload.ids)
     buffer = io.StringIO()
-    writer = csv.DictWriter(buffer, fieldnames=["id", "action", "detail", "created_at"])
+    writer = _SafeCsvDictWriter(buffer, fieldnames=["id", "action", "detail", "created_at"])
     writer.writeheader()
     for event in store.list_audit_events(limit=100000):
         if event["id"] in wanted:
@@ -3258,7 +3295,7 @@ def notifications_csv(limit: int = 1000):
     downloadable CSV -- mirrors the audit-log CSV export pattern
     (GET /api/audit-log.csv)."""
     buffer = io.StringIO()
-    writer = csv.DictWriter(buffer, fieldnames=["id", "kind", "message", "created_at", "read"])
+    writer = _SafeCsvDictWriter(buffer, fieldnames=["id", "kind", "message", "created_at", "read"])
     writer.writeheader()
     for notification in store.list_notifications(limit=limit):
         writer.writerow(notification)
@@ -3359,7 +3396,7 @@ def bulk_export_notifications(payload: BulkNotificationIds):
     export, for a checkbox multi-select in the Alerts list."""
     wanted = set(payload.notification_ids)
     buffer = io.StringIO()
-    writer = csv.DictWriter(buffer, fieldnames=["id", "kind", "message", "created_at", "read"])
+    writer = _SafeCsvDictWriter(buffer, fieldnames=["id", "kind", "message", "created_at", "read"])
     writer.writeheader()
     for notification in store.list_notifications(limit=100000):
         if notification["id"] in wanted:
@@ -3552,7 +3589,7 @@ def memory_csv():
     redacted = redact_secrets({entry["key"]: entry["value"] for entry in entries})
 
     buffer = io.StringIO()
-    writer = csv.DictWriter(buffer, fieldnames=["key", "value", "updated_at"])
+    writer = _SafeCsvDictWriter(buffer, fieldnames=["key", "value", "updated_at"])
     writer.writeheader()
     for entry in entries:
         writer.writerow({
@@ -3690,7 +3727,7 @@ def bulk_export_memory_csv(payload: BulkExportMemoryKeys):
     redacted = redact_secrets({entry["key"]: entry["value"] for entry in entries})
 
     buffer = io.StringIO()
-    writer = csv.DictWriter(buffer, fieldnames=["key", "value", "updated_at"])
+    writer = _SafeCsvDictWriter(buffer, fieldnames=["key", "value", "updated_at"])
     writer.writeheader()
     for entry in entries:
         writer.writerow({
@@ -3881,7 +3918,7 @@ def artifacts_csv():
     tags_by_file = store.all_artifact_tags()
 
     buffer = io.StringIO()
-    writer = csv.DictWriter(buffer, fieldnames=["filename", "size_bytes", "tags", "modified_at"])
+    writer = _SafeCsvDictWriter(buffer, fieldnames=["filename", "size_bytes", "tags", "modified_at"])
     writer.writeheader()
     for f in files:
         writer.writerow({
@@ -3953,7 +3990,7 @@ def artifact_tags_summary_csv():
     literal path, not a suffix on a dynamic segment, so there's no
     route-ordering conflict with any /api/artifacts/{name}-style route."""
     buffer = io.StringIO()
-    writer = csv.DictWriter(buffer, fieldnames=["tag", "count"])
+    writer = _SafeCsvDictWriter(buffer, fieldnames=["tag", "count"])
     writer.writeheader()
     for entry in artifact_tags_summary():
         writer.writerow(entry)
@@ -4050,7 +4087,7 @@ def bulk_export_artifacts_csv(payload: BulkDownloadArtifacts):
     tags_by_file = store.all_artifact_tags()
 
     buffer = io.StringIO()
-    writer = csv.DictWriter(buffer, fieldnames=["filename", "size_bytes", "tags", "modified_at"])
+    writer = _SafeCsvDictWriter(buffer, fieldnames=["filename", "size_bytes", "tags", "modified_at"])
     writer.writeheader()
     for f in ingestion.list_artifacts():
         if f["name"] not in wanted:

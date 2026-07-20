@@ -238,6 +238,35 @@ def test_bulk_export_memory_keys_json_is_an_empty_list_on_an_empty_selection():
     assert res.json() == []
 
 
+def test_csv_exports_neutralize_formula_injection():
+    """A user-controlled cell that a spreadsheet would evaluate as a formula
+    (leading =, +, -, @) must be exported with a leading quote so it renders
+    literally. Uses artifact tags -- a raw, user-supplied string field."""
+    import csv as _csv
+    import io as _io
+
+    from webapp import ingestion
+
+    ingestion.ensure_artifacts_dir()
+    # Content-unique so this never dedupes against another test's upload.
+    body = b"formula_injection_col,x\ninjmarker9931,2\n"
+    res = client.post("/api/ingest/csv", files={"file": ("inj_probe.csv", body, "text/csv")})
+    assert res.status_code == 200
+    # The stored artifact name carries a timestamp prefix; the ingest response
+    # echoes only the original upload name, so resolve the real one.
+    name = next(a["name"] for a in client.get("/api/artifacts").json() if "inj_probe" in a["name"])
+    client.put(f"/api/artifacts/{name}/tags", json={"tags": ["=cmd|calc"]})
+
+    res = client.get("/api/artifacts.csv")
+    assert res.status_code == 200
+    rows = list(_csv.reader(_io.StringIO(res.text)))
+    tags_idx = rows[0].index("tags")
+    row = next(r for r in rows[1:] if r[0] == name)
+    # The parsed cell value itself must begin with the neutralizing quote,
+    # not the formula trigger.
+    assert row[tags_idx].startswith("'="), row[tags_idx]
+
+
 def test_memory_csv_export_contains_header_and_entries_and_redacts_secrets():
     from webapp.main import store
 
