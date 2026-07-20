@@ -18,6 +18,8 @@ import re
 import threading
 import time
 import zipfile
+
+import httpx
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Callable, Optional
@@ -307,7 +309,7 @@ def _record_breaker_event(event: dict) -> None:
         health = store.record_module_failure(tier, name, _breaker_threshold(tier, name))
         if health["tripped"] and health["consecutive_failures"] == _breaker_threshold(tier, name):
             print(f"[breaker] circuit opened for {tier}/{name} after {health['consecutive_failures']} consecutive failures")
-            store.add_notification(
+            _notify(
                 "breaker_tripped",
                 f"Circuit breaker opened for [{tier}] {name} after {health['consecutive_failures']} consecutive failures.",
             )
@@ -545,12 +547,12 @@ def _trigger_schedule(schedule: dict) -> None:
 
 def _notify_schedule_error(schedule: dict, error_message: str) -> None:
     label = schedule["name"] if schedule.get("kind") == "pipeline" else f"[{schedule['tier']}] {schedule['name']}"
-    store.add_notification("schedule_failed", f"Scheduled run of {label} failed: {error_message}")
+    _notify("schedule_failed", f"Scheduled run of {label} failed: {error_message}")
 
 
 def _notify_once_schedule_fired(schedule: dict) -> None:
     label = schedule["name"] if schedule.get("kind") == "pipeline" else f"[{schedule['tier']}] {schedule['name']}"
-    store.add_notification("schedule_once_fired", f"One-time scheduled run of {label} fired successfully.")
+    _notify("schedule_once_fired", f"One-time scheduled run of {label} fired successfully.")
 
 
 _scheduler = Scheduler(store, _trigger_schedule, on_error=_notify_schedule_error, on_once_fired=_notify_once_schedule_fired)
@@ -570,7 +572,7 @@ def _build_backup_snapshot() -> dict:
 
 
 def _notify_auto_backup_failure(error: Exception) -> None:
-    store.add_notification("backup_failed", f"Automatic backup snapshot failed: {error}")
+    _notify("backup_failed", f"Automatic backup snapshot failed: {error}")
 
 
 _auto_backup = AutoBackup(BACKUPS_DIR, _build_backup_snapshot, on_failure=_notify_auto_backup_failure)
@@ -2639,7 +2641,7 @@ def create_notification(payload: NotificationCreate):
     if not payload.message.strip():
         raise HTTPException(status_code=400, detail="A message is required.")
     kind = payload.kind.strip() or "info"
-    notification = store.add_notification(kind, payload.message.strip())
+    notification = _notify(kind, payload.message.strip())
     if notification is None:
         return {"created": False, "kind": kind, "muted": True}
     return {"created": True, **notification}
@@ -2706,6 +2708,102 @@ def bulk_export_notifications(payload: BulkNotificationIds):
 
 
 NOTIFICATION_KINDS = ("breaker_tripped", "schedule_failed", "resource_alert", "schedule_once_fired", "backup_failed")
+
+CRITICAL_WEBHOOK_NOTIFICATION_KINDS = {"breaker_tripped", "schedule_failed", "backup_failed"}
+
+
+class NotificationWebhookState:
+    def __init__(self):
+        self.enabled = False
+        self.url = ""
+
+
+_notification_webhook = NotificationWebhookState()
+
+
+def _forward_notification_to_webhook(notification: dict) -> None:
+    """POST the notification's own JSON shape to the configured webhook
+    URL -- a plain HTTP POST to a user-supplied URL, the same trust model
+    as the existing http_request automation module and URL-ingestion
+    feature, not a SaaS integration. Failures are recorded to the audit
+    log rather than raised (a broken webhook must never break the calling
+    code path, whether that's a request handler or the scheduler's own
+    background thread) and are deliberately NOT routed back through
+    _notify(), to avoid a "webhook failed" notification trying to
+    re-forward itself in a loop."""
+    try:
+        httpx.post(_notification_webhook.url, json=notification, timeout=5.0)
+    except Exception as exc:
+        store.record_audit_event(
+            "notification_webhook_failed",
+            f"Failed to forward a '{notification['kind']}' notification to the configured webhook: {exc}",
+        )
+
+
+def _notify(kind: str, message: str) -> Optional[dict]:
+    """The single choke point every notification-creation call site in
+    this file goes through instead of calling store.add_notification()
+    directly -- creates the durable notification, then forwards it to the
+    configured outbound webhook if one is enabled and the kind is one of
+    the critical ones already surfaced as a desktop notification (Batch 31)."""
+    notification = store.add_notification(kind, message)
+    if notification is not None and _notification_webhook.enabled and kind in CRITICAL_WEBHOOK_NOTIFICATION_KINDS:
+        _forward_notification_to_webhook(notification)
+    return notification
+
+
+class NotificationWebhookConfig(BaseModel):
+    enabled: bool
+    url: str = ""
+
+
+@app.get("/api/notifications/webhook")
+def get_notification_webhook_config():
+    return {"enabled": _notification_webhook.enabled, "url": _notification_webhook.url}
+
+
+@app.patch("/api/notifications/webhook")
+def configure_notification_webhook(payload: NotificationWebhookConfig):
+    if payload.enabled and not payload.url.strip():
+        raise HTTPException(status_code=400, detail="url is required when enabling the webhook.")
+    _notification_webhook.enabled = payload.enabled
+    _notification_webhook.url = payload.url.strip()
+    store.record_audit_event(
+        "notification_webhook_configured",
+        f"Notification webhook {'enabled' if payload.enabled else 'disabled'}"
+        + (f" ({_notification_webhook.url})" if payload.enabled else "")
+        + ".",
+    )
+    return {"enabled": _notification_webhook.enabled, "url": _notification_webhook.url}
+
+
+class NotificationWebhookTestRequest(BaseModel):
+    url: str
+
+
+@app.post("/api/notifications/webhook/test")
+def test_notification_webhook(payload: NotificationWebhookTestRequest):
+    """Send a synthetic sample notification to the given URL immediately --
+    the notification-webhook counterpart to the existing "send a test
+    webhook from a saved pipeline card" feature (which tests this app's own
+    *inbound* webhook receiver, not an outbound one). Lets a user verify a
+    URL actually works before waiting for a real breaker trip or schedule
+    failure to fire it. Does not require the webhook to be enabled or
+    saved first -- tests whatever URL is currently typed."""
+    if not payload.url.strip():
+        raise HTTPException(status_code=400, detail="url is required.")
+    sample = {
+        "id": 0,
+        "kind": "test",
+        "message": "This is a test notification from AI-Boss.",
+        "created_at": datetime.now(timezone.utc).isoformat(),
+        "read": False,
+    }
+    try:
+        httpx.post(payload.url.strip(), json=sample, timeout=5.0)
+    except Exception as exc:
+        return {"sent": False, "error": str(exc)}
+    return {"sent": True}
 
 
 @app.get("/api/notifications/preferences")
@@ -3211,6 +3309,25 @@ def set_artifact_note(filename: str, payload: ArtifactNoteUpdate):
     if not path.is_file():
         raise HTTPException(status_code=404, detail=f"No artifact named '{safe_name}'.")
     return {"filename": safe_name, "note": store.set_artifact_note(safe_name, payload.note.strip())}
+
+
+@app.post("/api/artifacts/bulk-clear-note")
+def bulk_clear_artifact_notes(payload: BulkDeleteArtifacts):
+    """Blank out the note on a user-picked set of artifacts at once,
+    mirroring the existing bulk-clear-schedule-labels pattern. A filename
+    that never had a note is still counted as cleared (it's still a real
+    existing artifact, just nothing to remove), matching every other bulk
+    action in this app that treats "already in the target state" as a
+    success rather than a skip."""
+    cleared = []
+    for filename in payload.filenames:
+        safe_name = Path(filename).name
+        path = ingestion.ARTIFACTS_DIR / safe_name
+        if not path.is_file():
+            continue
+        store.set_artifact_note(safe_name, "")
+        cleared.append(safe_name)
+    return {"cleared": cleared}
 
 
 class ArtifactRename(BaseModel):

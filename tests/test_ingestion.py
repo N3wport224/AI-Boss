@@ -341,6 +341,30 @@ def test_rename_artifact_moves_its_note_along_with_its_tags():
     assert files[new_name]["note"] == "carry over note"
 
 
+def test_bulk_clear_artifact_notes_blanks_out_every_selected_file():
+    client.post("/api/ingest/csv", files={"file": ("bulknote_a.csv", b"x,y\n1301,1302\n", "text/csv")})
+    client.post("/api/ingest/csv", files={"file": ("bulknote_b.csv", b"x,y\n1303,1304\n", "text/csv")})
+    files = client.get("/api/artifacts").json()
+    a_name = next(f["name"] for f in files if f["name"].endswith("bulknote_a.csv"))
+    b_name = next(f["name"] for f in files if f["name"].endswith("bulknote_b.csv"))
+    client.put(f"/api/artifacts/{a_name}/note", json={"note": "note a"})
+    client.put(f"/api/artifacts/{b_name}/note", json={"note": "note b"})
+
+    res = client.post("/api/artifacts/bulk-clear-note", json={"filenames": [a_name, b_name, "does-not-exist.csv"]})
+    assert res.status_code == 200
+    assert set(res.json()["cleared"]) == {a_name, b_name}
+
+    updated = {f["name"]: f for f in client.get("/api/artifacts").json()}
+    assert updated[a_name]["note"] == ""
+    assert updated[b_name]["note"] == ""
+
+
+def test_bulk_clear_artifact_notes_is_a_no_op_on_an_empty_selection():
+    res = client.post("/api/artifacts/bulk-clear-note", json={"filenames": []})
+    assert res.status_code == 200
+    assert res.json() == {"cleared": []}
+
+
 def test_filter_artifacts_by_tag():
     client.post("/api/ingest/csv", files={"file": ("filterme_a.csv", b"x,y\n131,231\n", "text/csv")})
     client.post("/api/ingest/csv", files={"file": ("filterme_b.csv", b"x,y\n141,241\n", "text/csv")})

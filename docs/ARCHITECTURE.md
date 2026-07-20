@@ -2863,6 +2863,64 @@ only a JSON parse error or timeout falls back to an empty issue list.
      snapshots and clicking **Compare selected** rendered a per-key delta
      panel; opening the command palette (Ctrl/Cmd+K) and typing "auto
      backup" surfaced the new jump entry.
+238. **Add forwarding critical notifications to a webhook URL, and a test-send button**
+     (every notification-creation call site in `webapp/main.py` was
+     refactored to go through a single new `_notify(kind, message)` choke
+     point instead of calling `store.add_notification()` directly, so
+     webhook forwarding lives in exactly one place rather than repeated at
+     each of the 5 existing call sites (breaker trips, schedule failures,
+     one-time schedule fires, backup failures, and the frontend's own
+     resource-alert endpoint). `_notify()` forwards to a configured
+     outbound webhook (`httpx.post(..., timeout=5.0)`) only for the
+     critical kinds already surfaced as desktop notifications in Batch 31
+     (`breaker_tripped`, `schedule_failed`, `backup_failed`) -- a plain
+     HTTP POST to a user-supplied URL, the same trust model as the
+     existing `http_request` module and URL-ingestion feature, not a SaaS
+     integration. A forwarding failure is recorded to the audit log rather
+     than raised, and deliberately never re-routed back through
+     `_notify()` itself, to avoid a "webhook failed" notification trying
+     to re-forward itself in a loop. New endpoints: `GET`/`PATCH
+     /api/notifications/webhook` (config, in-memory only, matching the
+     existing rate-limit and auto-backup config precedent) and
+     `POST /api/notifications/webhook/test` -- the notification-webhook
+     counterpart to the existing "send a test webhook from a saved
+     pipeline card" (Batch 25), which tests this app's own *inbound*
+     webhook receiver rather than an outbound one. The webhook config UI
+     (URL input, enable checkbox, Save and Send test buttons) lives in the
+     Alerts panel's Preferences section, next to the existing desktop-
+     notifications toggle).
+239. **Add bulk clear notes from selected artifacts**
+     (`POST /api/artifacts/bulk-clear-note`, reusing the existing
+     `BulkDeleteArtifacts` model (`filenames: list[str]`) already defined
+     for `POST /api/artifacts/bulk-delete`. Mirrors the existing bulk-
+     clear-schedule-labels pattern from Batch 27: a filename that never
+     had a note is still counted as cleared rather than skipped, since
+     it's still a real existing artifact, just with nothing to remove. A
+     **Clear notes** button joins the other bulk artifact-selection
+     actions).
+240. **Add tests for all of Batch 36**: a webhook-config round trip
+     (defaults to disabled, enabling without a URL 400s, disabling never
+     requires one); a test-send round trip against a real local
+     `http.server.HTTPServer` (mirroring the existing outbound-HTTP test
+     pattern from `test_ingest_url.py`) plus a failure report against an
+     unreachable address; a real circuit-breaker trip (the same
+     `UNREACHABLE_URL` + threshold-1 trick as the existing breaker-
+     notification test) forwarding to that same local server, confirming
+     the end-to-end wiring rather than just the forwarding function in
+     isolation; a non-critical kind (`resource_alert`) NOT forwarding; and
+     forwarding being a no-op while the webhook is configured but
+     disabled. Bulk-clear-note tests covering a selection with an unknown
+     filename mixed in, and a no-op empty selection. 628 tests total,
+     stable across two repeated clean full-suite runs. Live-verified end
+     to end with Playwright against a freshly started server, with a real
+     local HTTP server standing in for the external webhook target:
+     saving the webhook URL through the UI and clicking **Send test**
+     delivered a real POST the local server received; tripping a real
+     circuit breaker (module threshold set to 1, then a genuinely failing
+     `http_request` run against an unreachable address) forwarded a
+     `breaker_tripped` notification to that same server; uploading a CSV,
+     setting its note via the API, checkbox-selecting it, and clicking
+     **Clear notes** blanked the note, confirmed via `GET /api/artifacts`.
 
 ## 9. Roadmap
 

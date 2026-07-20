@@ -427,6 +427,12 @@ let notificationSortMode = "newest";
 const DESKTOP_NOTIF_STORAGE_KEY = "aiboss-desktop-notifications-enabled";
 const CRITICAL_NOTIFICATION_KINDS = new Set(["breaker_tripped", "schedule_failed", "backup_failed"]);
 let desktopNotificationsEnabled = localStorage.getItem(DESKTOP_NOTIF_STORAGE_KEY) === "true";
+let notificationWebhookConfig = { enabled: false, url: "" };
+
+async function loadNotificationWebhookConfig() {
+  const res = await fetch("/api/notifications/webhook");
+  notificationWebhookConfig = await res.json();
+}
 let lastSeenDesktopNotificationId = null;
 
 async function pollDesktopNotifications() {
@@ -685,7 +691,16 @@ function renderNotificationsPanel() {
     <label class="notification-pref-row">
       <input type="checkbox" id="desktop-notifications-toggle" ${desktopNotificationsEnabled ? "checked" : ""} />
       Desktop notifications for breaker trips &amp; scheduled-run failures
-    </label>`;
+    </label>
+    <label class="notification-pref-row">
+      <input type="checkbox" id="notification-webhook-enabled" ${notificationWebhookConfig.enabled ? "checked" : ""} />
+      Forward breaker trips / schedule failures / backup failures to a webhook URL
+    </label>
+    <div class="notification-section-actions" style="padding: 4px 0;">
+      <input type="text" id="notification-webhook-url" class="artifact-search-input" placeholder="https://example.com/webhook" value="${escapeHtml(notificationWebhookConfig.url)}" />
+      <button class="btn btn-secondary btn-small" id="notification-webhook-save-btn" type="button">Save</button>
+      <button class="btn btn-secondary btn-small" id="notification-webhook-test-btn" type="button">Send test</button>
+    </div>`;
 
   notificationsPanel.querySelector("#notifications-mute-all-btn")?.addEventListener("click", async (e) => {
     e.stopPropagation();
@@ -717,6 +732,45 @@ function renderNotificationsPanel() {
       desktopNotificationsEnabled = false;
     }
     localStorage.setItem(DESKTOP_NOTIF_STORAGE_KEY, String(desktopNotificationsEnabled));
+  });
+
+  const webhookEnabledEl = notificationsPanel.querySelector("#notification-webhook-enabled");
+  const webhookUrlEl = notificationsPanel.querySelector("#notification-webhook-url");
+  webhookEnabledEl?.addEventListener("click", (e) => e.stopPropagation());
+  webhookUrlEl?.addEventListener("click", (e) => e.stopPropagation());
+  notificationsPanel.querySelector("#notification-webhook-save-btn")?.addEventListener("click", async (e) => {
+    e.stopPropagation();
+    const res = await fetch("/api/notifications/webhook", {
+      method: "PATCH",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ enabled: webhookEnabledEl.checked, url: webhookUrlEl.value.trim() }),
+    });
+    const body = await res.json();
+    if (!res.ok) {
+      showToast(body.detail || "Could not save webhook settings.", "error");
+      return;
+    }
+    notificationWebhookConfig = body;
+    showToast(body.enabled ? "Notification webhook enabled." : "Notification webhook disabled.", "success");
+  });
+  notificationsPanel.querySelector("#notification-webhook-test-btn")?.addEventListener("click", async (e) => {
+    e.stopPropagation();
+    const url = webhookUrlEl.value.trim();
+    if (!url) {
+      showToast("Enter a webhook URL first.", "error");
+      return;
+    }
+    const res = await fetch("/api/notifications/webhook/test", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ url }),
+    });
+    const body = await res.json();
+    if (!res.ok || !body.sent) {
+      showToast(`Test webhook failed: ${body.detail || body.error || "unknown error"}`, "error");
+      return;
+    }
+    showToast("Test notification sent to the webhook URL.", "success");
   });
 
   let notificationSearchDebounce = null;
@@ -4542,6 +4596,7 @@ const artifactCompareResultEl = document.getElementById("artifact-compare-result
 const artifactBulkFavoriteBtn = document.getElementById("artifact-bulk-favorite-btn");
 const artifactBulkDownloadBtn = document.getElementById("artifact-bulk-download-btn");
 const artifactBulkExportCsvBtn = document.getElementById("artifact-bulk-export-csv-btn");
+const artifactBulkClearNoteBtn = document.getElementById("artifact-bulk-clear-note-btn");
 const artifactBulkDeleteBtn = document.getElementById("artifact-bulk-delete-btn");
 
 const selectedArtifactNames = new Set();
@@ -4587,6 +4642,10 @@ function updateArtifactBulkTagBtn() {
   artifactBulkExportCsvBtn.textContent = selectedArtifactNames.size
     ? `Export selected CSV (${selectedArtifactNames.size})`
     : "Export selected CSV";
+  artifactBulkClearNoteBtn.disabled = selectedArtifactNames.size === 0;
+  artifactBulkClearNoteBtn.textContent = selectedArtifactNames.size
+    ? `Clear notes (${selectedArtifactNames.size})`
+    : "Clear notes";
 }
 
 async function loadArtifactTagDirectory() {
@@ -5227,6 +5286,26 @@ artifactBulkDeleteBtn.addEventListener("click", async () => {
     await loadArtifacts();
   } catch (err) {
     showToast(`Bulk delete failed: ${err}`, "error");
+  }
+});
+
+artifactBulkClearNoteBtn.addEventListener("click", async () => {
+  if (!selectedArtifactNames.size) return;
+  try {
+    const res = await fetch("/api/artifacts/bulk-clear-note", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ filenames: [...selectedArtifactNames] }),
+    });
+    const body = await res.json();
+    if (!res.ok) {
+      showToast(body.detail || "Bulk clear notes failed.", "error");
+      return;
+    }
+    showToast(`Cleared notes on ${body.cleared.length} artifact(s).`, "success");
+    await loadArtifacts();
+  } catch (err) {
+    showToast(`Bulk clear notes failed: ${err}`, "error");
   }
 });
 
@@ -6718,6 +6797,7 @@ refreshTelemetry();
 loadArtifacts();
 pollWatcherStatus();
 renderNotificationsPanel();
+loadNotificationWebhookConfig().then(renderNotificationsPanel);
 loadSchedules();
 loadMemory();
 loadModuleStats();

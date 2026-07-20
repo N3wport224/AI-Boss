@@ -1029,6 +1029,26 @@ A few things live in the header/subheader on every page load:
 - **Command palette auto-backup jump** — "Jump to Environment & Config
   (auto backup)" joins the palette's existing section shortcuts.
 
+## Outbound notification webhook and bulk artifact note clearing
+
+- **Forward critical notifications to a webhook URL** — an opt-in
+  webhook URL, configured in the Alerts panel's Preferences section,
+  receives a plain HTTP POST of the notification JSON whenever a
+  `breaker_tripped`, `schedule_failed`, or `backup_failed` notification
+  fires — a plain POST to a user-supplied URL, the same trust model as
+  the existing `http_request` module and URL-ingestion feature, not a
+  SaaS integration.
+- **Send a test notification webhook** — a **Send test** button posts a
+  synthetic sample notification to the currently-typed URL immediately,
+  so it can be verified before waiting for a real critical event,
+  mirroring the existing "send a test webhook from a saved pipeline
+  card" feature (which tests this app's own *inbound* webhook receiver
+  instead).
+- **Bulk clear notes from selected artifacts** — a **Clear notes**
+  button joins the other bulk artifact actions, blanking out the
+  free-text note (added last batch) on every selected file at once,
+  mirroring the existing bulk-clear-schedule-labels pattern.
+
 ## Tech stack
 
 - **Language:** Python 3.11+ — first-class async/sync support and native SDKs
