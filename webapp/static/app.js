@@ -291,6 +291,8 @@ const schedulesBulkResumeBtn = document.getElementById("schedules-bulk-resume-bt
 const schedulesBulkRunNowBtn = document.getElementById("schedules-bulk-run-now-btn");
 const schedulesBulkFavoriteBtn = document.getElementById("schedules-bulk-favorite-btn");
 const schedulesBulkClearLabelBtn = document.getElementById("schedules-bulk-clear-label-btn");
+const schedulesBulkSetLabelBtn = document.getElementById("schedules-bulk-set-label-btn");
+const schedulesBulkLabelInput = document.getElementById("schedules-bulk-label-input");
 const schedulesBulkExportBtn = document.getElementById("schedules-bulk-export-btn");
 const schedulesBulkExportCsvBtn = document.getElementById("schedules-bulk-export-csv-btn");
 const schedulesBulkDuplicateBtn = document.getElementById("schedules-bulk-duplicate-btn");
@@ -310,6 +312,7 @@ function updateSchedulesBulkButtons() {
   schedulesBulkResumeBtn.disabled = disabled;
   schedulesBulkFavoriteBtn.disabled = disabled;
   schedulesBulkClearLabelBtn.disabled = disabled;
+  schedulesBulkSetLabelBtn.disabled = disabled;
   schedulesBulkExportBtn.disabled = disabled;
   schedulesBulkExportCsvBtn.disabled = disabled;
   schedulesBulkRunNowBtn.disabled = disabled;
@@ -319,6 +322,7 @@ function updateSchedulesBulkButtons() {
   schedulesBulkPauseBtn.textContent = `Pause selected${suffix}`;
   schedulesBulkResumeBtn.textContent = `Resume selected${suffix}`;
   schedulesBulkFavoriteBtn.textContent = `★ Favorite selected${suffix}`;
+  schedulesBulkSetLabelBtn.textContent = `Apply label to selected${suffix}`;
   schedulesBulkClearLabelBtn.textContent = `Clear labels${suffix}`;
   schedulesBulkExportBtn.textContent = `⬇ Export selected JSON${suffix}`;
   schedulesBulkExportCsvBtn.textContent = `⬇ Export selected CSV${suffix}`;
@@ -6169,6 +6173,23 @@ schedulesBulkClearLabelBtn.addEventListener("click", async () => {
     body: JSON.stringify({ schedule_ids: [...selectedScheduleIds] }),
   });
   showToast(`Cleared label on ${selectedScheduleIds.size} schedule(s).`, "success");
+  await loadSchedules();
+});
+
+schedulesBulkSetLabelBtn.addEventListener("click", async () => {
+  if (!selectedScheduleIds.size) return;
+  const label = schedulesBulkLabelInput.value.trim();
+  if (!label) {
+    showToast("Enter a label to apply first.", "error");
+    return;
+  }
+  await fetch("/api/schedules/bulk-set-label", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ schedule_ids: [...selectedScheduleIds], label }),
+  });
+  showToast(`Applied label "${label}" to ${selectedScheduleIds.size} schedule(s).`, "success");
+  schedulesBulkLabelInput.value = "";
   await loadSchedules();
 });
 

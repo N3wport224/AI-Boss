@@ -3542,6 +3542,49 @@ only a JSON parse error or timeout falls back to an empty issue list.
      downloading its selected-JSON export -- each download's contents
      verified to contain exactly the one selected row.
 
+291. **Add a full-list JSON export for artifacts**
+     (`GET /api/artifacts.json` -- artifacts had a full-list CSV export
+     (Batch 17 #143) but, unlike runs/modules/notifications/audit-log/
+     memory/schedules, no JSON counterpart. Same filename/size_bytes/tags/
+     modified_at row shape as `artifacts_csv()`, with `tags` kept as a
+     real JSON list rather than the CSV's `;`-joined string. Closes the
+     one remaining full-list export gap found while surveying for Batch
+     49's items. An **Export JSON** link added next to the existing
+     **Export CSV** link in the Artifacts panel).
+292. **Add a full-list CSV export for saved pipelines**
+     (`GET /api/pipelines.csv` -- saved pipelines had export-all (a zip of
+     every pipeline's full YAML) and per-pipeline `export.json`, but no
+     lightweight tabular summary of the whole library the way
+     `modules_directory.csv` covers modules. Row shape: slug, name,
+     description, tags (`;`-joined), step_count, modified_at (ISO 8601).
+     An **Export list CSV** link added to the Saved Pipelines section
+     header, alongside the existing **Export all** zip link).
+293. **Add bulk-apply a label to selected schedules**
+     (`POST /api/schedules/bulk-set-label`, body `{schedule_ids:
+     list[int], label: str}` -- the apply-side counterpart to
+     bulk-clear-label (Batch 27 #199), mirroring how pipelines/artifacts
+     each have both a bulk-tag (apply) and bulk-untag (clear) action; an
+     unknown schedule id is skipped rather than failing the whole batch.
+     A label-text input plus **Apply label to selected** button added to
+     the Schedules bulk-action row, alongside the existing **Clear
+     labels** button).
+294. **Add tests for all of Batch 49**: an artifacts.json test confirming
+     the uploaded file's tags come back as a real list (not a `;`-joined
+     string) plus an empty-list-when-empty test; a pipelines.csv test
+     confirming the header shape and a tagged multi-step pipeline's row
+     plus a header-only-when-empty test; a bulk-set-schedule-labels test
+     confirming only the selected schedules receive the label (an
+     untouched schedule keeps its blank label) and an unknown id is
+     skipped, plus a no-op-on-empty-selection test. 708 tests total,
+     stable across two repeated clean full-suite runs. Live-verified end
+     to end with Playwright against a freshly started server: uploading a
+     CSV file and downloading the new artifacts.json link, confirming the
+     upload appears with a real tags array; saving a new pipeline and
+     downloading the new pipelines.csv link, confirming the pipeline's row
+     appears; and creating a schedule, checkbox-selecting it, typing a
+     label, clicking **Apply label to selected**, and confirming
+     `GET /api/schedules` reflects the new label.
+
 ## 9. Roadmap
 
 The current engine is intentionally a single-process, synchronous, SQLite-backed

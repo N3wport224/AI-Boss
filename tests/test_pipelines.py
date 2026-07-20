@@ -928,6 +928,42 @@ def test_export_all_pipelines_404s_when_there_are_none():
     assert res.status_code == 404
 
 
+def test_saved_pipelines_csv_export_has_a_header_and_a_row_per_pipeline():
+    import csv as csv_module
+    import io as io_module
+
+    client.post(
+        "/api/pipelines",
+        json={
+            "name": "Csv List Export",
+            "steps": [
+                {"tier": "automation", "name": "fetch_raw_metrics"},
+                {"tier": "automation", "name": "fetch_raw_metrics"},
+            ],
+        },
+    )
+    client.put("/api/pipelines/csv_list_export/tags", json={"tags": ["alpha", "beta"]})
+
+    res = client.get("/api/pipelines.csv")
+    assert res.status_code == 200
+    assert res.headers["content-type"].startswith("text/csv")
+    assert "attachment; filename=pipelines.csv" in res.headers["content-disposition"]
+
+    rows = list(csv_module.DictReader(io_module.StringIO(res.text)))
+    assert set(rows[0].keys()) == {"slug", "name", "description", "tags", "step_count", "modified_at"}
+    row = next(r for r in rows if r["slug"] == "csv_list_export")
+    assert row["name"] == "Csv List Export"
+    assert row["tags"] == "alpha;beta"
+    assert row["step_count"] == "2"
+    assert row["modified_at"]
+
+
+def test_saved_pipelines_csv_export_is_just_a_header_when_there_are_none():
+    res = client.get("/api/pipelines.csv")
+    assert res.status_code == 200
+    assert res.text.strip().splitlines() == ["slug,name,description,tags,step_count,modified_at"]
+
+
 def test_bulk_export_pipelines_zip_contains_only_the_selected_pipelines():
     import io
     import zipfile

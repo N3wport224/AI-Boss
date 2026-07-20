@@ -154,6 +154,7 @@
             <span>hours</span>
             <button id="purge-btn" class="btn btn-secondary btn-small" type="button">Purge</button>
             <a class="btn btn-secondary btn-small" href="/api/artifacts.csv" download>Export CSV</a>
+            <a class="btn btn-secondary btn-small" href="/api/artifacts.json" download>Export JSON</a>
             <a class="btn btn-secondary btn-small" href="/api/artifacts/tags-summary.csv" download title="Every tag in use and how many files carry it, as a CSV">Export tags CSV</a>
             <a class="btn btn-secondary btn-small" href="/api/artifacts/tags-summary.json" download title="Every tag in use and how many files carry it, as JSON">Export tags JSON</a>
           </div>
@@ -234,6 +235,7 @@
         <h2>Saved Pipelines</h2>
         <div class="tier-heading-actions">
           <a id="pipelines-export-all-btn" class="btn btn-secondary btn-small" href="/api/pipelines/export-all" download="pipelines_export.zip" title="Download every saved pipeline as a single zip">⬇ Export all</a>
+          <a class="btn btn-secondary btn-small" href="/api/pipelines.csv" download title="A one-row-per-pipeline summary (name, tags, step count, last modified) as a CSV">⬇ Export list CSV</a>
           <button class="collapse-toggle" type="button" data-collapse-key="saved-pipelines">▾</button>
         </div>
       </div>
@@ -358,6 +360,8 @@
         <button id="schedules-bulk-resume-btn" class="btn btn-secondary btn-small" type="button" disabled>Resume selected</button>
         <button id="schedules-bulk-run-now-btn" class="btn btn-secondary btn-small" type="button" disabled>▶ Run now selected</button>
         <button id="schedules-bulk-favorite-btn" class="btn btn-secondary btn-small" type="button" disabled>★ Favorite selected</button>
+        <input type="text" id="schedules-bulk-label-input" class="artifact-search-input" placeholder="Label to apply to selected…" />
+        <button id="schedules-bulk-set-label-btn" class="btn btn-secondary btn-small" type="button" disabled>Apply label to selected</button>
         <button id="schedules-bulk-clear-label-btn" class="btn btn-secondary btn-small" type="button" disabled>Clear labels</button>
         <button id="schedules-bulk-export-btn" class="btn btn-secondary btn-small" type="button" disabled>⬇ Export selected JSON</button>
         <button id="schedules-bulk-export-csv-btn" class="btn btn-secondary btn-small" type="button" disabled>⬇ Export selected CSV</button>

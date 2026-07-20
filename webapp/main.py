@@ -1276,6 +1276,42 @@ def list_saved_pipelines(tag: Optional[str] = None):
     return pipelines
 
 
+@app.get("/api/pipelines.csv")
+def saved_pipelines_csv():
+    """A lightweight tabular summary of every saved pipeline as a downloadable
+    CSV -- distinct from export-all (a zip of the full YAML definitions) and
+    per-pipeline export.json (one pipeline's full step-by-step definition):
+    this is the one CSV that lets a user see the whole library's shape
+    (name, tags, step count, last-modified) at a glance, mirroring the
+    modules_directory.csv pattern for modules. Tags are joined with ';'
+    since a CSV cell can't hold a list, and modified_at (a raw Unix
+    timestamp, the same value GET /api/pipelines itself returns) is
+    rendered as an ISO 8601 UTC string for readability."""
+    pipelines = pipeline_store.list_pipelines()
+    tags_by_slug = store.all_pipeline_tags()
+
+    buffer = io.StringIO()
+    writer = csv.DictWriter(buffer, fieldnames=["slug", "name", "description", "tags", "step_count", "modified_at"])
+    writer.writeheader()
+    for p in pipelines:
+        writer.writerow(
+            {
+                "slug": p.get("slug", ""),
+                "name": p.get("name", ""),
+                "description": p.get("description", ""),
+                "tags": ";".join(tags_by_slug.get(p.get("slug", ""), [])),
+                "step_count": len(p.get("steps", [])),
+                "modified_at": datetime.fromtimestamp(p["modified_at"], tz=timezone.utc).isoformat(),
+            }
+        )
+
+    return StreamingResponse(
+        iter([buffer.getvalue()]),
+        media_type="text/csv",
+        headers={"Content-Disposition": "attachment; filename=pipelines.csv"},
+    )
+
+
 @app.get("/api/pipelines/search")
 def search_saved_pipelines(q: str = ""):
     return {"query": q, "results": pipeline_store.search_pipelines(q)}
@@ -2276,6 +2312,26 @@ def bulk_export_schedules_csv(payload: BulkScheduleIds):
         media_type="text/csv",
         headers={"Content-Disposition": "attachment; filename=schedules_selected.csv"},
     )
+
+
+class BulkScheduleSetLabel(BaseModel):
+    schedule_ids: list[int]
+    label: str
+
+
+@app.post("/api/schedules/bulk-set-label")
+def bulk_set_schedule_labels(payload: BulkScheduleSetLabel):
+    """Apply the same free-text label to a user-picked set of schedules at
+    once -- the apply-side counterpart to bulk-clear-label, mirroring how
+    pipelines/artifacts each have both a bulk-tag (apply) and a bulk-untag
+    (clear) action. An unknown id is skipped rather than failing the whole
+    batch."""
+    updated = []
+    for schedule_id in payload.schedule_ids:
+        schedule = store.set_schedule_label(schedule_id, payload.label.strip())
+        if schedule is not None:
+            updated.append(schedule_id)
+    return {"updated": updated, "label": payload.label.strip()}
 
 
 @app.post("/api/schedules/bulk-clear-label")
@@ -3798,6 +3854,35 @@ def artifacts_csv():
         iter([buffer.getvalue()]),
         media_type="text/csv",
         headers={"Content-Disposition": "attachment; filename=artifacts.csv"},
+    )
+
+
+@app.get("/api/artifacts.json")
+def artifacts_json():
+    """Same filename/size_bytes/tags/modified_at row shape as artifacts_csv(),
+    as a downloadable JSON array instead -- mirrors the JSON-mirrors-CSV
+    pattern already used by runs/modules/notifications/audit-log/memory/
+    schedules, closing the one remaining full-list export gap where
+    artifacts had a CSV export but no JSON counterpart. modified_at is
+    rendered as an ISO 8601 UTC string, same as the CSV export, rather
+    than the raw Unix timestamp GET /api/artifacts itself returns."""
+    files = ingestion.list_artifacts()
+    tags_by_file = store.all_artifact_tags()
+
+    rows = [
+        {
+            "filename": f["name"],
+            "size_bytes": f["size_bytes"],
+            "tags": tags_by_file.get(f["name"], []),
+            "modified_at": datetime.fromtimestamp(f["modified_at"], tz=timezone.utc).isoformat(),
+        }
+        for f in files
+    ]
+
+    return StreamingResponse(
+        iter([json.dumps(rows, indent=2)]),
+        media_type="application/json",
+        headers={"Content-Disposition": "attachment; filename=artifacts.json"},
     )
 
 

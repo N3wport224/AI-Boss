@@ -1236,6 +1236,21 @@ kept out of history by manual discipline. It's now protected the same way
   pair for the Alerts panel's bulk-export action, the same way Recent Runs
   got both formats.
 
+## Rounding out full-list exports and schedule labeling
+
+- **Full-list JSON export for artifacts** — `GET /api/artifacts.json` closes
+  the one remaining full-list export gap: artifacts had a CSV export but no
+  JSON counterpart, unlike every other resource in the app. An **Export
+  JSON** link joins the existing **Export CSV** link.
+- **Full-list CSV export for saved pipelines** — `GET /api/pipelines.csv`, a
+  lightweight one-row-per-pipeline summary (name, tags, step count, last
+  modified) distinct from the existing zip/per-pipeline exports. An
+  **Export list CSV** link joins the Saved Pipelines section header.
+- **Bulk-apply a label to selected schedules** — completes the bulk-tag/
+  bulk-untag pattern for schedules: a label input plus **Apply label to
+  selected** button join the existing **Clear labels** button in the
+  Schedules bulk-action row.
+
 ## Tech stack
 
 - **Language:** Python 3.11+ — first-class async/sync support and native SDKs

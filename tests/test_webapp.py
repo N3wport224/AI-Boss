@@ -330,6 +330,32 @@ def test_bulk_clear_schedule_labels_blanks_out_selected_and_skips_unknown_ids():
     client.post("/api/schedules/bulk-delete", json={"schedule_ids": [id_a, id_b, id_keep]})
 
 
+def test_bulk_set_schedule_labels_applies_to_selected_and_skips_unknown_ids():
+    id_a = _create_test_schedule()
+    id_b = _create_test_schedule()
+    id_untouched = _create_test_schedule()
+
+    res = client.post(
+        "/api/schedules/bulk-set-label", json={"schedule_ids": [id_a, id_b, 9999999], "label": "Batch 49 label"}
+    )
+    assert res.status_code == 200
+    assert set(res.json()["updated"]) == {id_a, id_b}
+    assert res.json()["label"] == "Batch 49 label"
+
+    listed = {s["id"]: s for s in client.get("/api/schedules").json()}
+    assert listed[id_a]["label"] == "Batch 49 label"
+    assert listed[id_b]["label"] == "Batch 49 label"
+    assert listed[id_untouched]["label"] == ""
+
+    client.post("/api/schedules/bulk-delete", json={"schedule_ids": [id_a, id_b, id_untouched]})
+
+
+def test_bulk_set_schedule_labels_is_a_no_op_on_an_empty_selection():
+    res = client.post("/api/schedules/bulk-set-label", json={"schedule_ids": [], "label": "unused"})
+    assert res.status_code == 200
+    assert res.json()["updated"] == []
+
+
 def test_bulk_export_schedules_returns_only_selected_and_skips_unknown_ids():
     id_a = _create_test_schedule()
     id_b = _create_test_schedule()

@@ -1001,6 +1001,32 @@ def test_artifacts_csv_export_is_empty_but_valid_with_no_artifacts():
     assert lines == ["filename,size_bytes,tags,modified_at"]
 
 
+# ---- Batch 49: export artifacts list metadata to JSON ----
+
+def test_artifacts_json_export_contains_uploaded_files_with_real_tag_lists():
+    client.post("/api/ingest/csv", files={"file": ("jsonexport_a.csv", b"x,y\n5051,5052\n", "text/csv")})
+    a_name = next(f["name"] for f in client.get("/api/artifacts").json() if f["name"].endswith("jsonexport_a.csv"))
+    client.put(f"/api/artifacts/{a_name}/tags", json={"tags": ["gamma", "delta"]})
+
+    res = client.get("/api/artifacts.json")
+    assert res.status_code == 200
+    assert res.headers["content-type"].startswith("application/json")
+    assert "attachment; filename=artifacts.json" in res.headers["content-disposition"]
+
+    rows = res.json()
+    row = next(r for r in rows if r["filename"] == a_name)
+    assert isinstance(row["tags"], list)
+    assert set(row["tags"]) == {"gamma", "delta"}
+    assert row["size_bytes"] > 0
+    assert row["modified_at"]
+
+
+def test_artifacts_json_export_is_an_empty_list_with_no_artifacts():
+    res = client.get("/api/artifacts.json")
+    assert res.status_code == 200
+    assert res.json() == []
+
+
 # ---- Batch 18: download an artifact's raw file ----
 
 def test_download_artifact_returns_the_original_bytes():
