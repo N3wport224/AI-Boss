@@ -1908,3 +1908,38 @@ def test_module_directory_json_export_has_a_row_per_enabled_module():
     assert isinstance(escalation_row["enabled"], bool)
     assert escalation_row["status"] in ("ready", "error")
     assert isinstance(escalation_row["breaker_tripped"], bool)
+
+
+def test_bulk_export_modules_csv_contains_only_the_selected_modules():
+    import csv as csv_module
+    import io as io_module
+
+    res = client.post(
+        "/api/modules/bulk-export-csv",
+        json={"modules": [{"tier": "agent", "name": "escalation_agent"}]},
+    )
+    assert res.status_code == 200
+    assert res.headers["content-type"].startswith("text/csv")
+    assert "attachment; filename=modules_selected.csv" in res.headers["content-disposition"]
+
+    rows = list(csv_module.DictReader(io_module.StringIO(res.text)))
+    assert len(rows) == 1
+    assert rows[0]["tier"] == "agent"
+    assert rows[0]["name"] == "escalation_agent"
+
+
+def test_bulk_export_modules_csv_skips_an_unknown_ref():
+    res = client.post(
+        "/api/modules/bulk-export-csv",
+        json={"modules": [{"tier": "automation", "name": "does_not_exist_9999"}]},
+    )
+    assert res.status_code == 200
+    lines = res.text.strip().splitlines()
+    assert lines == ["tier,name,description,enabled,status,breaker_tripped"]
+
+
+def test_bulk_export_modules_csv_is_just_a_header_on_an_empty_selection():
+    res = client.post("/api/modules/bulk-export-csv", json={"modules": []})
+    assert res.status_code == 200
+    lines = res.text.strip().splitlines()
+    assert lines == ["tier,name,description,enabled,status,breaker_tripped"]

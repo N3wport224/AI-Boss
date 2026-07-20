@@ -39,6 +39,7 @@ const modulesBulkDisableBtn = document.getElementById("modules-bulk-disable-btn"
 const modulesBulkResetBreakerBtn = document.getElementById("modules-bulk-reset-breaker-btn");
 const modulesBulkClearThresholdBtn = document.getElementById("modules-bulk-clear-threshold-btn");
 const modulesBulkClearEnabledBtn = document.getElementById("modules-bulk-clear-enabled-btn");
+const modulesBulkExportCsvBtn = document.getElementById("modules-bulk-export-csv-btn");
 const modulesProblemsFilterEl = document.getElementById("modules-problems-filter");
 const pipelineResultEl = document.getElementById("pipeline-result");
 const runPipelineBtn = document.getElementById("run-pipeline-btn");
@@ -558,9 +559,11 @@ function updateNotificationBulkBtns() {
   const markReadBtn = document.getElementById("notifications-bulk-mark-read-btn");
   const deleteBtn = document.getElementById("notifications-bulk-delete-selected-btn");
   const exportBtn = document.getElementById("notifications-bulk-export-btn");
+  const exportJsonBtn = document.getElementById("notifications-bulk-export-json-btn");
   if (markReadBtn) markReadBtn.disabled = selectedNotificationIds.size === 0;
   if (deleteBtn) deleteBtn.disabled = selectedNotificationIds.size === 0;
   if (exportBtn) exportBtn.disabled = selectedNotificationIds.size === 0;
+  if (exportJsonBtn) exportJsonBtn.disabled = selectedNotificationIds.size === 0;
 }
 
 function sortedNotifications() {
@@ -653,6 +656,32 @@ function wireNotificationBulkControls(container) {
       link.remove();
       URL.revokeObjectURL(url);
       showToast(`Exported ${selectedNotificationIds.size} notification(s) as CSV.`, "success");
+    } catch (err) {
+      showToast(`Export failed: ${err}`, "error");
+    }
+  });
+
+  const exportJsonBtn = container.querySelector("#notifications-bulk-export-json-btn");
+  exportJsonBtn?.addEventListener("click", async (e) => {
+    e.stopPropagation();
+    if (!selectedNotificationIds.size) return;
+    try {
+      const res = await fetch("/api/notifications/bulk-export-json", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ notification_ids: [...selectedNotificationIds] }),
+      });
+      if (!res.ok) throw new Error(`HTTP ${res.status}`);
+      const blob = await res.blob();
+      const url = URL.createObjectURL(blob);
+      const link = document.createElement("a");
+      link.href = url;
+      link.download = "notifications_selected.json";
+      document.body.appendChild(link);
+      link.click();
+      link.remove();
+      URL.revokeObjectURL(url);
+      showToast(`Exported ${selectedNotificationIds.size} notification(s) as JSON.`, "success");
     } catch (err) {
       showToast(`Export failed: ${err}`, "error");
     }
@@ -766,6 +795,7 @@ function renderNotificationsPanel() {
       </label>
       <button class="btn btn-secondary btn-small" id="notifications-bulk-mark-read-btn" type="button" disabled>Mark selected read</button>
       <button class="btn btn-secondary btn-small" id="notifications-bulk-export-btn" type="button" disabled>Export selected CSV</button>
+      <button class="btn btn-secondary btn-small" id="notifications-bulk-export-json-btn" type="button" disabled>Export selected JSON</button>
       <button class="btn btn-secondary btn-small" id="notifications-bulk-delete-selected-btn" type="button" disabled>Delete selected</button>
     </div>
     <div id="notifications-alerts-list">${alertsHtml}</div>
@@ -2474,12 +2504,14 @@ function updateModulesBulkButtons() {
   modulesBulkResetBreakerBtn.disabled = disabled;
   modulesBulkClearThresholdBtn.disabled = disabled;
   modulesBulkClearEnabledBtn.disabled = disabled;
+  modulesBulkExportCsvBtn.disabled = disabled;
   const suffix = selectedModuleRefs.size ? ` (${selectedModuleRefs.size})` : "";
   modulesBulkEnableBtn.textContent = `Enable selected${suffix}`;
   modulesBulkDisableBtn.textContent = `Disable selected${suffix}`;
   modulesBulkResetBreakerBtn.textContent = `Reset breakers for selected${suffix}`;
   modulesBulkClearThresholdBtn.textContent = `Clear threshold overrides${suffix}`;
   modulesBulkClearEnabledBtn.textContent = `Clear enabled overrides${suffix}`;
+  modulesBulkExportCsvBtn.textContent = `Export selected CSV${suffix}`;
 }
 
 function wireModuleSelectCheckboxes() {
@@ -2579,6 +2611,34 @@ modulesBulkClearEnabledBtn.addEventListener("click", async () => {
   showToast(`Cleared enabled override for ${modules.length} module(s).`, "success");
   selectedModuleRefs.clear();
   await loadModules();
+});
+
+modulesBulkExportCsvBtn.addEventListener("click", async () => {
+  if (!selectedModuleRefs.size) return;
+  const modules = [...selectedModuleRefs].map((ref) => {
+    const [tier, name] = ref.split("::");
+    return { tier, name };
+  });
+  try {
+    const res = await fetch("/api/modules/bulk-export-csv", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ modules }),
+    });
+    if (!res.ok) throw new Error(`HTTP ${res.status}`);
+    const blob = await res.blob();
+    const url = URL.createObjectURL(blob);
+    const link = document.createElement("a");
+    link.href = url;
+    link.download = "modules_selected.csv";
+    document.body.appendChild(link);
+    link.click();
+    link.remove();
+    URL.revokeObjectURL(url);
+    showToast(`Exported ${modules.length} selected module(s).`, "success");
+  } catch (err) {
+    showToast(`Export failed: ${err}`, "error");
+  }
 });
 
 function applyModulesProblemsFilter() {
@@ -6740,12 +6800,14 @@ const autoBackupCompareBtn = document.getElementById("auto-backup-compare-btn");
 const autoBackupCompareResultEl = document.getElementById("auto-backup-compare-result");
 const autoBackupBulkProtectBtn = document.getElementById("auto-backup-bulk-protect-btn");
 const autoBackupBulkUnprotectBtn = document.getElementById("auto-backup-bulk-unprotect-btn");
+const autoBackupBulkExportCsvBtn = document.getElementById("auto-backup-bulk-export-csv-btn");
 let selectedSnapshotFilenames = new Set();
 
 function updateAutoBackupBulkProtectBtns() {
   const disabled = selectedSnapshotFilenames.size === 0;
   autoBackupBulkProtectBtn.disabled = disabled;
   autoBackupBulkUnprotectBtn.disabled = disabled;
+  autoBackupBulkExportCsvBtn.disabled = disabled;
 }
 
 async function loadAutoBackupSnapshots() {
@@ -6894,6 +6956,30 @@ async function bulkSetAutoBackupProtection(protected_) {
 
 autoBackupBulkProtectBtn.addEventListener("click", () => bulkSetAutoBackupProtection(true));
 autoBackupBulkUnprotectBtn.addEventListener("click", () => bulkSetAutoBackupProtection(false));
+
+autoBackupBulkExportCsvBtn.addEventListener("click", async () => {
+  if (!selectedSnapshotFilenames.size) return;
+  try {
+    const res = await fetch("/api/backup/auto/bulk-export-csv", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ filenames: [...selectedSnapshotFilenames] }),
+    });
+    if (!res.ok) throw new Error(`HTTP ${res.status}`);
+    const blob = await res.blob();
+    const url = URL.createObjectURL(blob);
+    const link = document.createElement("a");
+    link.href = url;
+    link.download = "auto_backup_snapshots_selected.csv";
+    document.body.appendChild(link);
+    link.click();
+    link.remove();
+    URL.revokeObjectURL(url);
+    showToast(`Exported ${selectedSnapshotFilenames.size} selected snapshot(s).`, "success");
+  } catch (err) {
+    showToast(`Export failed: ${err}`, "error");
+  }
+});
 
 const autoBackupPurgeHoursInput = document.getElementById("auto-backup-purge-hours");
 const autoBackupPurgeBtn = document.getElementById("auto-backup-purge-btn");

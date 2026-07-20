@@ -1054,6 +1054,41 @@ def test_auto_backup_list_csv_export_is_just_a_header_when_empty():
     assert res.text.strip().splitlines() == ["filename,size_bytes,modified_at,protected"]
 
 
+def test_bulk_export_auto_backups_csv_contains_only_the_selected_snapshots():
+    import time as _time
+    from webapp.main import BACKUPS_DIR, _auto_backup
+    import shutil
+
+    shutil.rmtree(BACKUPS_DIR, ignore_errors=True)
+    try:
+        client.post("/api/backup/auto/run-now")
+        _time.sleep(1.1)
+        client.post("/api/backup/auto/run-now")
+        files = sorted(BACKUPS_DIR.glob("backup_*.json"))
+        assert len(files) == 2
+        a_name, b_name = files[0].name, files[1].name
+
+        res = client.post("/api/backup/auto/bulk-export-csv", json={"filenames": [a_name]})
+        assert res.status_code == 200
+        assert res.headers["content-type"].startswith("text/csv")
+        assert "attachment; filename=auto_backup_snapshots_selected.csv" in res.headers["content-disposition"]
+
+        lines = res.text.strip().splitlines()
+        assert lines[0] == "filename,size_bytes,modified_at,protected"
+        assert len(lines) == 2
+        assert lines[1].startswith(a_name)
+        assert b_name not in res.text
+    finally:
+        _auto_backup.configure(enabled=False, interval_hours=24.0, keep_count=7)
+        shutil.rmtree(BACKUPS_DIR, ignore_errors=True)
+
+
+def test_bulk_export_auto_backups_csv_is_just_a_header_on_an_empty_selection():
+    res = client.post("/api/backup/auto/bulk-export-csv", json={"filenames": []})
+    assert res.status_code == 200
+    assert res.text.strip().splitlines() == ["filename,size_bytes,modified_at,protected"]
+
+
 def test_download_all_auto_backups_bundles_every_snapshot_into_a_zip():
     import io
     import zipfile

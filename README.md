@@ -1222,6 +1222,20 @@ kept out of history by manual discipline. It's now protected the same way
   actions (no bulk-delete-by-selection) since its existing clear-all/age-purge
   controls are intentionally coarse-grained.
 
+## Closing the remaining selection-scoped export gaps
+
+- **Bulk-export selected modules to CSV** — an **Export selected CSV** button
+  joins the Modules panel's existing bulk enable/disable/reset-breaker row,
+  downloading just the checkbox-selected modules in the same row shape as the
+  full module directory CSV.
+- **Bulk-export selected automatic backup snapshots to CSV** — an
+  **Export selected CSV** button joins the snapshot list's existing
+  protect/unprotect row, reusing the same selection checkboxes originally
+  built for comparing two snapshots.
+- **Bulk-export selected notifications to JSON** — completes the CSV/JSON
+  pair for the Alerts panel's bulk-export action, the same way Recent Runs
+  got both formats.
+
 ## Tech stack
 
 - **Language:** Python 3.11+ — first-class async/sync support and native SDKs

@@ -3503,6 +3503,45 @@ only a JSON parse error or timeout falls back to an empty issue list.
      confirming the downloaded CSV contains exactly one header row plus
      one data row.
 
+287. **Add bulk-export selected modules to CSV**
+     (`POST /api/modules/bulk-export-csv`, body `{modules: [{tier, name},
+     ...]}` reusing the existing `ModuleRef` shape and `selectedModuleRefs`
+     checkbox selection already used by bulk-enable/disable/reset-breaker.
+     Same tier/name/description/enabled/status/breaker_tripped row shape
+     as `GET /api/modules/directory.csv`, scoped to the selection. An
+     unknown tier/name ref is simply absent from the output. **Export
+     selected CSV** button added to the Modules bulk-action row).
+288. **Add bulk-export selected automatic backup snapshots to CSV**
+     (`POST /api/backup/auto/bulk-export-csv`, body `{filenames: [...]}`
+     mirroring `bulk_protect_auto_backups`'s filename validation. Same
+     filename/size_bytes/modified_at/protected row shape as `GET
+     /api/backup/auto/list.csv`, scoped to the existing snapshot-selection
+     checkboxes originally built for Compare (Batch 35 #237) and later
+     reused for bulk protect/unprotect (Batch 39 #253). **Export selected
+     CSV** button added alongside Protect/Unprotect selected).
+289. **Add bulk-export selected notifications to JSON**
+     (`POST /api/notifications/bulk-export-json`, completing the CSV/JSON
+     pair for the Alerts panel's existing bulk-export-to-CSV action (Batch
+     29 #207) the same way Recent Runs got both formats in Batch 47.
+     **Export selected JSON** button added next to the existing **Export
+     selected CSV** button).
+290. **Add tests for all of Batch 48**: bulk-export-modules-csv tests
+     confirming only the selected tier/name pair appears in the output
+     and an unknown ref yields just the header; bulk-export-auto-backups-
+     csv tests confirming only the selected snapshot's filename appears
+     (and an excluded snapshot's filename does not), plus an
+     empty-selection test; bulk-export-notifications-json tests
+     confirming only the selected notification appears (and an excluded
+     one does not), plus an empty-selection test. 702 tests total, stable
+     across two repeated clean full-suite runs. Live-verified end to end
+     with Playwright against a freshly started server: checkbox-selecting
+     one module and downloading its selected-CSV export; triggering a
+     fresh automatic backup snapshot, checkbox-selecting it, and
+     downloading its selected-CSV export; and creating a fresh
+     notification, opening the Alerts panel, checkbox-selecting it, and
+     downloading its selected-JSON export -- each download's contents
+     verified to contain exactly the one selected row.
+
 ## 9. Roadmap
 
 The current engine is intentionally a single-process, synchronous, SQLite-backed

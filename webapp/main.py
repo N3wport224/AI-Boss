@@ -1174,6 +1174,52 @@ def bulk_clear_modules_enabled_override(payload: BulkClearModulesEnabledOverride
     return {"updated": updated}
 
 
+class BulkExportModules(BaseModel):
+    modules: list[ModuleRef]
+
+
+@app.post("/api/modules/bulk-export-csv")
+def bulk_export_modules_csv(payload: BulkExportModules):
+    """Same tier/name/description/enabled/status/breaker_tripped row shape
+    as GET /api/modules/directory.csv, scoped to a checkbox selection --
+    the selection-scoped counterpart to the full-list export, mirroring
+    the bulk-export-csv pattern already used for runs/notifications/
+    artifacts/schedules/memory/audit-log. A ref naming a tier/name that
+    doesn't exist is simply absent from the output rather than failing
+    the whole export."""
+    wanted = {(ref.tier, ref.name) for ref in payload.modules}
+    buffer = io.StringIO()
+    writer = csv.DictWriter(
+        buffer,
+        fieldnames=["tier", "name", "description", "enabled", "status", "breaker_tripped"],
+    )
+    writer.writeheader()
+    for tier, directory in TIER_DIRS.items():
+        for manifest in load_manifests(directory):
+            if not manifest.get("enabled", True):
+                continue
+            if (tier, manifest["name"]) not in wanted:
+                continue
+            last_success = store.latest_step_status(manifest["name"])
+            health = store.get_module_health(tier, manifest["name"])
+            writer.writerow(
+                {
+                    "tier": tier,
+                    "name": manifest["name"],
+                    "description": manifest.get("description", ""),
+                    "enabled": _is_module_effectively_enabled(tier, manifest["name"]),
+                    "status": "error" if last_success is False else "ready",
+                    "breaker_tripped": health["tripped"],
+                }
+            )
+
+    return StreamingResponse(
+        iter([buffer.getvalue()]),
+        media_type="text/csv",
+        headers={"Content-Disposition": "attachment; filename=modules_selected.csv"},
+    )
+
+
 class InputPresetSave(BaseModel):
     preset_name: str
     inputs: dict[str, Any] = {}
@@ -2964,6 +3010,34 @@ def bulk_protect_auto_backups(payload: BackupBulkProtect):
     return {"protected": payload.protected, "updated": updated}
 
 
+class BackupBulkExport(BaseModel):
+    filenames: list[str]
+
+
+@app.post("/api/backup/auto/bulk-export-csv")
+def bulk_export_auto_backups_csv(payload: BackupBulkExport):
+    """Same filename/size_bytes/modified_at/protected row shape as
+    GET /api/backup/auto/list.csv, scoped to a checkbox selection -- the
+    selection-scoped counterpart to the full-list export, mirroring the
+    bulk-export-csv pattern already used for runs/notifications/artifacts/
+    schedules/memory/audit-log/modules. An unknown or unsafe filename in
+    the selection is simply absent from the output rather than failing
+    the whole export, same as bulk-protect."""
+    wanted = set(payload.filenames)
+    buffer = io.StringIO()
+    writer = csv.DictWriter(buffer, fieldnames=["filename", "size_bytes", "modified_at", "protected"])
+    writer.writeheader()
+    for snapshot in _list_auto_backups():
+        if snapshot["filename"] in wanted:
+            writer.writerow(snapshot)
+
+    return StreamingResponse(
+        iter([buffer.getvalue()]),
+        media_type="text/csv",
+        headers={"Content-Disposition": "attachment; filename=auto_backup_snapshots_selected.csv"},
+    )
+
+
 def _snapshot_counts(snapshot: dict) -> dict:
     counts = {key: len(snapshot.get(key) or []) for key in ("runs", "steps", "schedules", "ingested_files", "pipelines")}
     counts["memory"] = len(snapshot.get("memory") or {})
@@ -3220,6 +3294,21 @@ def bulk_export_notifications(payload: BulkNotificationIds):
         iter([buffer.getvalue()]),
         media_type="text/csv",
         headers={"Content-Disposition": "attachment; filename=notifications_selected.csv"},
+    )
+
+
+@app.post("/api/notifications/bulk-export-json")
+def bulk_export_notifications_json(payload: BulkNotificationIds):
+    """Same row shape as bulk_export_notifications()'s CSV, as a
+    downloadable JSON array instead -- completes the CSV/JSON pair for a
+    checkbox multi-select, mirroring how runs got both formats in
+    Batch 47."""
+    wanted = set(payload.notification_ids)
+    rows = [n for n in store.list_notifications(limit=100000) if n["id"] in wanted]
+    return StreamingResponse(
+        iter([json.dumps(rows, indent=2)]),
+        media_type="application/json",
+        headers={"Content-Disposition": "attachment; filename=notifications_selected.json"},
     )
 
 

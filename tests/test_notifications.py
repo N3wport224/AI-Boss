@@ -504,6 +504,29 @@ def test_bulk_export_notifications_returns_only_selected_as_csv():
     )
 
 
+def test_bulk_export_notifications_json_returns_only_selected():
+    a = client.post("/api/notifications", json={"kind": "info", "message": "bulk export json a"}).json()
+    other = client.post("/api/notifications", json={"kind": "info", "message": "bulk export json not selected"}).json()
+
+    res = client.post("/api/notifications/bulk-export-json", json={"notification_ids": [a["id"]]})
+    assert res.status_code == 200
+    assert res.headers["content-type"].startswith("application/json")
+    assert "attachment; filename=notifications_selected.json" in res.headers["content-disposition"]
+
+    rows = res.json()
+    assert len(rows) == 1
+    assert rows[0]["id"] == a["id"]
+    assert not any(r["id"] == other["id"] for r in rows)
+
+    client.post("/api/notifications/bulk-delete", json={"notification_ids": [a["id"], other["id"]]})
+
+
+def test_bulk_export_notifications_json_is_an_empty_list_on_an_empty_selection():
+    res = client.post("/api/notifications/bulk-export-json", json={"notification_ids": []})
+    assert res.status_code == 200
+    assert res.json() == []
+
+
 # ---- Batch 38: export notifications to JSON ----
 
 
