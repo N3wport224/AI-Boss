@@ -5,11 +5,14 @@ instead of pulling in the `watchdog` package — good enough for "drop a file
 in, it gets processed automatically" without adding a new dependency for
 something a simple loop already does.
 """
+import os
 import threading
 from pathlib import Path
 from typing import Callable
 
-WATCH_DIR = Path(__file__).resolve().parent.parent / "watched_input"
+# Overridable so a test session (or a second deployment) can watch its own
+# directory instead of sharing the repo-root one with a live dev server.
+WATCH_DIR = Path(os.environ.get("AIBOSS_WATCH_DIR", Path(__file__).resolve().parent.parent / "watched_input"))
 
 
 def ensure_watch_dir() -> Path:

@@ -14,6 +14,19 @@ import pytest
 _TEST_DB_DIR = tempfile.mkdtemp(prefix="aiboss-test-store-")
 os.environ.setdefault("AIBOSS_DB_PATH", os.path.join(_TEST_DB_DIR, "orchestrator.db"))
 
+# Same isolation for the four file-based data directories. Without this the
+# suite rmtree's the developer's real artifacts/ and pipelines/ dirs, and the
+# watcher tests share watched_input/ with any live dev server whose own
+# watcher thread can ingest a test's dropped file first (a race that showed
+# up as intermittent test_watcher failures whenever a server was running).
+for _var, _sub in (
+    ("AIBOSS_ARTIFACTS_DIR", "artifacts"),
+    ("AIBOSS_WATCH_DIR", "watched_input"),
+    ("AIBOSS_BACKUPS_DIR", "backups"),
+    ("AIBOSS_PIPELINES_DIR", "pipelines"),
+):
+    os.environ.setdefault(_var, os.path.join(_TEST_DB_DIR, _sub))
+
 
 @pytest.fixture(autouse=True)
 def _reset_run_rate_limiter():

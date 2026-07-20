@@ -8,6 +8,7 @@ import csv
 import hashlib
 import io
 import json
+import os
 import re
 import shutil
 import time
@@ -18,7 +19,7 @@ from urllib.parse import unquote, urlparse
 import httpx
 from pypdf import PdfReader
 
-ARTIFACTS_DIR = Path(__file__).resolve().parent.parent / "artifacts"
+ARTIFACTS_DIR = Path(os.environ.get("AIBOSS_ARTIFACTS_DIR", Path(__file__).resolve().parent.parent / "artifacts"))
 
 # Applied to every upload and every file the folder watcher picks up. This is
 # meant for the CSV/PDF/JSON files this dashboard is actually for, not

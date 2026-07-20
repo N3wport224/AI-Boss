@@ -245,7 +245,13 @@ def _coerce_inputs(manifest: dict, raw_inputs: dict) -> dict:
         value = raw_inputs.get(key, field.get("default"))
         field_type = field.get("type", "text")
         if field_type == "number" and value not in (None, ""):
-            value = float(value)
+            try:
+                value = float(value)
+            except (TypeError, ValueError):
+                raise HTTPException(
+                    status_code=400,
+                    detail=f"Input '{key}' must be a number, got {value!r}.",
+                )
         elif field_type == "toggle":
             value = bool(value)
         coerced[key] = value
@@ -563,7 +569,7 @@ _scheduler = Scheduler(store, _trigger_schedule, on_error=_notify_schedule_error
 _scheduler.start()
 
 
-BACKUPS_DIR = ROOT / "backups"
+BACKUPS_DIR = Path(os.environ.get("AIBOSS_BACKUPS_DIR", ROOT / "backups"))
 
 
 def _build_backup_snapshot() -> dict:
@@ -2074,7 +2080,10 @@ def create_schedule(payload: ScheduleCreate):
     if payload.kind == "module":
         if not payload.tier:
             raise HTTPException(status_code=400, detail="tier is required when kind is 'module'")
-        _manifest_by_name(payload.tier, payload.name)  # 404s if it doesn't exist
+        manifest = _manifest_by_name(payload.tier, payload.name)  # 404s if it doesn't exist
+        # Reject uncoercible inputs now, at creation, rather than letting the
+        # schedule fail on its own timer later when nobody is watching.
+        _coerce_inputs(manifest, payload.inputs)
     else:
         try:
             pipeline_store.load_pipeline(payload.name)

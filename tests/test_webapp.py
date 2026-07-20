@@ -574,6 +574,31 @@ def test_bulk_delete_schedules_removes_every_selected_one():
     assert id_keep in remaining_ids
 
 
+def test_run_module_rejects_a_non_numeric_value_for_a_number_input():
+    res = client.post(
+        "/api/modules/automation/fetch_raw_metrics/run",
+        json={"inputs": {"signups": "zzz", "churn": 1, "revenue": 1}},
+    )
+    assert res.status_code == 400
+    assert "signups" in res.json()["detail"]
+    assert "zzz" in res.json()["detail"]
+
+
+def test_schedule_create_rejects_a_non_numeric_value_for_a_number_input():
+    res = client.post(
+        "/api/schedules",
+        json={
+            "kind": "module",
+            "tier": "automation",
+            "name": "fetch_raw_metrics",
+            "inputs": {"signups": "not-a-number"},
+            "interval_seconds": 3600,
+        },
+    )
+    assert res.status_code == 400
+    assert "signups" in res.json()["detail"]
+
+
 def test_schedule_rejects_too_short_interval():
     res = client.post(
         "/api/schedules",

@@ -6,6 +6,7 @@ mappings pulling a value from an earlier step's declared output. Persistence
 mirrors the same YAML-manifest convention already used by automations/,
 workflows/, and agents/: `pipelines/<slug>.yaml`.
 """
+import os
 import re
 from datetime import datetime, timezone
 from pathlib import Path
@@ -15,7 +16,7 @@ import yaml
 from engine.conditions import OPERATORS as CONDITION_OPERATORS
 from engine.registry import load_manifests
 
-PIPELINES_DIR = Path(__file__).resolve().parent.parent / "pipelines"
+PIPELINES_DIR = Path(os.environ.get("AIBOSS_PIPELINES_DIR", Path(__file__).resolve().parent.parent / "pipelines"))
 _VERSIONS_DIR_NAME = "_versions"
 _VERSION_ID_FORMAT = "%Y%m%dT%H%M%S%f"
 
