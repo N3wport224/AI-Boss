@@ -1608,6 +1608,42 @@ def rename_pipeline_tag(payload: PipelineTagRename):
     return {"old_tag": old_tag, "new_tag": new_tag, "renamed": renamed}
 
 
+@app.get("/api/pipelines/tags-summary")
+def pipeline_tags_summary():
+    """Every tag currently in use across saved pipelines and how many
+    pipelines carry it -- the pipeline counterpart to
+    GET /api/artifacts/tags-summary, a directory view for the tag filter
+    box rather than having to already know a tag to type it in. Only
+    counts pipelines that still exist (a deleted pipeline's stale tag row,
+    if any, doesn't inflate the count)."""
+    existing_slugs = {p["slug"] for p in pipeline_store.list_pipelines()}
+    counts: dict[str, int] = {}
+    for slug, tags in store.all_pipeline_tags().items():
+        if slug not in existing_slugs:
+            continue
+        for tag in tags:
+            counts[tag] = counts.get(tag, 0) + 1
+    summary = [{"tag": tag, "count": count} for tag, count in counts.items()]
+    summary.sort(key=lambda entry: (-entry["count"], entry["tag"].lower()))
+    return summary
+
+
+@app.get("/api/pipelines/tags-summary.csv")
+def pipeline_tags_summary_csv():
+    """Same tag/count directory as GET /api/pipelines/tags-summary, as a
+    downloadable CSV -- mirrors the artifact tags-summary CSV export."""
+    buffer = io.StringIO()
+    writer = csv.DictWriter(buffer, fieldnames=["tag", "count"])
+    writer.writeheader()
+    for entry in pipeline_tags_summary():
+        writer.writerow(entry)
+    return StreamingResponse(
+        iter([buffer.getvalue()]),
+        media_type="text/csv",
+        headers={"Content-Disposition": "attachment; filename=pipeline_tags.csv"},
+    )
+
+
 @app.get("/api/pipelines/compare")
 def compare_pipelines(a: str, b: str):
     """Side-by-side key-level diff between two saved pipelines' current
@@ -2034,6 +2070,33 @@ def bulk_export_schedules(payload: BulkScheduleIds):
         iter([buffer]),
         media_type="application/json",
         headers={"Content-Disposition": "attachment; filename=schedules_selected.json"},
+    )
+
+
+@app.post("/api/schedules/bulk-export-csv")
+def bulk_export_schedules_csv(payload: BulkScheduleIds):
+    """Same user-picked set of schedules as POST /api/schedules/bulk-export,
+    as a downloadable CSV instead of JSON -- mirrors the existing
+    bulk-export-csv pattern already used for notifications and artifacts.
+    An unknown id is silently skipped rather than failing the whole
+    request."""
+    all_schedules = {s["id"]: s for s in store.list_schedules()}
+    selected = [all_schedules[sid] for sid in payload.schedule_ids if sid in all_schedules]
+
+    buffer = io.StringIO()
+    fieldnames = [
+        "id", "kind", "tier", "name", "label", "schedule_type", "interval_seconds",
+        "daily_time", "day_of_week", "enabled", "next_run_at", "last_run_at", "last_status",
+    ]
+    writer = csv.DictWriter(buffer, fieldnames=fieldnames, extrasaction="ignore")
+    writer.writeheader()
+    for schedule in selected:
+        writer.writerow(schedule)
+
+    return StreamingResponse(
+        iter([buffer.getvalue()]),
+        media_type="text/csv",
+        headers={"Content-Disposition": "attachment; filename=schedules_selected.csv"},
     )
 
 
@@ -3140,6 +3203,30 @@ async def import_memory(file: UploadFile = File(...)):
 def delete_memory_key(key: str):
     store.delete_memory(key)
     return {"deleted": key}
+
+
+class MemoryKeyRename(BaseModel):
+    new_key: str
+
+
+@app.post("/api/memory/{key}/rename")
+def rename_memory_key(key: str, payload: MemoryKeyRename):
+    """Move a memory entry's value to a new key -- distinct from setting a
+    new key and deleting the old one by hand, which would silently drop
+    the value if the write raced with something else reading the old key
+    in between. Mirrors rename_artifact()/rename_pipeline()'s 404 (unknown
+    source) / 409 (destination collision) status-code pattern."""
+    new_key = payload.new_key.strip()
+    if not new_key:
+        raise HTTPException(status_code=400, detail="new_key must not be empty.")
+    try:
+        store.rename_memory_key(key, new_key)
+    except KeyError as exc:
+        raise HTTPException(status_code=404, detail=str(exc))
+    except ValueError as exc:
+        raise HTTPException(status_code=409, detail=str(exc))
+    store.record_audit_event("memory_rename", f"Renamed memory key '{key}' to '{new_key}'.")
+    return {"old_key": key, "new_key": new_key}
 
 
 @app.delete("/api/memory")

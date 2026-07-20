@@ -3140,6 +3140,50 @@ only a JSON parse error or timeout falls back to an empty issue list.
      checkbox-selecting two real saved pipelines, clicking **⬇ Export
      selected as zip**, and confirming the downloaded zip contains exactly
      those two pipelines' YAML files.
+257. **Add renaming a memory key**
+     (`StateStore.rename_memory_key()`, a single atomic `UPDATE memory SET
+     key = ... WHERE key = ...` under the existing lock -- raises
+     `KeyError` for an unknown source key and `ValueError` for a collision
+     on the destination, letting `POST /api/memory/{key}/rename` map both
+     to the same 404/409 pattern `rename_artifact()`/`rename_pipeline()`
+     already established. A **Rename** button added per memory row, using
+     the same `prompt()`-based UI already used for artifact/tag renames).
+258. **Add bulk-exporting selected schedules to CSV**
+     (`POST /api/schedules/bulk-export-csv`, reusing the exact same
+     `fieldnames` list as `GET /api/schedules.csv` -- the selection-scoped
+     CSV counterpart to the existing selection-scoped JSON export
+     (`POST /api/schedules/bulk-export`, Batch 28), mirroring the
+     bulk-export-csv pattern notifications and artifacts already had. An
+     **⬇ Export selected CSV** button added next to the existing **⬇
+     Export selected JSON** button in the Schedules panel).
+259. **Add a pipeline tag directory with counts**
+     (`GET /api/pipelines/tags-summary` (+ `.csv` export), the pipeline
+     counterpart to the existing artifact tag directory
+     (`GET /api/artifacts/tags-summary`, Batch 14) -- counts only tags on
+     pipelines that still exist, so a deleted pipeline's stale tag row
+     never inflates a count. A tag-directory panel (chip + count, with a
+     ✎ rename-everywhere button reusing the existing
+     `POST /api/pipelines/rename-tag` endpoint from Batch 39) added below
+     the Saved Pipelines filter row, mirroring the artifact tag directory
+     UI verbatim).
+260. **Add tests for all of Batch 41**: a memory-key-rename round trip
+     confirming the value moves to the new key and the old key
+     disappears, plus 404/409/blank-new-key rejection tests; a
+     bulk-schedule-CSV-export test confirming only the selected
+     schedules' rows appear (with an unknown id skipped) and a
+     just-a-header-on-empty-selection test; a pipeline-tags-summary round
+     trip confirming per-tag counts, the CSV export's header and rows,
+     and that a deleted pipeline's tag is excluded from the count. 662
+     tests total, stable across two repeated clean full-suite runs.
+     Live-verified end to end with Playwright against a freshly started
+     server: importing a memory key via the JSON import endpoint,
+     clicking its new **Rename** button, accepting a prompt dialog with a
+     new key name, and confirming `GET /api/memory` shows the value moved
+     to the new key; checkbox-selecting two real schedules and clicking
+     **⬇ Export selected CSV**, then confirming the downloaded file
+     contains both schedule ids; and tagging a saved pipeline, confirming
+     the new tag directory panel shows the tag with its count, and
+     clicking the tag chip to confirm it populates the tag filter box.
 
 ## 9. Roadmap
 

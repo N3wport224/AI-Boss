@@ -255,7 +255,9 @@
         <input type="text" id="pipelines-rename-tag-old" class="artifact-search-input" placeholder="Rename tag…" />
         <input type="text" id="pipelines-rename-tag-new" class="artifact-search-input" placeholder="…to" />
         <button id="pipelines-rename-tag-btn" class="btn btn-secondary btn-small" type="button" title="Rename this tag across every saved pipeline that carries it">Rename tag everywhere</button>
+        <a class="btn btn-secondary btn-small" href="/api/pipelines/tags-summary.csv" download title="Every tag in use across saved pipelines and how many carry it, as a CSV">Export tags CSV</a>
       </div>
+      <div id="pipeline-tag-directory" class="tag-directory hidden"></div>
       <div id="pipeline-deep-search-results" class="hidden"></div>
       <div class="card-grid" id="saved-pipelines-grid"></div>
       <div class="run-compare-bar hidden" id="pipeline-compare-bar">
@@ -352,6 +354,7 @@
         <button id="schedules-bulk-favorite-btn" class="btn btn-secondary btn-small" type="button" disabled>★ Favorite selected</button>
         <button id="schedules-bulk-clear-label-btn" class="btn btn-secondary btn-small" type="button" disabled>Clear labels</button>
         <button id="schedules-bulk-export-btn" class="btn btn-secondary btn-small" type="button" disabled>⬇ Export selected JSON</button>
+        <button id="schedules-bulk-export-csv-btn" class="btn btn-secondary btn-small" type="button" disabled>⬇ Export selected CSV</button>
         <button id="schedules-bulk-duplicate-btn" class="btn btn-secondary btn-small" type="button" disabled>⧉ Duplicate selected</button>
         <button id="schedules-bulk-delete-btn" class="btn btn-danger btn-small" type="button" disabled>Delete selected</button>
       </div>

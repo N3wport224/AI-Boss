@@ -289,6 +289,7 @@ const schedulesBulkRunNowBtn = document.getElementById("schedules-bulk-run-now-b
 const schedulesBulkFavoriteBtn = document.getElementById("schedules-bulk-favorite-btn");
 const schedulesBulkClearLabelBtn = document.getElementById("schedules-bulk-clear-label-btn");
 const schedulesBulkExportBtn = document.getElementById("schedules-bulk-export-btn");
+const schedulesBulkExportCsvBtn = document.getElementById("schedules-bulk-export-csv-btn");
 const schedulesBulkDuplicateBtn = document.getElementById("schedules-bulk-duplicate-btn");
 const schedulesBulkDeleteBtn = document.getElementById("schedules-bulk-delete-btn");
 const schedulesSelectAllEl = document.getElementById("schedules-select-all");
@@ -307,6 +308,7 @@ function updateSchedulesBulkButtons() {
   schedulesBulkFavoriteBtn.disabled = disabled;
   schedulesBulkClearLabelBtn.disabled = disabled;
   schedulesBulkExportBtn.disabled = disabled;
+  schedulesBulkExportCsvBtn.disabled = disabled;
   schedulesBulkRunNowBtn.disabled = disabled;
   schedulesBulkDuplicateBtn.disabled = disabled;
   schedulesBulkDeleteBtn.disabled = disabled;
@@ -316,6 +318,7 @@ function updateSchedulesBulkButtons() {
   schedulesBulkFavoriteBtn.textContent = `★ Favorite selected${suffix}`;
   schedulesBulkClearLabelBtn.textContent = `Clear labels${suffix}`;
   schedulesBulkExportBtn.textContent = `⬇ Export selected JSON${suffix}`;
+  schedulesBulkExportCsvBtn.textContent = `⬇ Export selected CSV${suffix}`;
   schedulesBulkRunNowBtn.textContent = `▶ Run now selected${suffix}`;
   schedulesBulkDuplicateBtn.textContent = `⧉ Duplicate selected${suffix}`;
   schedulesBulkDeleteBtn.textContent = `Delete selected${suffix}`;
@@ -4327,7 +4330,60 @@ async function loadSavedPipelines() {
   const res = await fetch(url);
   const pipelinesList = await res.json();
   renderSavedPipelines(pipelinesList);
+  loadPipelineTagDirectory();
   return pipelinesList;
+}
+
+const pipelineTagDirectoryEl = document.getElementById("pipeline-tag-directory");
+
+async function loadPipelineTagDirectory() {
+  const res = await fetch("/api/pipelines/tags-summary");
+  const summary = await res.json();
+
+  if (!summary.length) {
+    pipelineTagDirectoryEl.classList.add("hidden");
+    pipelineTagDirectoryEl.innerHTML = "";
+    return;
+  }
+
+  pipelineTagDirectoryEl.classList.remove("hidden");
+  pipelineTagDirectoryEl.innerHTML = summary
+    .map(
+      (entry) => `
+      <span class="tag-directory-entry">
+        <button type="button" class="tag-directory-chip" data-tag="${escapeHtml(entry.tag)}">${escapeHtml(entry.tag)} <span class="tag-directory-count">${entry.count}</span></button>
+        <button type="button" class="tag-directory-rename-btn" data-tag="${escapeHtml(entry.tag)}" title="Rename this tag everywhere it's used">✎</button>
+      </span>`
+    )
+    .join("");
+
+  pipelineTagDirectoryEl.querySelectorAll(".tag-directory-chip").forEach((chip) => {
+    chip.addEventListener("click", () => {
+      pipelineTagFilterInput.value = chip.dataset.tag;
+      loadSavedPipelines();
+    });
+  });
+
+  pipelineTagDirectoryEl.querySelectorAll(".tag-directory-rename-btn").forEach((btn) => {
+    btn.addEventListener("click", async () => {
+      const oldTag = btn.dataset.tag;
+      const newTag = prompt(`Rename tag "${oldTag}" to:`, oldTag);
+      if (!newTag || !newTag.trim() || newTag.trim() === oldTag) return;
+      try {
+        const res = await fetch("/api/pipelines/rename-tag", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ old_tag: oldTag, new_tag: newTag.trim() }),
+        });
+        const body = await res.json();
+        if (!res.ok) throw new Error(body.detail || `HTTP ${res.status}`);
+        showToast(`Renamed "${oldTag}" to "${newTag.trim()}" on ${body.renamed.length} pipeline(s).`, "success");
+        await loadSavedPipelines();
+      } catch (err) {
+        showToast(`Could not rename tag: ${err}`, "error");
+      }
+    });
+  });
 }
 
 async function savePipelineTags(slug, tags) {
@@ -5928,6 +5984,30 @@ schedulesBulkExportBtn.addEventListener("click", async () => {
   }
 });
 
+schedulesBulkExportCsvBtn.addEventListener("click", async () => {
+  if (!selectedScheduleIds.size) return;
+  try {
+    const res = await fetch("/api/schedules/bulk-export-csv", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ schedule_ids: [...selectedScheduleIds] }),
+    });
+    if (!res.ok) throw new Error(`HTTP ${res.status}`);
+    const blob = await res.blob();
+    const url = URL.createObjectURL(blob);
+    const link = document.createElement("a");
+    link.href = url;
+    link.download = "schedules_selected.csv";
+    document.body.appendChild(link);
+    link.click();
+    link.remove();
+    URL.revokeObjectURL(url);
+    showToast(`Exported ${selectedScheduleIds.size} schedule(s) as CSV.`, "success");
+  } catch (err) {
+    showToast(`Export failed: ${err}`, "error");
+  }
+});
+
 schedulesBulkDuplicateBtn.addEventListener("click", async () => {
   if (!selectedScheduleIds.size) return;
   schedulesBulkDuplicateBtn.disabled = true;
@@ -6129,6 +6209,7 @@ function renderMemoryRows(entries) {
           <span class="schedule-row-meta">${escapeHtml(JSON.stringify(entry.value))} · updated ${new Date(entry.updated_at).toLocaleString()}</span>
         </div>
         <div class="schedule-row-actions">
+          <button class="btn btn-secondary btn-small" data-memory-rename="${encodeURIComponent(entry.key)}" title="Rename this memory key">Rename</button>
           <button class="btn btn-secondary btn-small" data-memory-delete="${encodeURIComponent(entry.key)}">Delete</button>
         </div>
       </div>`
@@ -6140,6 +6221,25 @@ function wireMemoryDeleteButtons() {
   memoryListEl.querySelectorAll("[data-memory-delete]").forEach((btn) => {
     btn.addEventListener("click", async () => {
       await fetch(`/api/memory/${btn.dataset.memoryDelete}`, { method: "DELETE" });
+      await loadMemory();
+    });
+  });
+  memoryListEl.querySelectorAll("[data-memory-rename]").forEach((btn) => {
+    btn.addEventListener("click", async () => {
+      const oldKey = decodeURIComponent(btn.dataset.memoryRename);
+      const newKey = prompt(`Rename memory key "${oldKey}" to:`, oldKey);
+      if (!newKey || !newKey.trim() || newKey.trim() === oldKey) return;
+      const res = await fetch(`/api/memory/${encodeURIComponent(oldKey)}/rename`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ new_key: newKey.trim() }),
+      });
+      const body = await res.json();
+      if (!res.ok) {
+        showToast(body.detail || "Failed to rename this memory key.", "error");
+        return;
+      }
+      showToast(`Renamed to "${body.new_key}".`, "success");
       await loadMemory();
     });
   });

@@ -65,6 +65,43 @@ def test_memory_endpoints_list_delete_and_redact():
     assert client.get("/api/memory").json() == []
 
 
+def test_rename_memory_key_moves_the_value_to_the_new_key():
+    from webapp.main import store
+
+    store.set_memory("batch41_old_key", {"nested": "value"})
+
+    res = client.post("/api/memory/batch41_old_key/rename", json={"new_key": "batch41_new_key"})
+    assert res.status_code == 200
+    assert res.json() == {"old_key": "batch41_old_key", "new_key": "batch41_new_key"}
+
+    entries = {entry["key"]: entry["value"] for entry in client.get("/api/memory").json()}
+    assert "batch41_old_key" not in entries
+    assert entries["batch41_new_key"] == {"nested": "value"}
+
+
+def test_rename_memory_key_404s_for_an_unknown_key():
+    res = client.post("/api/memory/does_not_exist_key/rename", json={"new_key": "whatever"})
+    assert res.status_code == 404
+
+
+def test_rename_memory_key_409s_if_the_new_key_already_exists():
+    from webapp.main import store
+
+    store.set_memory("batch41_existing_a", "a")
+    store.set_memory("batch41_existing_b", "b")
+
+    res = client.post("/api/memory/batch41_existing_a/rename", json={"new_key": "batch41_existing_b"})
+    assert res.status_code == 409
+
+
+def test_rename_memory_key_rejects_a_blank_new_key():
+    from webapp.main import store
+
+    store.set_memory("batch41_blank_source", "x")
+    res = client.post("/api/memory/batch41_blank_source/rename", json={"new_key": "   "})
+    assert res.status_code == 400
+
+
 def test_memory_csv_export_contains_header_and_entries_and_redacts_secrets():
     from webapp.main import store
 
@@ -1271,6 +1308,53 @@ def test_rename_pipeline_tag_rejects_blank_or_identical_tags():
 
     res2 = client.post("/api/pipelines/rename-tag", json={"old_tag": "same", "new_tag": "same"})
     assert res2.status_code == 400
+
+
+def test_pipeline_tags_summary_counts_tagged_pipelines():
+    client.post(
+        "/api/pipelines",
+        json={"name": "Tagdir Pipeline A", "steps": [{"tier": "automation", "name": "fetch_raw_metrics"}]},
+    )
+    client.post(
+        "/api/pipelines",
+        json={"name": "Tagdir Pipeline B", "steps": [{"tier": "automation", "name": "fetch_raw_metrics"}]},
+    )
+    client.put("/api/pipelines/tagdir_pipeline_a/tags", json={"tags": ["reviewed", "q1"]})
+    client.put("/api/pipelines/tagdir_pipeline_b/tags", json={"tags": ["reviewed"]})
+
+    summary = client.get("/api/pipelines/tags-summary").json()
+    by_tag = {entry["tag"]: entry["count"] for entry in summary}
+    assert by_tag["reviewed"] == 2
+    assert by_tag["q1"] == 1
+
+
+def test_pipeline_tags_summary_csv_export_has_a_header_and_matches_the_json_summary():
+    client.post(
+        "/api/pipelines",
+        json={"name": "Tagdir Csv Pipeline", "steps": [{"tier": "automation", "name": "fetch_raw_metrics"}]},
+    )
+    client.put("/api/pipelines/tagdir_csv_pipeline/tags", json={"tags": ["csv_export_marker"]})
+
+    res = client.get("/api/pipelines/tags-summary.csv")
+    assert res.status_code == 200
+    assert res.headers["content-type"].startswith("text/csv")
+    assert "attachment; filename=pipeline_tags.csv" in res.headers["content-disposition"]
+
+    lines = res.text.strip().splitlines()
+    assert lines[0] == "tag,count"
+    assert any(line.startswith("csv_export_marker,") for line in lines[1:])
+
+
+def test_pipeline_tags_summary_excludes_tags_on_deleted_pipelines():
+    client.post(
+        "/api/pipelines",
+        json={"name": "Tagdir Deleted Pipeline", "steps": [{"tier": "automation", "name": "fetch_raw_metrics"}]},
+    )
+    client.put("/api/pipelines/tagdir_deleted_pipeline/tags", json={"tags": ["soon_deleted"]})
+    client.delete("/api/pipelines/tagdir_deleted_pipeline")
+
+    summary = client.get("/api/pipelines/tags-summary").json()
+    assert not any(entry["tag"] == "soon_deleted" for entry in summary)
 
 
 def test_run_history_search_finds_step_outputs_and_errors():

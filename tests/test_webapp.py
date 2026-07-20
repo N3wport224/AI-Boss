@@ -348,6 +348,35 @@ def test_bulk_export_schedules_returns_only_selected_and_skips_unknown_ids():
     client.post("/api/schedules/bulk-delete", json={"schedule_ids": [id_a, id_b, id_other]})
 
 
+def test_bulk_export_schedules_csv_returns_only_selected_and_skips_unknown_ids():
+    id_a = _create_test_schedule()
+    id_b = _create_test_schedule()
+    id_other = _create_test_schedule()
+
+    res = client.post("/api/schedules/bulk-export-csv", json={"schedule_ids": [id_a, id_b, 9999999]})
+    assert res.status_code == 200
+    assert res.headers["content-type"].startswith("text/csv")
+    assert "attachment; filename=schedules_selected.csv" in res.headers["content-disposition"]
+
+    lines = res.text.strip().splitlines()
+    assert lines[0] == (
+        "id,kind,tier,name,label,schedule_type,interval_seconds,"
+        "daily_time,day_of_week,enabled,next_run_at,last_run_at,last_status"
+    )
+    returned_ids = {int(line.split(",")[0]) for line in lines[1:]}
+    assert returned_ids == {id_a, id_b}
+    assert id_other not in returned_ids
+
+    client.post("/api/schedules/bulk-delete", json={"schedule_ids": [id_a, id_b, id_other]})
+
+
+def test_bulk_export_schedules_csv_is_just_a_header_on_an_empty_selection():
+    res = client.post("/api/schedules/bulk-export-csv", json={"schedule_ids": []})
+    assert res.status_code == 200
+    lines = res.text.strip().splitlines()
+    assert len(lines) == 1
+
+
 def test_run_schedule_now_executes_immediately_without_touching_cadence():
     schedule_id = _create_test_schedule()
     before = next(s for s in client.get("/api/schedules").json() if s["id"] == schedule_id)

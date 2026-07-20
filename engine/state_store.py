@@ -516,6 +516,27 @@ class StateStore:
             self._conn.execute("DELETE FROM memory WHERE key = ?", (key,))
             self._conn.commit()
 
+    def rename_memory_key(self, old_key: str, new_key: str) -> None:
+        """Move a memory entry's value to a new key, leaving nothing behind
+        under the old key -- mirrors rename_artifact()/rename_pipeline()'s
+        error behavior (KeyError for an unknown source, ValueError for a
+        collision on the destination) so the API layer can map both to the
+        same 404/409 pattern already used for those."""
+        with self._lock:
+            row = self._conn.execute("SELECT 1 FROM memory WHERE key = ?", (old_key,)).fetchone()
+            if row is None:
+                raise KeyError(f"No memory key named '{old_key}'.")
+            if old_key == new_key:
+                return
+            collision = self._conn.execute("SELECT 1 FROM memory WHERE key = ?", (new_key,)).fetchone()
+            if collision is not None:
+                raise ValueError(f"A memory key named '{new_key}' already exists.")
+            self._conn.execute(
+                "UPDATE memory SET key = ?, updated_at = ? WHERE key = ?",
+                (new_key, datetime.now(timezone.utc).isoformat(), old_key),
+            )
+            self._conn.commit()
+
     def all_memory(self) -> list[dict]:
         with self._lock:
             rows = self._conn.execute("SELECT key, value, updated_at FROM memory ORDER BY key").fetchall()

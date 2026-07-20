@@ -1116,6 +1116,20 @@ A few things live in the header/subheader on every page load:
   zip**, distinct from the existing **Export all** (every saved pipeline,
   no selection), mirroring the existing bulk artifact zip download.
 
+## Memory key rename, schedule CSV export, and a pipeline tag directory
+
+- **Rename a memory key** — a **Rename** button per memory row moves its
+  value to a new key; every other entity type (artifacts, saved
+  pipelines) already had a rename, memory was the one gap.
+- **Bulk export selected schedules to CSV** — an **⬇ Export selected CSV**
+  button joins the existing **⬇ Export selected JSON** button, mirroring
+  the selection-scoped CSV export pattern notifications and artifacts
+  already had.
+- **Pipeline tag directory with counts** — a tag directory panel (with a
+  rename-everywhere button per tag chip) now sits below the Saved
+  Pipelines filter row, the pipeline counterpart to the existing artifact
+  tag directory.
+
 ## Tech stack
 
 - **Language:** Python 3.11+ — first-class async/sync support and native SDKs
