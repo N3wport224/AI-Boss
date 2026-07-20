@@ -102,6 +102,110 @@ def test_rename_memory_key_rejects_a_blank_new_key():
     assert res.status_code == 400
 
 
+def test_duplicate_memory_key_copies_the_value_and_keeps_the_original():
+    from webapp.main import store
+
+    store.set_memory("batch45_dup_source", {"nested": "value"})
+
+    res = client.post("/api/memory/batch45_dup_source/duplicate", json={"new_key": "batch45_dup_target"})
+    assert res.status_code == 200
+    assert res.json() == {"key": "batch45_dup_source", "new_key": "batch45_dup_target"}
+
+    entries = {entry["key"]: entry["value"] for entry in client.get("/api/memory").json()}
+    assert entries["batch45_dup_source"] == {"nested": "value"}
+    assert entries["batch45_dup_target"] == {"nested": "value"}
+
+
+def test_duplicate_memory_key_404s_for_an_unknown_source_key():
+    res = client.post("/api/memory/does_not_exist_dup_source/duplicate", json={"new_key": "whatever"})
+    assert res.status_code == 404
+
+
+def test_duplicate_memory_key_409s_if_the_new_key_already_exists():
+    from webapp.main import store
+
+    store.set_memory("batch45_dup_existing_a", "a")
+    store.set_memory("batch45_dup_existing_b", "b")
+
+    res = client.post("/api/memory/batch45_dup_existing_a/duplicate", json={"new_key": "batch45_dup_existing_b"})
+    assert res.status_code == 409
+
+
+def test_duplicate_memory_key_rejects_a_blank_new_key():
+    from webapp.main import store
+
+    store.set_memory("batch45_dup_blank_source", "x")
+    res = client.post("/api/memory/batch45_dup_blank_source/duplicate", json={"new_key": "   "})
+    assert res.status_code == 400
+
+
+def test_bulk_delete_memory_keys_removes_only_the_selected_ones():
+    from webapp.main import store
+
+    store.set_memory("batch45_bulk_del_a", "a")
+    store.set_memory("batch45_bulk_del_b", "b")
+    store.set_memory("batch45_bulk_del_keep", "keep")
+
+    res = client.post("/api/memory/bulk-delete", json={"keys": ["batch45_bulk_del_a", "batch45_bulk_del_b"]})
+    assert res.status_code == 200
+    assert set(res.json()["deleted"]) == {"batch45_bulk_del_a", "batch45_bulk_del_b"}
+
+    remaining_keys = {entry["key"] for entry in client.get("/api/memory").json()}
+    assert "batch45_bulk_del_a" not in remaining_keys
+    assert "batch45_bulk_del_b" not in remaining_keys
+    assert "batch45_bulk_del_keep" in remaining_keys
+
+
+def test_bulk_delete_memory_keys_skips_an_unknown_key():
+    from webapp.main import store
+
+    store.set_memory("batch45_bulk_del_known", "x")
+
+    res = client.post(
+        "/api/memory/bulk-delete", json={"keys": ["batch45_bulk_del_known", "does_not_exist_bulk_del"]}
+    )
+    assert res.status_code == 200
+    assert res.json() == {"deleted": ["batch45_bulk_del_known"]}
+
+
+def test_bulk_delete_memory_keys_is_a_no_op_on_an_empty_selection():
+    res = client.post("/api/memory/bulk-delete", json={"keys": []})
+    assert res.status_code == 200
+    assert res.json() == {"deleted": []}
+
+
+def test_bulk_export_memory_keys_csv_contains_only_the_selected_rows_and_redacts_secrets():
+    from webapp.main import store
+
+    store.set_memory("batch45_bulk_csv_a", "alpha")
+    store.set_memory("batch45_bulk_csv_secret_token", "sk-should-be-hidden")
+    store.set_memory("batch45_bulk_csv_excluded", "not selected")
+
+    res = client.post(
+        "/api/memory/bulk-export-csv",
+        json={"keys": ["batch45_bulk_csv_a", "batch45_bulk_csv_secret_token"]},
+    )
+    assert res.status_code == 200
+    assert res.headers["content-type"].startswith("text/csv")
+    assert "attachment; filename=memory_selected.csv" in res.headers["content-disposition"]
+
+    lines = res.text.strip().splitlines()
+    assert lines[0] == "key,value,updated_at"
+    marker_row = next(line for line in lines[1:] if line.startswith("batch45_bulk_csv_a"))
+    assert "alpha" in marker_row
+    secret_row = next(line for line in lines[1:] if line.startswith("batch45_bulk_csv_secret_token"))
+    assert "sk-should-be-hidden" not in secret_row
+    assert "REDACTED" in secret_row
+    assert not any("batch45_bulk_csv_excluded" in line for line in lines[1:])
+
+
+def test_bulk_export_memory_keys_csv_is_just_a_header_on_an_empty_selection():
+    res = client.post("/api/memory/bulk-export-csv", json={"keys": []})
+    assert res.status_code == 200
+    lines = res.text.strip().splitlines()
+    assert lines == ["key,value,updated_at"]
+
+
 def test_memory_csv_export_contains_header_and_entries_and_redacts_secrets():
     from webapp.main import store
 

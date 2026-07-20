@@ -3311,6 +3311,55 @@ only a JSON parse error or timeout falls back to an empty issue list.
      confirming each downloaded file is well-formed JSON with the
      expected data.
 
+273. **Add checkbox-based bulk selection to the agent memory panel**
+     (a `.memory-select-checkbox` per row, a **Select all** checkbox, and
+     two new bulk-action buttons -- the persistent memory panel was the
+     one major list in this app (unlike artifacts, saved pipelines, and
+     schedules) with no bulk-selection UI at all before this).
+274. **Add bulk-deleting selected memory keys**
+     (`POST /api/memory/bulk-delete`, body `{keys: list[str]}` -- the
+     finer-grained counterpart to deleting one key at a time (`DELETE
+     /api/memory/{key}`) or clearing everything (`DELETE /api/memory`),
+     mirroring the existing bulk-delete pattern for artifacts, saved
+     pipelines, and schedules. An unknown key is skipped rather than
+     failing the whole batch. A **Delete selected** button added to the
+     memory panel's new bulk-action row).
+275. **Add bulk-exporting selected memory keys to CSV**
+     (`POST /api/memory/bulk-export-csv`, reusing the exact same
+     key/value/updated_at row shape and `redact_secrets()` pass as
+     `GET /api/memory.csv` -- the selection-scoped counterpart to the
+     full-list export, mirroring notifications/artifacts/schedules'
+     existing bulk-export-csv pattern. An **Export selected CSV** button
+     added to the same bulk-action row).
+276. **Add duplicating a memory key**
+     (`POST /api/memory/{key}/duplicate`, body `{new_key: str}` --
+     copies a memory entry's value to a new key while keeping the
+     original, distinct from `rename_memory_key()` (which moves it).
+     Mirrors rename's 404 (unknown source) / 409 (destination collision)
+     status-code pattern. Modules, saved pipelines, schedules, and
+     artifacts already all had a duplicate feature; memory was the one
+     remaining gap. A **Duplicate** button added per memory row, using
+     the same `prompt()`-based UI already used for artifact/pipeline
+     renames and duplicates).
+277. **Add tests for all of Batch 45**: a duplicate-memory-key round trip
+     confirming both the original and the new key hold the same value,
+     plus 404/409/blank-new-key rejection tests mirroring the existing
+     rename tests; a bulk-delete round trip confirming only the selected
+     keys are removed, plus a skip-unknown-key test and a
+     no-op-on-empty-selection test; a bulk-export-CSV test confirming
+     only the selected keys appear in the download (with secrets still
+     redacted) plus a just-a-header-on-empty-selection test. 683 tests
+     total, stable across two repeated clean full-suite runs.
+     Live-verified end to end with Playwright against a freshly started
+     server: seeding two memory keys via import, clicking the new
+     **Duplicate** button on one and accepting a prompt dialog with a new
+     key name, confirming both the original and the copy hold the same
+     value; then checkbox-selecting both original keys, clicking
+     **Export selected CSV** and confirming the downloaded file contains
+     only those two keys (not the duplicate), then clicking **Delete
+     selected** and confirming both are gone while the duplicate
+     survives.
+
 ## 9. Roadmap
 
 The current engine is intentionally a single-process, synchronous, SQLite-backed

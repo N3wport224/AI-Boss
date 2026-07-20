@@ -1168,6 +1168,20 @@ A few things live in the header/subheader on every page load:
   link joins the existing **Export tags CSV** link, mirroring the artifact
   tag directory's JSON export.
 
+## Bulk selection for agent memory, plus duplicating a memory key
+
+- **Bulk-select and bulk-delete memory keys** — the Agent Memory panel now
+  has checkbox selection, a **Select all** toggle, and a **Delete
+  selected** button, matching the bulk-selection UI artifacts, saved
+  pipelines, and schedules already had.
+- **Bulk-export selected memory keys to CSV** — an **Export selected CSV**
+  button exports just the checked keys, distinct from the existing
+  full-list CSV/JSON exports.
+- **Duplicate a memory key** — a **Duplicate** button per row copies a
+  key's value to a new key while keeping the original; every other entity
+  type in this app (modules, pipelines, schedules, artifacts) already had
+  a duplicate feature, memory was the one gap.
+
 ## Tech stack
 
 - **Language:** Python 3.11+ — first-class async/sync support and native SDKs

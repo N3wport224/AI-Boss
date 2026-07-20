@@ -6266,18 +6266,30 @@ setInterval(loadPerformance, 3000);
 const memoryListEl = document.getElementById("memory-list");
 const memoryClearBtn = document.getElementById("memory-clear-btn");
 const memorySearchInput = document.getElementById("memory-search-input");
+const memorySelectAllEl = document.getElementById("memory-select-all");
+const memoryBulkExportCsvBtn = document.getElementById("memory-bulk-export-csv-btn");
+const memoryBulkDeleteBtn = document.getElementById("memory-bulk-delete-btn");
+const selectedMemoryKeys = new Set();
+
+function updateMemoryBulkButtons() {
+  const disabled = selectedMemoryKeys.size === 0;
+  memoryBulkExportCsvBtn.disabled = disabled;
+  memoryBulkDeleteBtn.disabled = disabled;
+}
 
 function renderMemoryRows(entries) {
   return entries
     .map(
       (entry) => `
       <div class="schedule-row">
+        <input type="checkbox" class="memory-select-checkbox" data-memory-key="${encodeURIComponent(entry.key)}" ${selectedMemoryKeys.has(entry.key) ? "checked" : ""} />
         <div class="schedule-row-main">
           <strong>${escapeHtml(entry.key)}</strong>
           <span class="schedule-row-meta">${escapeHtml(JSON.stringify(entry.value))} · updated ${new Date(entry.updated_at).toLocaleString()}</span>
         </div>
         <div class="schedule-row-actions">
           <button class="btn btn-secondary btn-small" data-memory-rename="${encodeURIComponent(entry.key)}" title="Rename this memory key">Rename</button>
+          <button class="btn btn-secondary btn-small" data-memory-duplicate="${encodeURIComponent(entry.key)}" title="Duplicate this memory key">Duplicate</button>
           <button class="btn btn-secondary btn-small" data-memory-delete="${encodeURIComponent(entry.key)}">Delete</button>
         </div>
       </div>`
@@ -6311,15 +6323,98 @@ function wireMemoryDeleteButtons() {
       await loadMemory();
     });
   });
+  memoryListEl.querySelectorAll("[data-memory-duplicate]").forEach((btn) => {
+    btn.addEventListener("click", async () => {
+      const key = decodeURIComponent(btn.dataset.memoryDuplicate);
+      const newKey = prompt(`Duplicate memory key "${key}" to:`, `${key}_copy`);
+      if (!newKey || !newKey.trim()) return;
+      const res = await fetch(`/api/memory/${encodeURIComponent(key)}/duplicate`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ new_key: newKey.trim() }),
+      });
+      const body = await res.json();
+      if (!res.ok) {
+        showToast(body.detail || "Failed to duplicate this memory key.", "error");
+        return;
+      }
+      showToast(`Duplicated to "${body.new_key}".`, "success");
+      await loadMemory();
+    });
+  });
+  memoryListEl.querySelectorAll(".memory-select-checkbox").forEach((checkbox) => {
+    checkbox.addEventListener("click", (e) => e.stopPropagation());
+    checkbox.addEventListener("change", () => {
+      const key = decodeURIComponent(checkbox.dataset.memoryKey);
+      if (checkbox.checked) selectedMemoryKeys.add(key);
+      else selectedMemoryKeys.delete(key);
+      updateMemoryBulkButtons();
+    });
+  });
+  updateMemoryBulkButtons();
 }
+
+memorySelectAllEl.addEventListener("click", (e) => e.stopPropagation());
+memorySelectAllEl.addEventListener("change", () => {
+  const checkboxes = memoryListEl.querySelectorAll(".memory-select-checkbox");
+  checkboxes.forEach((checkbox) => {
+    checkbox.checked = memorySelectAllEl.checked;
+    const key = decodeURIComponent(checkbox.dataset.memoryKey);
+    if (memorySelectAllEl.checked) selectedMemoryKeys.add(key);
+    else selectedMemoryKeys.delete(key);
+  });
+  updateMemoryBulkButtons();
+});
+
+memoryBulkDeleteBtn.addEventListener("click", async () => {
+  if (!selectedMemoryKeys.size) return;
+  await fetch("/api/memory/bulk-delete", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ keys: [...selectedMemoryKeys] }),
+  });
+  showToast(`Deleted ${selectedMemoryKeys.size} memory key(s).`, "success");
+  selectedMemoryKeys.clear();
+  await loadMemory();
+});
+
+memoryBulkExportCsvBtn.addEventListener("click", async () => {
+  if (!selectedMemoryKeys.size) return;
+  try {
+    const res = await fetch("/api/memory/bulk-export-csv", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ keys: [...selectedMemoryKeys] }),
+    });
+    if (!res.ok) throw new Error(`HTTP ${res.status}`);
+    const blob = await res.blob();
+    const url = URL.createObjectURL(blob);
+    const link = document.createElement("a");
+    link.href = url;
+    link.download = "memory_selected.csv";
+    document.body.appendChild(link);
+    link.click();
+    link.remove();
+    URL.revokeObjectURL(url);
+    showToast(`Exported ${selectedMemoryKeys.size} memory key(s) as CSV.`, "success");
+  } catch (err) {
+    showToast(`Export failed: ${err}`, "error");
+  }
+});
 
 async function loadMemory() {
   const res = await fetch("/api/memory");
   const entries = await res.json();
 
+  const liveKeys = new Set(entries.map((e) => e.key));
+  [...selectedMemoryKeys].forEach((key) => {
+    if (!liveKeys.has(key)) selectedMemoryKeys.delete(key);
+  });
+
   if (!entries.length) {
     memoryListEl.className = "runs-empty";
     memoryListEl.textContent = "Nothing remembered yet.";
+    updateMemoryBulkButtons();
     return;
   }
 

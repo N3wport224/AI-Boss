@@ -446,6 +446,14 @@
         across separate runs (e.g. an agent remembering last run's decision).
       </p>
       <input type="search" id="memory-search-input" class="artifact-search-input" placeholder="Search memory keys and values…" />
+      <div class="notification-section-actions" style="padding: 4px 0;">
+        <label class="schedule-select-all-label">
+          <input type="checkbox" id="memory-select-all" />
+          Select all
+        </label>
+        <button id="memory-bulk-export-csv-btn" class="btn btn-secondary btn-small" type="button" disabled>Export selected CSV</button>
+        <button id="memory-bulk-delete-btn" class="btn btn-danger btn-small" type="button" disabled>Delete selected</button>
+      </div>
       <div id="memory-list" class="runs-empty">Nothing remembered yet.</div>
     </section>
 

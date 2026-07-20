@@ -3367,6 +3367,86 @@ def clear_memory():
     return {"cleared": True}
 
 
+class BulkDeleteMemoryKeys(BaseModel):
+    keys: list[str]
+
+
+@app.post("/api/memory/bulk-delete")
+def bulk_delete_memory_keys(payload: BulkDeleteMemoryKeys):
+    """Delete a user-picked set of memory keys in one action -- the
+    finer-grained counterpart to deleting one at a time (DELETE
+    /api/memory/{key}) or clearing everything (DELETE /api/memory),
+    mirroring the existing bulk-delete pattern for artifacts, saved
+    pipelines, and schedules. An unknown key is skipped rather than
+    failing the whole batch."""
+    existing_keys = {entry["key"] for entry in store.all_memory()}
+    deleted = []
+    for key in payload.keys:
+        if key not in existing_keys:
+            continue
+        store.delete_memory(key)
+        deleted.append(key)
+    store.record_audit_event("memory_bulk_delete", f"Deleted {len(deleted)} selected memory key(s): {deleted}.")
+    return {"deleted": deleted}
+
+
+class BulkExportMemoryKeys(BaseModel):
+    keys: list[str]
+
+
+@app.post("/api/memory/bulk-export-csv")
+def bulk_export_memory_csv(payload: BulkExportMemoryKeys):
+    """Same key/value/updated_at row shape as GET /api/memory.csv, scoped to
+    a user-picked selection -- the selection-scoped counterpart to the
+    full-list export, mirroring notifications/artifacts/schedules' existing
+    bulk-export-csv pattern. Goes through the same redact_secrets() pass as
+    every other memory-reading endpoint."""
+    wanted = set(payload.keys)
+    entries = [entry for entry in store.all_memory() if entry["key"] in wanted]
+    redacted = redact_secrets({entry["key"]: entry["value"] for entry in entries})
+
+    buffer = io.StringIO()
+    writer = csv.DictWriter(buffer, fieldnames=["key", "value", "updated_at"])
+    writer.writeheader()
+    for entry in entries:
+        writer.writerow({
+            "key": entry["key"],
+            "value": json.dumps(redacted[entry["key"]]),
+            "updated_at": entry["updated_at"],
+        })
+
+    return StreamingResponse(
+        iter([buffer.getvalue()]),
+        media_type="text/csv",
+        headers={"Content-Disposition": "attachment; filename=memory_selected.csv"},
+    )
+
+
+class MemoryKeyDuplicate(BaseModel):
+    new_key: str
+
+
+@app.post("/api/memory/{key}/duplicate")
+def duplicate_memory_key(key: str, payload: MemoryKeyDuplicate):
+    """Copy a memory entry's value to a new key, keeping the original --
+    distinct from rename_memory_key() (which moves it, leaving nothing
+    behind under the old key). Mirrors rename's 404 (unknown source) / 409
+    (destination collision) status-code pattern -- modules, saved
+    pipelines, schedules, and artifacts all already have a duplicate
+    feature; memory was the one gap."""
+    new_key = payload.new_key.strip()
+    if not new_key:
+        raise HTTPException(status_code=400, detail="new_key must not be empty.")
+    entries = {entry["key"]: entry for entry in store.all_memory()}
+    if key not in entries:
+        raise HTTPException(status_code=404, detail=f"No memory key named '{key}'.")
+    if new_key in entries:
+        raise HTTPException(status_code=409, detail=f"A memory key named '{new_key}' already exists.")
+    store.set_memory(new_key, entries[key]["value"])
+    store.record_audit_event("memory_duplicate", f"Duplicated memory key '{key}' to '{new_key}'.")
+    return {"key": key, "new_key": new_key}
+
+
 @app.post("/api/ingest/csv")
 async def ingest_csv(file: UploadFile = File(...)):
     """Upload a CSV, get back structured JSON records. Identical files (by
