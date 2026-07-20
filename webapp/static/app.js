@@ -774,7 +774,7 @@ function renderNotificationsPanel() {
       <div class="notification-row">
         <i class="dot dot-${n.type === "success" ? "ready" : "error"}"></i>
         <div>
-          <span class="notification-message">${n.message}</span>
+          <span class="notification-message">${escapeHtml(n.message)}</span>
           <span class="notification-time">${n.time.toLocaleTimeString()}</span>
         </div>
       </div>`
@@ -932,7 +932,7 @@ function renderNotificationsPanel() {
         listEl.innerHTML = renderNotificationRows(results, "No alerts match that search.");
         wireNotificationCheckboxes(listEl);
       } catch (err) {
-        listEl.innerHTML = `<div class="dropdown-empty">Search failed: ${err}</div>`;
+        listEl.innerHTML = `<div class="dropdown-empty">Search failed: ${escapeHtml(err)}</div>`;
       }
     }, 250);
   });
@@ -1157,7 +1157,7 @@ selfTestBtn.addEventListener("click", async () => {
     renderSelfTestResults(body);
     showToast(`Self-test: ${body.passed} passed, ${body.failed} failed, ${body.skipped} skipped.`, body.failed ? "error" : "success");
   } catch (err) {
-    selfTestPanel.innerHTML = `<h4>Module Self-Test</h4><p class="dropdown-empty">Self-test failed: ${err}</p>`;
+    selfTestPanel.innerHTML = `<h4>Module Self-Test</h4><p class="dropdown-empty">Self-test failed: ${escapeHtml(err)}</p>`;
   } finally {
     selfTestBtn.disabled = false;
   }
@@ -1538,7 +1538,7 @@ async function toggleRunDetail(runId) {
       }
       runDetailCache[runId] = { steps: body.steps, blackboard: body.blackboard || [], note: body.note || "" };
     } catch (err) {
-      cell.innerHTML = `<div class="runs-empty">Failed to load run detail: ${err}</div>`;
+      cell.innerHTML = `<div class="runs-empty">Failed to load run detail: ${escapeHtml(err)}</div>`;
       return;
     }
   }
@@ -2323,7 +2323,15 @@ function renderCard(module) {
 }
 
 function escapeHtml(text) {
-  return String(text).replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
+  // Quotes matter too: this helper is used inside attribute values
+  // (title="...", data-artifact="..."), where an unescaped `"` would end
+  // the attribute and let the rest of the value inject new ones.
+  return String(text)
+    .replace(/&/g, "&amp;")
+    .replace(/</g, "&lt;")
+    .replace(/>/g, "&gt;")
+    .replace(/"/g, "&quot;")
+    .replace(/'/g, "&#39;");
 }
 
 async function setModuleEnabled(tier, name, enabled) {
@@ -2357,7 +2365,7 @@ async function toggleModuleSource(tier, name) {
     const res = await fetch(`/api/modules/${tier}/${name}/source`);
     const body = await res.json();
     if (!res.ok) {
-      panel.innerHTML = `<div class="runs-empty">Error: ${body.detail || "Could not load source."}</div>`;
+      panel.innerHTML = `<div class="runs-empty">Error: ${escapeHtml(body.detail || "Could not load source.")}</div>`;
       return;
     }
 
@@ -2370,20 +2378,20 @@ async function toggleModuleSource(tier, name) {
       ? `<div class="lint-issues">${body.issues
           .map(
             (i) =>
-              `<div class="lint-issue">Line ${i.line}:${i.column} <span class="lint-code">${i.code}</span> — ${escapeHtml(i.message)}</div>`
+              `<div class="lint-issue">Line ${i.line}:${i.column} <span class="lint-code">${escapeHtml(i.code)}</span> — ${escapeHtml(i.message)}</div>`
           )
           .join("")}</div>`
       : "";
 
     panel.innerHTML = `
       <div class="code-panel-header">
-        <span class="code-path">${body.path}</span>
+        <span class="code-path">${escapeHtml(body.path)}</span>
         ${badge}
       </div>
       ${issuesHtml}
       <pre class="code-view">${escapeHtml(body.source)}</pre>`;
   } catch (err) {
-    panel.innerHTML = `<div class="runs-empty">Request failed: ${err}</div>`;
+    panel.innerHTML = `<div class="runs-empty">Request failed: ${escapeHtml(err)}</div>`;
   }
 }
 
@@ -4167,7 +4175,7 @@ comparePipelinesBtn.addEventListener("click", async () => {
           .join("")
       : `<div class="runs-empty">These pipelines are identical.</div>`;
   } catch (err) {
-    pipelineCompareResultEl.innerHTML = `<div class="runs-empty">Compare failed: ${err}</div>`;
+    pipelineCompareResultEl.innerHTML = `<div class="runs-empty">Compare failed: ${escapeHtml(err)}</div>`;
   }
 });
 
@@ -4268,7 +4276,7 @@ async function togglePipelineGraph(slug) {
       <div class="dag-scroll">${renderDagSvg(graph)}</div>`;
     panel.querySelector("[data-dag-download-btn]").addEventListener("click", () => downloadPipelineDagSvg(slug, panel));
   } catch (err) {
-    panel.innerHTML = `<p class="card-desc">Could not load graph: ${err}</p>`;
+    panel.innerHTML = `<p class="card-desc">Could not load graph: ${escapeHtml(err)}</p>`;
   }
 }
 
@@ -4305,7 +4313,7 @@ async function togglePipelineHistory(slug) {
     const versions = await res.json();
     renderPipelineHistory(slug, panel, versions);
   } catch (err) {
-    panel.innerHTML = `<p class="card-desc">Could not load version history: ${err}</p>`;
+    panel.innerHTML = `<p class="card-desc">Could not load version history: ${escapeHtml(err)}</p>`;
   }
 }
 
@@ -4410,7 +4418,7 @@ function renderPipelineHistory(slug, panel, versions) {
             .join("")
         : `<p class="card-desc">These two versions are identical.</p>`;
     } catch (err) {
-      compareResultEl.innerHTML = `<p class="card-desc">Compare failed: ${err}</p>`;
+      compareResultEl.innerHTML = `<p class="card-desc">Compare failed: ${escapeHtml(err)}</p>`;
     }
   });
 
@@ -4480,7 +4488,7 @@ async function togglePipelineVersionDiff(slug, panel, versionId) {
       )
       .join("");
   } catch (err) {
-    detail.innerHTML = `<p class="card-desc">Could not load diff: ${err}</p>`;
+    detail.innerHTML = `<p class="card-desc">Could not load diff: ${escapeHtml(err)}</p>`;
   }
 }
 
@@ -5249,7 +5257,7 @@ async function toggleArtifactContent(filename) {
     }
     cell.innerHTML = renderArtifactContent(body);
   } catch (err) {
-    cell.innerHTML = `<p class="card-desc">Failed to load content: ${err}</p>`;
+    cell.innerHTML = `<p class="card-desc">Failed to load content: ${escapeHtml(err)}</p>`;
   }
 }
 
@@ -5360,7 +5368,7 @@ async function uploadFile(file) {
   formData.append("file", file);
 
   ingestionResultEl.classList.remove("hidden");
-  ingestionResultEl.innerHTML = `<pre class="log-tab-content">Uploading ${file.name}…</pre>`;
+  ingestionResultEl.innerHTML = `<pre class="log-tab-content">Uploading ${escapeHtml(file.name)}…</pre>`;
 
   const endpoint = isPdf ? "/api/ingest/pdf" : isJson ? "/api/ingest/json" : isXlsx ? "/api/ingest/xlsx" : "/api/ingest/csv";
 
@@ -5369,13 +5377,13 @@ async function uploadFile(file) {
     const body = await res.json();
 
     if (!res.ok) {
-      ingestionResultEl.innerHTML = `<pre class="log-tab-content">Error: ${body.detail || "Upload failed."}</pre>`;
+      ingestionResultEl.innerHTML = `<pre class="log-tab-content">Error: ${escapeHtml(body.detail || "Upload failed.")}</pre>`;
       showToast(`Upload failed: ${body.detail || "unknown error"}`, "error");
       return;
     }
 
     if (body.duplicate) {
-      ingestionResultEl.innerHTML = `<pre class="log-tab-content">This exact file was already ingested as "${body.original_filename}" at ${new Date(body.ingested_at).toLocaleString()}. Skipped.</pre>`;
+      ingestionResultEl.innerHTML = `<pre class="log-tab-content">This exact file was already ingested as "${escapeHtml(body.original_filename)}" at ${new Date(body.ingested_at).toLocaleString()}. Skipped.</pre>`;
       showToast(`Duplicate of "${body.original_filename}" — skipped.`, "error");
     } else if (isCsv || isJson || isXlsx) {
       const preview = JSON.stringify(body.preview, null, 2);
@@ -5388,7 +5396,7 @@ async function uploadFile(file) {
       const cleaningBanner = cleaningNotes.length
         ? `<div class="cached-badge">🧹 auto-cleansed: ${cleaningNotes.join(", ")}</div>`
         : "";
-      ingestionResultEl.innerHTML = `${cleaningBanner}<pre class="log-tab-content">${preview}${note}</pre>`;
+      ingestionResultEl.innerHTML = `${cleaningBanner}<pre class="log-tab-content">${escapeHtml(preview)}${note}</pre>`;
       showToast(
         cleaningNotes.length
           ? `Ingested ${body.filename}: ${body.row_count} row(s) (${cleaningNotes.join(", ")}).`
@@ -5397,13 +5405,13 @@ async function uploadFile(file) {
       );
     } else {
       const note = body.truncated ? "\n… (truncated)" : "";
-      ingestionResultEl.innerHTML = `<pre class="log-tab-content">${body.preview}${note}</pre>`;
+      ingestionResultEl.innerHTML = `<pre class="log-tab-content">${escapeHtml(body.preview)}${note}</pre>`;
       showToast(`Ingested ${body.filename}: ${body.char_count} character(s) extracted.`, "success");
     }
 
     await loadArtifacts();
   } catch (err) {
-    ingestionResultEl.innerHTML = `<pre class="log-tab-content">Request failed: ${err}</pre>`;
+    ingestionResultEl.innerHTML = `<pre class="log-tab-content">Request failed: ${escapeHtml(err)}</pre>`;
     showToast(`Upload failed: ${err}`, "error");
   }
 }
@@ -5455,14 +5463,14 @@ async function ingestFromUrl() {
       const cleaningBanner = cleaningNotes.length
         ? `<div class="cached-badge">🧹 auto-cleansed: ${cleaningNotes.join(", ")}</div>`
         : "";
-      ingestionResultEl.innerHTML = `${cleaningBanner}<pre class="log-tab-content">${preview}${note}</pre>`;
+      ingestionResultEl.innerHTML = `${cleaningBanner}<pre class="log-tab-content">${escapeHtml(preview)}${note}</pre>`;
       showToast(`Ingested ${body.filename}: ${body.row_count} row(s).`, "success");
     }
 
     ingestUrlInput.value = "";
     await loadArtifacts();
   } catch (err) {
-    ingestionResultEl.innerHTML = `<pre class="log-tab-content">Request failed: ${err}</pre>`;
+    ingestionResultEl.innerHTML = `<pre class="log-tab-content">Request failed: ${escapeHtml(err)}</pre>`;
     showToast(`Ingest failed: ${err}`, "error");
   } finally {
     ingestUrlBtn.disabled = false;
@@ -5591,7 +5599,7 @@ artifactCompareBtn.addEventListener("click", async () => {
         `<div class="schedule-row-meta" style="padding: 6px 0;">${body.matching.length} matching column(s): ${escapeHtml(body.matching.join(", ") || "none")}</div>`
       : `<div class="runs-empty">These schemas match exactly (${body.matching.length} column(s)).</div>`;
   } catch (err) {
-    artifactCompareResultEl.innerHTML = `<div class="runs-empty">Compare failed: ${err}</div>`;
+    artifactCompareResultEl.innerHTML = `<div class="runs-empty">Compare failed: ${escapeHtml(err)}</div>`;
   }
 });
 
@@ -5905,7 +5913,7 @@ function renderWatcherFeed(processed) {
         <div class="notification-row">
           <i class="dot ${p.error ? "dot-error" : "dot-ready"}"></i>
           <div>
-            <span class="notification-message">${p.filename}${p.duplicate ? " (duplicate, skipped)" : ""}${p.error ? ` — ${p.error}` : ""}</span>
+            <span class="notification-message">${escapeHtml(p.filename)}${p.duplicate ? " (duplicate, skipped)" : ""}${p.error ? ` — ${escapeHtml(p.error)}` : ""}</span>
             <span class="notification-time">${new Date(p.at).toLocaleTimeString()}</span>
           </div>
         </div>`
@@ -7002,7 +7010,7 @@ autoBackupCompareBtn.addEventListener("click", async () => {
       `<div class="schedule-row-meta" style="padding: 6px 0;">a: ${escapeHtml(body.a.filename)} · b: ${escapeHtml(body.b.filename)}</div>` +
       rows;
   } catch (err) {
-    autoBackupCompareResultEl.innerHTML = `<div class="runs-empty">Compare failed: ${err}</div>`;
+    autoBackupCompareResultEl.innerHTML = `<div class="runs-empty">Compare failed: ${escapeHtml(err)}</div>`;
   }
 });
 
