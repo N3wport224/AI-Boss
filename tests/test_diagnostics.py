@@ -536,6 +536,72 @@ def test_configure_and_run_auto_backup_writes_a_snapshot_file():
         shutil.rmtree(BACKUPS_DIR, ignore_errors=True)
 
 
+def test_list_auto_backups_is_empty_when_no_backups_dir_exists():
+    from webapp.main import BACKUPS_DIR
+    import shutil
+
+    shutil.rmtree(BACKUPS_DIR, ignore_errors=True)
+    res = client.get("/api/backup/auto/list")
+    assert res.status_code == 200
+    assert res.json() == []
+
+
+def test_list_and_restore_from_an_automatic_backup_snapshot_file():
+    from webapp.main import BACKUPS_DIR, _auto_backup
+    import shutil
+
+    shutil.rmtree(BACKUPS_DIR, ignore_errors=True)
+    try:
+        run_res = client.post("/api/backup/auto/run-now")
+        assert run_res.status_code == 200
+
+        list_res = client.get("/api/backup/auto/list")
+        assert list_res.status_code == 200
+        snapshots = list_res.json()
+        assert len(snapshots) == 1
+        assert snapshots[0]["filename"].startswith("backup_")
+        assert snapshots[0]["size_bytes"] > 0
+        assert snapshots[0]["modified_at"]
+
+        restore_res = client.post(f"/api/backup/auto/restore/{snapshots[0]['filename']}")
+        assert restore_res.status_code == 200
+        assert "runs" in restore_res.json()
+    finally:
+        _auto_backup.configure(enabled=False, interval_hours=24.0, keep_count=7)
+        shutil.rmtree(BACKUPS_DIR, ignore_errors=True)
+
+
+def test_restore_auto_backup_404s_for_an_unknown_or_unsafe_filename():
+    res = client.post("/api/backup/auto/restore/does-not-exist.json")
+    assert res.status_code == 404
+
+    res = client.post("/api/backup/auto/restore/..%2F..%2Fetc%2Fpasswd")
+    assert res.status_code == 404
+
+
+def test_a_failing_automatic_backup_tick_records_a_backup_failed_notification():
+    from webapp.main import _auto_backup
+
+    broken = RuntimeError("disk is full (simulated)")
+    original_build_snapshot = _auto_backup.build_snapshot
+    _auto_backup.build_snapshot = lambda: (_ for _ in ()).throw(broken)
+    # interval_hours is set absurdly small (rather than a realistic value) so
+    # this tick is due regardless of whatever last_backup_at another test in
+    # this same process may have already left on the shared singleton.
+    _auto_backup.configure(enabled=True, interval_hours=0.0000001, keep_count=7)
+    last_backup_at_before = _auto_backup.last_backup_at
+    try:
+        _auto_backup._tick()
+        notifications = client.get("/api/notifications?limit=20").json()
+        assert any(
+            n["kind"] == "backup_failed" and "disk is full (simulated)" in n["message"] for n in notifications
+        )
+        assert _auto_backup.last_backup_at == last_backup_at_before, "a failed write must not be recorded as a successful backup"
+    finally:
+        _auto_backup.build_snapshot = original_build_snapshot
+        _auto_backup.configure(enabled=False, interval_hours=24.0, keep_count=7)
+
+
 def test_metrics_reflect_a_completed_run():
     before = client.get("/api/metrics").json()
 

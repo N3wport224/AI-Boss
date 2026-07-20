@@ -569,7 +569,11 @@ def _build_backup_snapshot() -> dict:
     return snapshot
 
 
-_auto_backup = AutoBackup(BACKUPS_DIR, _build_backup_snapshot)
+def _notify_auto_backup_failure(error: Exception) -> None:
+    store.add_notification("backup_failed", f"Automatic backup snapshot failed: {error}")
+
+
+_auto_backup = AutoBackup(BACKUPS_DIR, _build_backup_snapshot, on_failure=_notify_auto_backup_failure)
 _auto_backup.start()
 
 
@@ -1833,6 +1837,53 @@ def bulk_run_schedules_now(payload: BulkScheduleIds):
     return {"triggered": triggered, "failed": failed}
 
 
+@app.post("/api/schedules/bulk-duplicate")
+def bulk_duplicate_schedules(payload: BulkScheduleIds):
+    """Actually clones each selected schedule into a brand new schedule
+    row with the same kind/target/inputs/cadence -- distinct from the
+    existing per-row "Duplicate" button, which only pre-fills the
+    create-schedule form for the user to review and submit by hand. An
+    interval/daily/weekly cadence is recomputed fresh from now (a cloned
+    interval schedule starts its own countdown; a cloned daily/weekly
+    schedule targets its own next occurrence), while a one-time schedule's
+    next_run_at is carried over as-is. An unknown id is skipped rather
+    than failing the whole batch."""
+    schedules_by_id = {s["id"]: s for s in store.list_schedules()}
+    now = datetime.now(timezone.utc)
+    duplicated = []
+    for schedule_id in payload.schedule_ids:
+        schedule = schedules_by_id.get(schedule_id)
+        if schedule is None:
+            continue
+        schedule_type = schedule["schedule_type"]
+        if schedule_type == "interval":
+            next_run_at = now.isoformat()
+        elif schedule_type == "daily":
+            next_run_at = next_daily_run_at(schedule["daily_time"], now).isoformat()
+        elif schedule_type == "weekly":
+            next_run_at = next_weekly_run_at(schedule["day_of_week"], schedule["daily_time"], now).isoformat()
+        else:
+            next_run_at = schedule["next_run_at"]
+        duplicated.append(
+            store.create_schedule(
+                kind=schedule["kind"],
+                name=schedule["name"],
+                interval_seconds=schedule["interval_seconds"],
+                next_run_at=next_run_at,
+                tier=schedule["tier"],
+                inputs=schedule["inputs"],
+                schedule_type=schedule_type,
+                daily_time=schedule["daily_time"],
+                day_of_week=schedule["day_of_week"],
+            )
+        )
+    store.record_audit_event(
+        "schedule_bulk_duplicate",
+        f"Duplicated {len(duplicated)} selected schedule(s): {[s['id'] for s in duplicated]}.",
+    )
+    return {"duplicated": duplicated}
+
+
 @app.post("/api/schedules/bulk-export")
 def bulk_export_schedules(payload: BulkScheduleIds):
     """Download a user-picked set of schedules as a JSON file -- the
@@ -2248,21 +2299,12 @@ def download_backup_db():
     return FileResponse(store.db_path, filename="orchestrator.db", media_type="application/octet-stream")
 
 
-@app.post("/api/backup/restore")
-async def restore_backup(file: UploadFile = File(...)):
-    """Restore a JSON snapshot from GET /api/backup/export. Additive only —
-    fills in whatever isn't already present (by id/key/slug), never
-    overwrites existing data. A pipeline referencing a module that no longer
-    exists here is skipped rather than failing the whole restore."""
-    try:
-        data = await ingestion.read_upload_with_limit(file)
-    except ingestion.UploadTooLargeError as exc:
-        raise HTTPException(status_code=413, detail=str(exc))
-    try:
-        snapshot = json.loads(data)
-    except json.JSONDecodeError as exc:
-        raise HTTPException(status_code=400, detail=f"Could not parse backup file: {exc}")
-
+def _apply_backup_restore(snapshot: dict) -> dict:
+    """Shared by the upload-based restore and the restore-from-an-
+    automatic-backup-file endpoint below. Additive only — fills in whatever
+    isn't already present (by id/key/slug), never overwrites existing data.
+    A pipeline referencing a module that no longer exists here is skipped
+    rather than failing the whole restore."""
     counts = store.restore_snapshot(snapshot)
 
     restored_pipelines = 0
@@ -2277,8 +2319,61 @@ async def restore_backup(file: UploadFile = File(...)):
             continue  # references a module that doesn't exist in this install
 
     counts["pipelines"] = restored_pipelines
+    return counts
+
+
+@app.post("/api/backup/restore")
+async def restore_backup(file: UploadFile = File(...)):
+    """Restore a JSON snapshot from GET /api/backup/export."""
+    try:
+        data = await ingestion.read_upload_with_limit(file)
+    except ingestion.UploadTooLargeError as exc:
+        raise HTTPException(status_code=413, detail=str(exc))
+    try:
+        snapshot = json.loads(data)
+    except json.JSONDecodeError as exc:
+        raise HTTPException(status_code=400, detail=f"Could not parse backup file: {exc}")
+
+    counts = _apply_backup_restore(snapshot)
     summary = ", ".join(f"{k}: {v}" for k, v in counts.items())
     store.record_audit_event("backup_restore", f"Restored backup snapshot ({summary}).")
+    return counts
+
+
+@app.get("/api/backup/auto/list")
+def list_auto_backups():
+    """The automatic-backup snapshots currently sitting in backups/ --
+    newest first -- so the dashboard can offer a one-click restore from one
+    of them without the user having to find and re-upload the file by
+    hand."""
+    if not BACKUPS_DIR.exists():
+        return []
+    files = sorted(BACKUPS_DIR.glob("backup_*.json"), key=lambda p: p.name, reverse=True)
+    return [
+        {"filename": f.name, "size_bytes": f.stat().st_size, "modified_at": datetime.fromtimestamp(f.stat().st_mtime, timezone.utc).isoformat()}
+        for f in files
+    ]
+
+
+@app.post("/api/backup/auto/restore/{filename}")
+def restore_auto_backup(filename: str):
+    """Restore directly from one of the timestamped snapshots in backups/
+    written by the automatic backup timer (see /api/backup/auto/list) --
+    the same additive merge as POST /api/backup/restore, just sourced from
+    disk instead of a fresh upload."""
+    if "/" in filename or "\\" in filename or not filename.startswith("backup_") or not filename.endswith(".json"):
+        raise HTTPException(status_code=404, detail=f"No automatic backup file named '{filename}'.")
+    path = BACKUPS_DIR / filename
+    if not path.is_file():
+        raise HTTPException(status_code=404, detail=f"No automatic backup file named '{filename}'.")
+    try:
+        snapshot = json.loads(path.read_text())
+    except json.JSONDecodeError as exc:
+        raise HTTPException(status_code=400, detail=f"Could not parse backup file: {exc}")
+
+    counts = _apply_backup_restore(snapshot)
+    summary = ", ".join(f"{k}: {v}" for k, v in counts.items())
+    store.record_audit_event("backup_restore", f"Restored automatic backup snapshot '{filename}' ({summary}).")
     return counts
 
 
@@ -2451,7 +2546,7 @@ def bulk_export_notifications(payload: BulkNotificationIds):
     )
 
 
-NOTIFICATION_KINDS = ("breaker_tripped", "schedule_failed", "resource_alert", "schedule_once_fired")
+NOTIFICATION_KINDS = ("breaker_tripped", "schedule_failed", "resource_alert", "schedule_once_fired", "backup_failed")
 
 
 @app.get("/api/notifications/preferences")

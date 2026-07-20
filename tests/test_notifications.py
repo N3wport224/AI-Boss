@@ -244,6 +244,7 @@ def test_get_notification_preferences_defaults_to_all_unmuted():
         "schedule_failed": False,
         "resource_alert": False,
         "schedule_once_fired": False,
+        "backup_failed": False,
     }
 
 

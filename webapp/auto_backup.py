@@ -16,10 +16,17 @@ BACKUP_FILENAME_FORMAT = "backup_%Y%m%dT%H%M%SZ.json"
 
 
 class AutoBackup:
-    def __init__(self, backups_dir: Path, build_snapshot: Callable[[], dict], poll_interval: float = 60.0):
+    def __init__(
+        self,
+        backups_dir: Path,
+        build_snapshot: Callable[[], dict],
+        poll_interval: float = 60.0,
+        on_failure: Optional[Callable[[Exception], None]] = None,
+    ):
         self.backups_dir = backups_dir
         self.build_snapshot = build_snapshot
         self.poll_interval = poll_interval
+        self.on_failure = on_failure
         self.enabled = False
         self.interval_hours = 24.0
         self.keep_count = 7
@@ -86,7 +93,15 @@ class AutoBackup:
             last_dt = datetime.fromisoformat(last_backup_at)
             if (now - last_dt).total_seconds() < interval_hours * 3600:
                 return
-        self.run_now()
+        try:
+            self.run_now()
+        except Exception as exc:
+            # A write failure here (disk full, permissions, etc.) must not
+            # kill the background thread's loop -- swallow it, but surface
+            # it via on_failure so the caller can raise a notification, and
+            # leave last_backup_at untouched so the next tick retries.
+            if self.on_failure is not None:
+                self.on_failure(exc)
 
     def _write_snapshot(self, now: datetime) -> None:
         self.backups_dir.mkdir(exist_ok=True)

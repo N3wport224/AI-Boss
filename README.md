@@ -954,6 +954,27 @@ A few things live in the header/subheader on every page load:
   (independently — one failure doesn't block the rest) without touching any
   of their next-run cadences.
 
+## Backup snapshot listing/restore, backup-failure alerts, and bulk schedule duplication
+
+- **List and restore from an automatic backup snapshot** — the automatic
+  backup panel now lists every timestamped snapshot sitting in `backups/`
+  (size and modified time included), each with its own **Restore** button
+  that restores directly from that file on disk (the same additive merge
+  as the existing upload-based restore) without having to find and
+  re-upload it by hand.
+- **Notify on automatic backup failure** — if a scheduled backup write
+  ever fails (disk full, permissions, etc.), it now raises a
+  `backup_failed` alert in the notification center instead of silently
+  vanishing into a background thread, and the background timer itself
+  keeps running so the next scheduled attempt still retries.
+- **Bulk duplicate selected schedules** — a **⧉ Duplicate selected**
+  button joins the other bulk schedule actions, actually cloning each
+  checkbox-selected schedule into a brand new schedule row with the same
+  target/inputs/cadence (distinct from the existing per-row **Duplicate**
+  button, which only pre-fills the create-schedule form for manual
+  review). An interval/daily/weekly clone gets its own freshly computed
+  next-run time; a one-time clone carries its `next_run_at` over as-is.
+
 ## Tech stack
 
 - **Language:** Python 3.11+ — first-class async/sync support and native SDKs

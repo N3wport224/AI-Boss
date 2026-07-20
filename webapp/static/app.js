@@ -225,6 +225,7 @@ const schedulesBulkRunNowBtn = document.getElementById("schedules-bulk-run-now-b
 const schedulesBulkFavoriteBtn = document.getElementById("schedules-bulk-favorite-btn");
 const schedulesBulkClearLabelBtn = document.getElementById("schedules-bulk-clear-label-btn");
 const schedulesBulkExportBtn = document.getElementById("schedules-bulk-export-btn");
+const schedulesBulkDuplicateBtn = document.getElementById("schedules-bulk-duplicate-btn");
 const schedulesBulkDeleteBtn = document.getElementById("schedules-bulk-delete-btn");
 const schedulesSelectAllEl = document.getElementById("schedules-select-all");
 const scheduleFilterInput = document.getElementById("schedule-filter");
@@ -243,6 +244,7 @@ function updateSchedulesBulkButtons() {
   schedulesBulkClearLabelBtn.disabled = disabled;
   schedulesBulkExportBtn.disabled = disabled;
   schedulesBulkRunNowBtn.disabled = disabled;
+  schedulesBulkDuplicateBtn.disabled = disabled;
   schedulesBulkDeleteBtn.disabled = disabled;
   const suffix = selectedScheduleIds.size ? ` (${selectedScheduleIds.size})` : "";
   schedulesBulkPauseBtn.textContent = `Pause selected${suffix}`;
@@ -251,6 +253,7 @@ function updateSchedulesBulkButtons() {
   schedulesBulkClearLabelBtn.textContent = `Clear labels${suffix}`;
   schedulesBulkExportBtn.textContent = `⬇ Export selected JSON${suffix}`;
   schedulesBulkRunNowBtn.textContent = `▶ Run now selected${suffix}`;
+  schedulesBulkDuplicateBtn.textContent = `⧉ Duplicate selected${suffix}`;
   schedulesBulkDeleteBtn.textContent = `Delete selected${suffix}`;
 }
 
@@ -422,7 +425,7 @@ let notificationSortMode = "newest";
 // complements the existing in-app toast/bell system rather than
 // replacing it, for the case where the dashboard tab isn't focused.
 const DESKTOP_NOTIF_STORAGE_KEY = "aiboss-desktop-notifications-enabled";
-const CRITICAL_NOTIFICATION_KINDS = new Set(["breaker_tripped", "schedule_failed"]);
+const CRITICAL_NOTIFICATION_KINDS = new Set(["breaker_tripped", "schedule_failed", "backup_failed"]);
 let desktopNotificationsEnabled = localStorage.getItem(DESKTOP_NOTIF_STORAGE_KEY) === "true";
 let lastSeenDesktopNotificationId = null;
 
@@ -5608,6 +5611,26 @@ schedulesBulkExportBtn.addEventListener("click", async () => {
   }
 });
 
+schedulesBulkDuplicateBtn.addEventListener("click", async () => {
+  if (!selectedScheduleIds.size) return;
+  schedulesBulkDuplicateBtn.disabled = true;
+  try {
+    const res = await fetch("/api/schedules/bulk-duplicate", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ schedule_ids: [...selectedScheduleIds] }),
+    });
+    const body = await res.json();
+    if (!res.ok) throw new Error(body.detail || `HTTP ${res.status}`);
+    showToast(`Duplicated ${body.duplicated.length} schedule(s).`, "success");
+    await loadSchedules();
+  } catch (err) {
+    showToast(`Duplicate failed: ${err}`, "error");
+  } finally {
+    updateSchedulesBulkButtons();
+  }
+});
+
 schedulesBulkRunNowBtn.addEventListener("click", async () => {
   if (!selectedScheduleIds.size) return;
   schedulesBulkRunNowBtn.disabled = true;
@@ -6043,7 +6066,49 @@ autoBackupRunNowBtn.addEventListener("click", async () => {
   }
   showToast("Backup snapshot written to disk.", "success");
   await loadAutoBackupStatus();
+  await loadAutoBackupSnapshots();
 });
+
+// ---- List + restore from an automatic backup snapshot ----
+
+const autoBackupSnapshotsListEl = document.getElementById("auto-backup-snapshots-list");
+
+async function loadAutoBackupSnapshots() {
+  const res = await fetch("/api/backup/auto/list");
+  const snapshots = await res.json();
+  if (!snapshots.length) {
+    autoBackupSnapshotsListEl.className = "runs-empty";
+    autoBackupSnapshotsListEl.textContent = "No automatic backup snapshots on disk yet.";
+    return;
+  }
+  autoBackupSnapshotsListEl.className = "";
+  autoBackupSnapshotsListEl.innerHTML = snapshots
+    .map(
+      (s) => `
+        <div class="schedule-row">
+          <span>${escapeHtml(s.filename)}</span>
+          <span class="runs-purge-label">${formatBytes(s.size_bytes)} — ${new Date(s.modified_at).toLocaleString()}</span>
+          <button class="btn btn-secondary btn-small" data-auto-backup-restore="${escapeHtml(s.filename)}">Restore</button>
+        </div>`
+    )
+    .join("");
+  autoBackupSnapshotsListEl.querySelectorAll("[data-auto-backup-restore]").forEach((btn) => {
+    btn.addEventListener("click", async () => {
+      const filename = btn.dataset.autoBackupRestore;
+      if (!confirm(`Restore from snapshot "${filename}"? This only fills in missing data -- it never overwrites what's already here.`)) return;
+      const res = await fetch(`/api/backup/auto/restore/${encodeURIComponent(filename)}`, { method: "POST" });
+      const body = await res.json();
+      if (!res.ok) {
+        showToast(body.detail || "Restore failed.", "error");
+        return;
+      }
+      const summary = Object.entries(body)
+        .map(([k, v]) => `${k}: ${v}`)
+        .join(", ");
+      showToast(`Restored from ${filename} (${summary}).`, "success");
+    });
+  });
+}
 
 // ---- Recent actions audit trail ----
 
@@ -6489,4 +6554,5 @@ loadModuleStats();
 loadEnvironment();
 loadRateLimitConfig();
 loadAutoBackupStatus();
+loadAutoBackupSnapshots();
 loadAuditLog();

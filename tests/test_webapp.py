@@ -406,6 +406,63 @@ def test_bulk_run_schedules_now_is_a_no_op_on_an_empty_selection():
     assert res.json() == {"triggered": [], "failed": {}}
 
 
+def test_bulk_duplicate_schedules_clones_each_selected_schedule_and_skips_unknown_ids():
+    id_a = _create_test_schedule()
+    id_b = _create_test_schedule()
+
+    res = client.post("/api/schedules/bulk-duplicate", json={"schedule_ids": [id_a, id_b, 9999999]})
+    assert res.status_code == 200
+    duplicated = res.json()["duplicated"]
+    assert len(duplicated) == 2
+
+    originals = {id_a, id_b}
+    new_ids = {s["id"] for s in duplicated}
+    assert new_ids.isdisjoint(originals), "duplicates must be brand new schedule rows, not the originals"
+
+    for clone in duplicated:
+        assert clone["kind"] == "module"
+        assert clone["tier"] == "automation"
+        assert clone["name"] == "fetch_raw_metrics"
+        assert clone["inputs"] == {"signups": 1, "churn": 1, "revenue": 1}
+        assert clone["interval_seconds"] == 30
+        assert clone["schedule_type"] == "interval"
+        assert clone["enabled"] is True
+
+    client.post("/api/schedules/bulk-delete", json={"schedule_ids": [id_a, id_b, *new_ids]})
+
+
+def test_bulk_duplicate_schedules_is_a_no_op_on_an_empty_selection():
+    res = client.post("/api/schedules/bulk-duplicate", json={"schedule_ids": []})
+    assert res.status_code == 200
+    assert res.json() == {"duplicated": []}
+
+
+def test_bulk_duplicate_a_daily_schedule_recomputes_its_own_next_occurrence():
+    create_res = client.post(
+        "/api/schedules",
+        json={
+            "kind": "module",
+            "tier": "automation",
+            "name": "fetch_raw_metrics",
+            "inputs": {},
+            "schedule_type": "daily",
+            "daily_time": "23:59",
+        },
+    )
+    original_id = create_res.json()["id"]
+
+    res = client.post("/api/schedules/bulk-duplicate", json={"schedule_ids": [original_id]})
+    assert res.status_code == 200
+    duplicated = res.json()["duplicated"]
+    assert len(duplicated) == 1
+    clone = duplicated[0]
+    assert clone["schedule_type"] == "daily"
+    assert clone["daily_time"] == "23:59"
+    assert clone["next_run_at"]
+
+    client.post("/api/schedules/bulk-delete", json={"schedule_ids": [original_id, clone["id"]]})
+
+
 def test_bulk_delete_schedules_removes_every_selected_one():
     id_a = _create_test_schedule()
     id_b = _create_test_schedule()

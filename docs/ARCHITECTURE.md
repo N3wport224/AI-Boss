@@ -2626,6 +2626,69 @@ only a JSON parse error or timeout falls back to an empty issue list.
      interval schedules via the API, checkbox-selecting both, and clicking
      **▶ Run now selected** launched real runs for both, visible in
      `GET /api/runs`.
+220. **Add listing + restoring from an automatic backup snapshot**
+     (`GET /api/backup/auto/list` enumerates `backup_*.json` files in
+     `backups/` newest-first with size and modified time;
+     `POST /api/backup/auto/restore/{filename}` restores directly from one
+     of them, sharing the same additive-merge helper
+     (`_apply_backup_restore()`, factored out of the existing upload-based
+     `POST /api/backup/restore`) so the two restore paths can never drift
+     apart. The filename is validated against path traversal -- rejected
+     unless it has no `/`/`\`, starts with `backup_`, and ends with
+     `.json` -- before ever touching the filesystem. A new list appears
+     under the auto-backup panel row, each entry with its own **Restore**
+     button and a confirm() dialog before acting).
+221. **Add a notification when an automatic backup fails**
+     (`AutoBackup.__init__` gained an optional `on_failure` callback;
+     `_tick()` now wraps its call to `run_now()` in a try/except so a
+     write failure (disk full, permissions, whatever) can't silently kill
+     the background thread's loop the way an uncaught exception in
+     `_loop()` would have -- instead it's swallowed and handed to
+     `on_failure`, which `webapp/main.py` wires to
+     `store.add_notification("backup_failed", ...)`. A direct call to
+     `run_now()` -- e.g. from the manual "Back up now" endpoint -- still
+     raises normally, since `on_failure` is scoped to the timer's own
+     tick, not every caller. `backup_failed` joins the existing
+     `NOTIFICATION_KINDS` tuple and the frontend's
+     `CRITICAL_NOTIFICATION_KINDS` set from Batch 31, so a failed backup
+     also triggers a desktop notification for anyone opted in).
+222. **Add bulk duplicate for selected schedules**
+     (`POST /api/schedules/bulk-duplicate` -- actually clones each
+     checkbox-selected schedule into a brand new row via
+     `store.create_schedule()`, carrying over kind/tier/name/inputs/
+     schedule_type/daily_time/day_of_week. This is a genuinely different
+     feature from the existing per-row **Duplicate** button (Batch 17),
+     which only pre-fills the create-schedule form for the user to review
+     and submit -- confirmed while building this that no schedule-cloning
+     backend endpoint had ever actually existed. An interval clone's
+     `next_run_at` is recomputed as "now" (its own fresh countdown); a
+     daily/weekly clone's is recomputed via the same
+     `next_daily_run_at`/`next_weekly_run_at` helpers `POST /api/schedules`
+     itself uses; a one-time clone just carries its `next_run_at` over
+     as-is. Unknown ids are skipped rather than failing the whole batch,
+     matching every other bulk action in this app. A **⧉ Duplicate
+     selected** button joins the other bulk schedule actions).
+223. **Add tests for all of Batch 32**: `AutoBackup` unit tests for the
+     background loop calling `on_failure` on a write exception while
+     leaving `last_backup_at` untouched and the loop itself still running,
+     and confirming a direct `run_now()` call still raises rather than
+     going through `on_failure`; webapp-level tests for listing backups
+     when none exist, listing + restoring a real snapshot file end to end,
+     404s on an unknown or path-traversal filename, and a failing
+     `_tick()` landing a `backup_failed` notification visible via
+     `GET /api/notifications`; bulk-duplicate-schedules tests covering
+     cloning a selection while skipping an unknown id, a no-op empty
+     selection, and a daily schedule's clone getting its own freshly
+     computed `next_run_at`. Also fixed a test in `test_notifications.py`
+     that hardcoded the full `NOTIFICATION_KINDS` set and broke the moment
+     `backup_failed` was added to it -- updated to include the new kind.
+     589 tests total, stable across two repeated clean full-suite runs.
+     Live-verified end to end with Playwright against a freshly started
+     server: enabling auto backup and clicking **Back up now**, then
+     reloading, showed a snapshot row with a working **Restore** button
+     that produced a "Restored" toast; seeding two interval schedules,
+     checkbox-selecting both, and clicking **⧉ Duplicate selected**
+     produced exactly two new schedule rows in `GET /api/schedules`.
 
 ## 9. Roadmap
 
