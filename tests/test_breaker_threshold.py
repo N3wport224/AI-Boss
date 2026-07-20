@@ -4,8 +4,6 @@ independent of its manifest's own circuit_breaker_threshold, no YAML edit
 needed.
 """
 import json
-import threading
-from http.server import BaseHTTPRequestHandler, HTTPServer
 
 import pytest
 from fastapi.testclient import TestClient

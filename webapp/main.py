@@ -12,6 +12,7 @@ whole thing is done.
 """
 import contextlib
 import csv
+import os
 import io
 import json
 import re
@@ -64,7 +65,10 @@ TIER_DIRS = {
 # reached by raising this, but nothing today runs anywhere close to it.
 DEFAULT_STEP_TIMEOUT_SECONDS = 60.0
 
-store = StateStore(str(ROOT / "orchestrator.db"))
+# AIBOSS_DB_PATH lets a test session (or any secondary deployment) point the
+# app at its own database instead of the repo-root one, so suites can run
+# against a throwaway store without touching real runs/schedules/cache.
+store = StateStore(os.environ.get("AIBOSS_DB_PATH", str(ROOT / "orchestrator.db")))
 bus = RunEventBus()
 
 # Guards every run-triggering endpoint against an accidental request storm —

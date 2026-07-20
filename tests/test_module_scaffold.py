@@ -9,7 +9,6 @@ scaffolding writes into the real automations/workflows/agents source
 directories -- every test here must clean up whatever it creates so nothing
 leaks into git status.
 """
-import shutil
 
 import pytest
 from fastapi.testclient import TestClient
@@ -91,7 +90,7 @@ def test_scaffold_module_is_actually_importable_and_runnable(tmp_path):
         assert module.run(context=None) == {}
     finally:
         sys.path.remove(str(tmp_path))
-        sys.modules.pop(f"automations_pkg.importable_thing", None)
+        sys.modules.pop("automations_pkg.importable_thing", None)
 
 
 def test_scaffold_module_handles_tricky_description_safely(tmp_path):

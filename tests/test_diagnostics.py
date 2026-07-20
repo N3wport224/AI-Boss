@@ -467,7 +467,6 @@ def test_purge_runs_endpoint_removes_old_runs():
             if line.startswith("data: ") and '"run_completed"' in line:
                 break
 
-    before = client.get("/api/metrics").json()["total_runs"]
     purge_res = client.post("/api/runs/purge", params={"older_than_hours": 0})
     assert purge_res.status_code == 200
     assert purge_res.json()["removed_count"] >= 1

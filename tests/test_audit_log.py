@@ -209,7 +209,6 @@ def test_bulk_export_audit_log_csv_is_just_a_header_on_an_empty_selection():
 # ---- Batch 20: search across the audit log ----
 
 def test_search_audit_log_finds_a_keyword_in_the_detail():
-    unique_marker = "batch20auditmarker9192"
     client.post("/api/artifacts/purge", params={"older_than_hours": 999999})
 
     res = client.get("/api/audit-log/search", params={"q": "artifact_purge"})

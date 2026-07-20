@@ -406,19 +406,22 @@ def test_bulk_export_schedules_csv_is_just_a_header_on_an_empty_selection():
 def test_run_schedule_now_executes_immediately_without_touching_cadence():
     schedule_id = _create_test_schedule()
     before = next(s for s in client.get("/api/schedules").json() if s["id"] == schedule_id)
-    runs_before = len(client.get("/api/runs?limit=200").json())
+    # Track ids, not counts: once the suite has accumulated 200+ runs both
+    # before/after reads cap at the limit and a length comparison can never
+    # detect the new run. A fresh run always has an unseen id at the top.
+    ids_before = {r["id"] for r in client.get("/api/runs?limit=200").json()}
 
     res = client.post(f"/api/schedules/{schedule_id}/run-now")
     assert res.status_code == 200
     assert res.json() == {"triggered": True}
 
-    runs_after = []
+    new_ids = set()
     for _ in range(30):
-        runs_after = client.get("/api/runs?limit=200").json()
-        if len(runs_after) > runs_before:
+        new_ids = {r["id"] for r in client.get("/api/runs?limit=200").json()} - ids_before
+        if new_ids:
             break
         time.sleep(0.1)
-    assert len(runs_after) > runs_before, "expected run-now to actually launch a new run"
+    assert new_ids, "expected run-now to actually launch a new run"
 
     after = next(s for s in client.get("/api/schedules").json() if s["id"] == schedule_id)
     assert after["last_run_at"] == before["last_run_at"]
@@ -436,7 +439,9 @@ def test_run_schedule_now_404s_for_an_unknown_schedule():
 def test_bulk_run_schedules_now_triggers_every_selected_and_reports_unknown_ids():
     id_a = _create_test_schedule()
     id_b = _create_test_schedule()
-    runs_before = len(client.get("/api/runs?limit=200").json())
+    # Same id-based detection as the single run-now test: length comparisons
+    # go blind once the suite has 200+ accumulated runs.
+    ids_before = {r["id"] for r in client.get("/api/runs?limit=200").json()}
 
     res = client.post("/api/schedules/bulk-run-now", json={"schedule_ids": [id_a, id_b, 9999999]})
     assert res.status_code == 200
@@ -444,13 +449,13 @@ def test_bulk_run_schedules_now_triggers_every_selected_and_reports_unknown_ids(
     assert set(body["triggered"]) == {id_a, id_b}
     assert body["failed"] == {"9999999": "No schedule with this id."}
 
-    runs_after = []
+    new_ids = set()
     for _ in range(30):
-        runs_after = client.get("/api/runs?limit=200").json()
-        if len(runs_after) >= runs_before + 2:
+        new_ids = {r["id"] for r in client.get("/api/runs?limit=200").json()} - ids_before
+        if len(new_ids) >= 2:
             break
         time.sleep(0.1)
-    assert len(runs_after) >= runs_before + 2, "expected both selected schedules to actually launch a run"
+    assert len(new_ids) >= 2, "expected both selected schedules to actually launch a run"
 
     client.post("/api/schedules/bulk-delete", json={"schedule_ids": [id_a, id_b]})
 

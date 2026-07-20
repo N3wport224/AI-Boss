@@ -1,4 +1,18 @@
+import os
+import tempfile
+
 import pytest
+
+# Point the app at a fresh, throwaway database for this pytest session,
+# BEFORE any test module imports webapp.main (conftest is always imported
+# first). Two problems disappear at once: the suite can no longer read or
+# destroy a developer's real orchestrator.db, and reruns are deterministic --
+# previously a second run within the cache TTL hit stale result_cache rows
+# from the first run and dozens of cache/count-sensitive tests failed.
+# setdefault, not assignment, so a caller can still point the suite at a
+# specific store deliberately.
+_TEST_DB_DIR = tempfile.mkdtemp(prefix="aiboss-test-store-")
+os.environ.setdefault("AIBOSS_DB_PATH", os.path.join(_TEST_DB_DIR, "orchestrator.db"))
 
 
 @pytest.fixture(autouse=True)
@@ -26,6 +40,25 @@ def _reset_run_rate_limiter():
     _run_rate_limiter.max_requests = DEFAULT_RATE_LIMIT_MAX_REQUESTS
     _run_rate_limiter.window_seconds = DEFAULT_RATE_LIMIT_WINDOW_SECONDS
     _run_rate_limiter._hits.clear()
+
+
+@pytest.fixture(autouse=True)
+def _clear_leftover_schedules():
+    """The scheduler thread starts at webapp.main import time and stays live
+    for the whole test session, polling the shared on-disk StateStore. Any
+    test that creates an enabled interval schedule and doesn't delete it
+    leaves a live timer behind: 30-second-interval schedules from earlier
+    tests (or from a previous pytest process, since the store is persistent)
+    fire mid-suite and pollute run counts, notifications, metrics, and the
+    audit log for unrelated tests. Deleting every schedule before each test
+    closes both windows -- a schedule can only ever exist for the duration
+    of the single test that created it, which is shorter than the minimum
+    allowed interval, so it can never fire on its own timer."""
+    from webapp.main import store
+
+    for schedule in store.list_schedules():
+        store.delete_schedule(schedule["id"])
+    yield
 
 
 @pytest.fixture(autouse=True)
