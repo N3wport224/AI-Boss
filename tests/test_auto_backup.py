@@ -1,4 +1,5 @@
 import time
+from datetime import datetime, timedelta
 
 from webapp.auto_backup import AutoBackup
 
@@ -95,6 +96,40 @@ def test_background_loop_reports_a_failing_snapshot_via_on_failure_and_keeps_run
     assert failures, "expected on_failure to be called at least once"
     assert isinstance(failures[0], RuntimeError)
     assert backup.last_backup_at is None, "a failed write must not be recorded as a successful backup"
+
+
+def test_purge_older_than_deletes_only_snapshots_past_the_cutoff(tmp_path):
+    import re
+
+    backup = AutoBackup(tmp_path / "backups", _dummy_snapshot)
+    backup.run_now()
+    time.sleep(1.1)  # filenames are second-resolution timestamps -- force distinct names
+    backup.run_now()
+
+    files = sorted((tmp_path / "backups").glob("backup_*.json"))
+    assert len(files) == 2
+
+    # Rewrite the older file's own name to look 48 hours old, since real
+    # time can't be rewound -- purge_older_than() reads the cutoff from the
+    # filename's own encoded timestamp, not the file's mtime.
+    older_name = files[0].name
+    match = re.match(r"backup_(\d{8})T(\d{6})Z\.json", older_name)
+    stale_time = (datetime.strptime(match.group(1) + match.group(2), "%Y%m%d%H%M%S") - timedelta(hours=48)).strftime(
+        "%Y%m%dT%H%M%SZ"
+    )
+    stale_name = f"backup_{stale_time}.json"
+    files[0].rename(files[0].with_name(stale_name))
+
+    deleted = backup.purge_older_than(24)
+    assert deleted == 1
+    remaining = {p.name for p in (tmp_path / "backups").glob("backup_*.json")}
+    assert stale_name not in remaining
+    assert len(remaining) == 1
+
+
+def test_purge_older_than_is_a_no_op_when_backups_dir_does_not_exist(tmp_path):
+    backup = AutoBackup(tmp_path / "backups", _dummy_snapshot)
+    assert backup.purge_older_than(24) == 0
 
 
 def test_run_now_still_raises_directly_when_called_outside_the_background_loop(tmp_path):

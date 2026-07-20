@@ -1,5 +1,6 @@
 import json
 import shutil
+from datetime import datetime, timedelta
 
 import pytest
 from fastapi.testclient import TestClient
@@ -679,6 +680,80 @@ def test_download_all_auto_backups_404s_when_there_are_none():
 
     shutil.rmtree(BACKUPS_DIR, ignore_errors=True)
     res = client.get("/api/backup/auto/download-all")
+    assert res.status_code == 404
+
+
+def test_purge_auto_backups_deletes_snapshots_older_than_the_cutoff():
+    import re
+
+    from webapp.main import BACKUPS_DIR, _auto_backup
+    import shutil
+
+    shutil.rmtree(BACKUPS_DIR, ignore_errors=True)
+    try:
+        client.post("/api/backup/auto/run-now")
+        files = list(BACKUPS_DIR.glob("backup_*.json"))
+        assert len(files) == 1
+
+        # Rewrite the snapshot's own filename to look 48 hours old, since
+        # purge reads the cutoff from the filename's encoded timestamp.
+        match = re.match(r"backup_(\d{8})T(\d{6})Z\.json", files[0].name)
+        stale_time = (
+            datetime.strptime(match.group(1) + match.group(2), "%Y%m%d%H%M%S") - timedelta(hours=48)
+        ).strftime("%Y%m%dT%H%M%SZ")
+        files[0].rename(files[0].with_name(f"backup_{stale_time}.json"))
+
+        res = client.post("/api/backup/auto/purge?older_than_hours=24")
+        assert res.status_code == 200
+        assert res.json() == {"deleted": 1}
+        assert list(BACKUPS_DIR.glob("backup_*.json")) == []
+    finally:
+        _auto_backup.configure(enabled=False, interval_hours=24.0, keep_count=7)
+        shutil.rmtree(BACKUPS_DIR, ignore_errors=True)
+
+
+def test_purge_auto_backups_rejects_a_non_positive_cutoff():
+    res = client.post("/api/backup/auto/purge?older_than_hours=0")
+    assert res.status_code == 400
+
+
+def test_compare_auto_backups_reports_a_delta_for_an_added_run():
+    import time
+
+    from webapp.main import BACKUPS_DIR, _auto_backup
+    import shutil
+
+    shutil.rmtree(BACKUPS_DIR, ignore_errors=True)
+    try:
+        client.post("/api/backup/auto/run-now")
+        files_before = list(BACKUPS_DIR.glob("backup_*.json"))
+        assert len(files_before) == 1
+        filename_a = files_before[0].name
+
+        client.post("/api/pipeline/run", json={"inputs": {}})  # add a new run in between
+
+        time.sleep(1.1)  # filenames are second-resolution timestamps -- force a distinct second file
+        client.post("/api/backup/auto/run-now")
+        filename_b = next(
+            f.name for f in BACKUPS_DIR.glob("backup_*.json") if f.name != filename_a
+        )
+
+        res = client.get(f"/api/backup/auto/compare?a={filename_a}&b={filename_b}")
+        assert res.status_code == 200
+        body = res.json()
+        assert body["a"]["filename"] == filename_a
+        assert body["b"]["filename"] == filename_b
+        assert body["a"]["exported_at"]
+        assert body["b"]["exported_at"]
+        assert body["delta"]["runs"] >= 1
+        assert body["b"]["counts"]["runs"] - body["a"]["counts"]["runs"] == body["delta"]["runs"]
+    finally:
+        _auto_backup.configure(enabled=False, interval_hours=24.0, keep_count=7)
+        shutil.rmtree(BACKUPS_DIR, ignore_errors=True)
+
+
+def test_compare_auto_backups_404s_for_an_unknown_or_unsafe_filename():
+    res = client.get("/api/backup/auto/compare?a=does-not-exist.json&b=also-missing.json")
     assert res.status_code == 404
 
 

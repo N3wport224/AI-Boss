@@ -2812,6 +2812,57 @@ only a JSON parse error or timeout falls back to an empty issue list.
      member names matched `GET /api/backup/auto/list` exactly; clicking
      **Preview next** on a freshly created daily schedule showed 5
      evenly-spaced future fire times inline.
+234. **Add age-based purge for automatic backup snapshots**
+     (`AutoBackup.purge_older_than(hours)` -- reads the cutoff from each
+     snapshot's own filename-encoded timestamp (not file mtime, which
+     could be disturbed by copying/restoring the directory), deleting
+     anything older. This is a companion to the existing keep_count-based
+     `_prune()` the background timer already runs after every write:
+     keep_count always keeps exactly N most recent regardless of age,
+     while this is a manual "clear out anything past this age" mirroring
+     the existing age-based audit-log purge
+     (`POST /api/audit-log/purge`). New endpoint:
+     `POST /api/backup/auto/purge?older_than_hours=N`, 400s on a
+     non-positive cutoff. A "Purge snapshots older than N hours" control
+     joins the panel).
+235. **Add comparing two automatic backup snapshots**
+     (`GET /api/backup/auto/compare?a=<file>&b=<file>` -- diffs two
+     snapshots' top-level record counts (runs/steps/schedules/
+     ingested_files/pipelines/memory), returning each snapshot's own
+     counts plus the delta between them. Deliberately not a full deep
+     diff of every field -- a snapshot can hold thousands of run/step
+     rows, so "how many of each record type changed" is the useful,
+     cheap-to-compute question when deciding which snapshot to restore
+     from, mirroring the existing pipeline-version diff and artifact-
+     schema-compare features' shallow-but-useful comparison style. Reuses
+     `_resolve_auto_backup_path()` for both filenames' validation. UI:
+     each snapshot row gained a checkbox; selecting exactly two enables a
+     **Compare selected** button that renders the per-key delta inline).
+236. **Add a command palette jump to Environment & Config**
+     (frontend-only -- the palette's "Jump to section" list (Batches 8, 30)
+     never covered the Environment & Config panel, where every
+     auto-backup control added since Batch 31 lives. Added "Jump to
+     Environment & Config (auto backup)" alongside the existing section
+     shortcuts).
+237. **Add tests for all of Batch 35**: `AutoBackup.purge_older_than()`
+     unit tests (deletes only snapshots past the cutoff, based on a
+     renamed-to-look-stale filename since real time can't be rewound in a
+     test; a no-op when the directory doesn't exist yet) plus a webapp-
+     level purge round trip and a 400 on a non-positive cutoff; a
+     snapshot-compare round trip (seed two snapshots with a run added in
+     between, assert the delta reflects it, assert both snapshots' own
+     `exported_at`/counts are present) and a 404 for an unknown filename.
+     The command palette entry needed no new test, matching the existing
+     precedent that palette entries are frontend-only and verified live
+     rather than under pytest (no test file anywhere in this repo covers
+     the palette). 616 tests total, stable across two repeated clean
+     full-suite runs. Live-verified end to end with Playwright against a
+     freshly started server: seeding two snapshots, renaming one to look
+     200 hours old, and purging with a 168-hour cutoff left only the
+     fresh one in `GET /api/backup/auto/list`; checkbox-selecting two
+     snapshots and clicking **Compare selected** rendered a per-key delta
+     panel; opening the command palette (Ctrl/Cmd+K) and typing "auto
+     backup" surfaced the new jump entry.
 
 ## 9. Roadmap
 

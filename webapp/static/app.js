@@ -6159,10 +6159,18 @@ autoBackupRunNowBtn.addEventListener("click", async () => {
 // ---- List + restore from an automatic backup snapshot ----
 
 const autoBackupSnapshotsListEl = document.getElementById("auto-backup-snapshots-list");
+const autoBackupCompareBtn = document.getElementById("auto-backup-compare-btn");
+const autoBackupCompareResultEl = document.getElementById("auto-backup-compare-result");
+let selectedSnapshotFilenames = new Set();
 
 async function loadAutoBackupSnapshots() {
   const res = await fetch("/api/backup/auto/list");
   const snapshots = await res.json();
+  const liveNames = new Set(snapshots.map((s) => s.filename));
+  [...selectedSnapshotFilenames].forEach((name) => {
+    if (!liveNames.has(name)) selectedSnapshotFilenames.delete(name);
+  });
+  autoBackupCompareBtn.disabled = selectedSnapshotFilenames.size !== 2;
   if (!snapshots.length) {
     autoBackupSnapshotsListEl.className = "runs-empty";
     autoBackupSnapshotsListEl.textContent = "No automatic backup snapshots on disk yet.";
@@ -6173,6 +6181,7 @@ async function loadAutoBackupSnapshots() {
     .map(
       (s) => `
         <div class="schedule-row">
+          <input type="checkbox" class="snapshot-select-checkbox" data-snapshot="${escapeHtml(s.filename)}" ${selectedSnapshotFilenames.has(s.filename) ? "checked" : ""} title="Select for comparison" />
           <span>${escapeHtml(s.filename)}</span>
           <span class="runs-purge-label">${formatBytes(s.size_bytes)} — ${new Date(s.modified_at).toLocaleString()}</span>
           <button class="btn btn-secondary btn-small" data-auto-backup-restore="${escapeHtml(s.filename)}">Restore</button>
@@ -6180,6 +6189,14 @@ async function loadAutoBackupSnapshots() {
         </div>`
     )
     .join("");
+  autoBackupSnapshotsListEl.querySelectorAll(".snapshot-select-checkbox").forEach((checkbox) => {
+    checkbox.addEventListener("change", () => {
+      const filename = checkbox.dataset.snapshot;
+      if (checkbox.checked) selectedSnapshotFilenames.add(filename);
+      else selectedSnapshotFilenames.delete(filename);
+      autoBackupCompareBtn.disabled = selectedSnapshotFilenames.size !== 2;
+    });
+  });
   autoBackupSnapshotsListEl.querySelectorAll("[data-auto-backup-restore]").forEach((btn) => {
     btn.addEventListener("click", async () => {
       const filename = btn.dataset.autoBackupRestore;
@@ -6211,6 +6228,56 @@ async function loadAutoBackupSnapshots() {
     });
   });
 }
+
+autoBackupCompareBtn.addEventListener("click", async () => {
+  if (selectedSnapshotFilenames.size !== 2) return;
+  const [a, b] = [...selectedSnapshotFilenames];
+
+  autoBackupCompareResultEl.classList.remove("hidden");
+  autoBackupCompareResultEl.innerHTML = `<div class="runs-empty">Comparing…</div>`;
+
+  try {
+    const res = await fetch(`/api/backup/auto/compare?a=${encodeURIComponent(a)}&b=${encodeURIComponent(b)}`);
+    const body = await res.json();
+    if (!res.ok) {
+      autoBackupCompareResultEl.innerHTML = `<div class="runs-empty">${escapeHtml(body.detail || "Could not compare these snapshots.")}</div>`;
+      return;
+    }
+    const rows = Object.keys(body.delta)
+      .map((key) => {
+        const delta = body.delta[key];
+        const sign = delta > 0 ? "+" : "";
+        return `
+          <div class="schedule-row">
+            <div class="schedule-row-main">
+              <strong>${escapeHtml(key)}</strong>
+              <span class="schedule-row-meta">${body.a.counts[key]} → ${body.b.counts[key]} (${sign}${delta})</span>
+            </div>
+          </div>`;
+      })
+      .join("");
+    autoBackupCompareResultEl.innerHTML =
+      `<div class="schedule-row-meta" style="padding: 6px 0;">a: ${escapeHtml(body.a.filename)} · b: ${escapeHtml(body.b.filename)}</div>` +
+      rows;
+  } catch (err) {
+    autoBackupCompareResultEl.innerHTML = `<div class="runs-empty">Compare failed: ${err}</div>`;
+  }
+});
+
+const autoBackupPurgeHoursInput = document.getElementById("auto-backup-purge-hours");
+const autoBackupPurgeBtn = document.getElementById("auto-backup-purge-btn");
+
+autoBackupPurgeBtn.addEventListener("click", async () => {
+  const hours = Number(autoBackupPurgeHoursInput.value) || 0;
+  const res = await fetch(`/api/backup/auto/purge?older_than_hours=${hours}`, { method: "POST" });
+  const body = await res.json();
+  if (!res.ok) {
+    showToast(body.detail || "Purge failed.", "error");
+    return;
+  }
+  showToast(`Purged ${body.deleted} snapshot(s) older than ${hours}h.`, "success");
+  await loadAutoBackupSnapshots();
+});
 
 // ---- Recent actions audit trail ----
 
@@ -6492,6 +6559,7 @@ function buildCommandPaletteCommands() {
     ["Jump to Schedules", "schedules-section"],
     ["Jump to Agent Memory", "memory-section"],
     ["Jump to Recent Runs", "recent-runs-section"],
+    ["Jump to Environment & Config (auto backup)", "environment-section"],
   ].forEach(([title, sectionId]) => {
     commands.push({
       kind: "Action",

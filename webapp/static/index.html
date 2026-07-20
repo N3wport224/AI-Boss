@@ -460,8 +460,14 @@
         <span id="auto-backup-status" class="runs-purge-label"></span>
         <a class="btn btn-secondary btn-small" href="/api/backup/auto/list.csv" download title="Export the snapshot list (filename, size, modified time) as CSV">⬇ Export snapshots CSV</a>
         <a class="btn btn-secondary btn-small" href="/api/backup/auto/download-all" download title="Download every automatic backup snapshot as a single zip">⬇ Download all as zip</a>
+        <label for="auto-backup-purge-hours" class="runs-purge-label">Purge snapshots older than</label>
+        <input type="number" id="auto-backup-purge-hours" value="168" min="0" step="1" style="width: 4.5em" />
+        <span>hours</span>
+        <button id="auto-backup-purge-btn" class="btn btn-secondary btn-small" type="button">Purge</button>
+        <button id="auto-backup-compare-btn" class="btn btn-secondary btn-small" type="button" disabled title="Select exactly two snapshots below to compare their record counts">Compare selected</button>
       </div>
       <div id="auto-backup-snapshots-list" class="runs-empty"></div>
+      <div id="auto-backup-compare-result" class="log-tabs-wrap hidden"></div>
     </section>
 
     <section class="tier-section tier-audit" id="audit-log-section">

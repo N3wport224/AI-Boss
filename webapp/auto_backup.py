@@ -116,3 +116,24 @@ class AutoBackup:
         files = sorted(self.backups_dir.glob("backup_*.json"), key=lambda p: p.name, reverse=True)
         for stale in files[keep_count:]:
             stale.unlink()
+
+    def purge_older_than(self, hours: float) -> int:
+        """Delete snapshot files older than `hours`, by the timestamp
+        encoded in their own filename -- an age-based counterpart to the
+        keep_count-based _prune() the background timer already does after
+        every write, for a manual "clear out anything past this age"
+        rather than "always keep exactly N". Returns how many files were
+        deleted."""
+        if not self.backups_dir.exists():
+            return 0
+        cutoff = datetime.now(timezone.utc) - timedelta(hours=hours)
+        deleted = 0
+        for path in self.backups_dir.glob("backup_*.json"):
+            try:
+                timestamp = datetime.strptime(path.stem, "backup_%Y%m%dT%H%M%SZ").replace(tzinfo=timezone.utc)
+            except ValueError:
+                continue
+            if timestamp < cutoff:
+                path.unlink()
+                deleted += 1
+        return deleted

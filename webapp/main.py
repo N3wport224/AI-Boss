@@ -2443,6 +2443,23 @@ def download_all_auto_backups():
     )
 
 
+@app.post("/api/backup/auto/purge")
+def purge_auto_backups(older_than_hours: float = 24 * 7):
+    """Delete automatic backup snapshots older than `older_than_hours` --
+    the age-based counterpart to the configured keep_count's "always keep
+    exactly N most recent" pruning, mirroring the existing age-based
+    audit-log purge (POST /api/audit-log/purge) and run-history retention
+    controls elsewhere in this app."""
+    if older_than_hours <= 0:
+        raise HTTPException(status_code=400, detail="older_than_hours must be greater than 0.")
+    deleted = _auto_backup.purge_older_than(older_than_hours)
+    if deleted:
+        store.record_audit_event(
+            "auto_backup_purge", f"Purged {deleted} automatic backup snapshot(s) older than {older_than_hours}h."
+        )
+    return {"deleted": deleted}
+
+
 def _resolve_auto_backup_path(filename: str) -> Path:
     """Shared filename validation for every endpoint below that reads or
     deletes a specific file out of backups/ -- rejects path traversal
@@ -2484,6 +2501,39 @@ def delete_auto_backup_snapshot(filename: str):
     path.unlink()
     store.record_audit_event("backup_snapshot_deleted", f"Deleted automatic backup snapshot '{filename}'.")
     return {"deleted": filename}
+
+
+def _snapshot_counts(snapshot: dict) -> dict:
+    counts = {key: len(snapshot.get(key) or []) for key in ("runs", "steps", "schedules", "ingested_files", "pipelines")}
+    counts["memory"] = len(snapshot.get("memory") or {})
+    return counts
+
+
+@app.get("/api/backup/auto/compare")
+def compare_auto_backups(a: str, b: str):
+    """Diff two automatic backup snapshots' top-level record counts --
+    mirroring the existing pipeline-version diff and artifact-schema
+    compare features, but for backup snapshots: not a full deep diff of
+    every field (these can hold thousands of run/step rows), just "how
+    many runs/steps/schedules/etc. changed between these two points in
+    time," which is the useful question when deciding which snapshot to
+    restore from."""
+    path_a = _resolve_auto_backup_path(a)
+    path_b = _resolve_auto_backup_path(b)
+    try:
+        snapshot_a = json.loads(path_a.read_text())
+        snapshot_b = json.loads(path_b.read_text())
+    except json.JSONDecodeError as exc:
+        raise HTTPException(status_code=400, detail=f"Could not parse a snapshot file: {exc}")
+
+    counts_a = _snapshot_counts(snapshot_a)
+    counts_b = _snapshot_counts(snapshot_b)
+    delta = {key: counts_b[key] - counts_a[key] for key in counts_a}
+    return {
+        "a": {"filename": a, "exported_at": snapshot_a.get("exported_at"), "counts": counts_a},
+        "b": {"filename": b, "exported_at": snapshot_b.get("exported_at"), "counts": counts_b},
+        "delta": delta,
+    }
 
 
 @app.get("/api/audit-log")

@@ -1014,6 +1014,21 @@ A few things live in the header/subheader on every page load:
   times inline, computed by chaining the existing next-run-time helpers
   forward.
 
+## Backup snapshot age-purge, snapshot comparison, and a command palette jump
+
+- **Age-based purge for automatic backup snapshots** — a "Purge snapshots
+  older than N hours" control joins the panel, deleting snapshots by the
+  timestamp encoded in their own filename, as a companion to the existing
+  keep-count-based pruning (always keep exactly N most recent) for a
+  manual "clear out anything past this age" instead.
+- **Compare two automatic backup snapshots** — checkbox-select exactly two
+  snapshots and click **Compare selected** to see the delta in each
+  record type (runs/steps/schedules/ingested files/pipelines/memory)
+  between them, mirroring the existing pipeline-version diff and
+  artifact-schema compare features.
+- **Command palette auto-backup jump** — "Jump to Environment & Config
+  (auto backup)" joins the palette's existing section shortcuts.
+
 ## Tech stack
 
 - **Language:** Python 3.11+ — first-class async/sync support and native SDKs
