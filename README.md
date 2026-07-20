@@ -1210,6 +1210,18 @@ commit throughout the project — was missing from `.gitignore` and only ever
 kept out of history by manual discipline. It's now protected the same way
 `artifacts/`, `watched_input/`, and `backups/` already were.
 
+## Selection-scoped exports for runs and the audit log
+
+- **Bulk-export selected runs to CSV/JSON** — **Export selected CSV** /
+  **Export selected JSON** buttons join Recent Runs' existing bulk-action row
+  (alongside protect/unprotect/delete), downloading just the checkbox-selected
+  runs in the same row shapes as the full `GET /api/runs.csv`/`.json` exports.
+- **Bulk-select and bulk-export the audit log** — the audit log panel gains
+  its own **Select all** checkbox and per-row checkboxes, plus an
+  **Export selected CSV** button. The audit log stays read-only for bulk
+  actions (no bulk-delete-by-selection) since its existing clear-all/age-purge
+  controls are intentionally coarse-grained.
+
 ## Tech stack
 
 - **Language:** Python 3.11+ — first-class async/sync support and native SDKs

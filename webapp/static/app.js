@@ -5640,11 +5640,39 @@ runsBulkDeleteBtn.addEventListener("click", async () => {
 
 const runsBulkProtectBtn = document.getElementById("runs-bulk-protect-btn");
 const runsBulkUnprotectBtn = document.getElementById("runs-bulk-unprotect-btn");
+const runsBulkExportCsvBtn = document.getElementById("runs-bulk-export-csv-btn");
+const runsBulkExportJsonBtn = document.getElementById("runs-bulk-export-json-btn");
 
 function updateRunsBulkProtectButtons() {
   const disabled = selectedRunIds.size === 0;
   runsBulkProtectBtn.disabled = disabled;
   runsBulkUnprotectBtn.disabled = disabled;
+  runsBulkExportCsvBtn.disabled = disabled;
+  runsBulkExportJsonBtn.disabled = disabled;
+}
+
+async function downloadBulkRunExport(path, filename) {
+  if (!selectedRunIds.size) return;
+  try {
+    const res = await fetch(path, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ run_ids: [...selectedRunIds] }),
+    });
+    if (!res.ok) throw new Error(`HTTP ${res.status}`);
+    const blob = await res.blob();
+    const url = URL.createObjectURL(blob);
+    const link = document.createElement("a");
+    link.href = url;
+    link.download = filename;
+    document.body.appendChild(link);
+    link.click();
+    link.remove();
+    URL.revokeObjectURL(url);
+    showToast(`Exported ${selectedRunIds.size} selected run(s).`, "success");
+  } catch (err) {
+    showToast(`Export failed: ${err}`, "error");
+  }
 }
 
 async function bulkSetRunsProtected(protected_) {
@@ -5661,6 +5689,13 @@ async function bulkSetRunsProtected(protected_) {
 
 runsBulkProtectBtn.addEventListener("click", () => bulkSetRunsProtected(true));
 runsBulkUnprotectBtn.addEventListener("click", () => bulkSetRunsProtected(false));
+
+runsBulkExportCsvBtn.addEventListener("click", () =>
+  downloadBulkRunExport("/api/runs/bulk-export-csv", "runs_selected.csv")
+);
+runsBulkExportJsonBtn.addEventListener("click", () =>
+  downloadBulkRunExport("/api/runs/bulk-export-json", "runs_selected.json")
+);
 
 // ---- Full-text search across run history (step outputs + errors) ----
 
@@ -6894,12 +6929,21 @@ const AUDIT_ACTION_LABELS = {
   pipeline_version_restore: "Pipeline version restore",
 };
 
+const selectedAuditLogIds = new Set();
+const auditLogSelectAllEl = document.getElementById("audit-log-select-all");
+const auditLogBulkExportCsvBtn = document.getElementById("audit-log-bulk-export-csv-btn");
+
+function updateAuditLogBulkButton() {
+  auditLogBulkExportCsvBtn.disabled = selectedAuditLogIds.size === 0;
+}
+
 function renderAuditLogRows(events, emptyMessage) {
   if (!events.length) return { className: "runs-empty", html: emptyMessage };
   const html = events
     .map(
       (e) => `
       <div class="schedule-row">
+        <input type="checkbox" class="audit-log-select-checkbox" data-audit-id="${e.id}" ${selectedAuditLogIds.has(e.id) ? "checked" : ""} />
         <div class="schedule-row-main">
           <strong>${escapeHtml(AUDIT_ACTION_LABELS[e.action] || e.action)}</strong>
           <span class="schedule-row-meta">${escapeHtml(e.detail)}</span>
@@ -6911,14 +6955,69 @@ function renderAuditLogRows(events, emptyMessage) {
   return { className: "runs-table", html };
 }
 
+function wireAuditLogCheckboxes(container) {
+  container.querySelectorAll(".audit-log-select-checkbox").forEach((checkbox) => {
+    checkbox.addEventListener("click", (e) => e.stopPropagation());
+    checkbox.addEventListener("change", () => {
+      const id = Number(checkbox.dataset.auditId);
+      if (checkbox.checked) selectedAuditLogIds.add(id);
+      else selectedAuditLogIds.delete(id);
+      updateAuditLogBulkButton();
+    });
+  });
+  updateAuditLogBulkButton();
+}
+
 async function loadAuditLog() {
   const res = await fetch("/api/audit-log");
   const events = await res.json();
 
+  const liveIds = new Set(events.map((e) => e.id));
+  [...selectedAuditLogIds].forEach((id) => {
+    if (!liveIds.has(id)) selectedAuditLogIds.delete(id);
+  });
+
   const { className, html } = renderAuditLogRows(events, "No administrative actions recorded yet.");
   auditLogListEl.className = className;
   auditLogListEl.innerHTML = html;
+  wireAuditLogCheckboxes(auditLogListEl);
 }
+
+auditLogSelectAllEl.addEventListener("click", (e) => e.stopPropagation());
+auditLogSelectAllEl.addEventListener("change", () => {
+  const checkboxes = auditLogListEl.querySelectorAll(".audit-log-select-checkbox");
+  checkboxes.forEach((checkbox) => {
+    checkbox.checked = auditLogSelectAllEl.checked;
+    const id = Number(checkbox.dataset.auditId);
+    if (auditLogSelectAllEl.checked) selectedAuditLogIds.add(id);
+    else selectedAuditLogIds.delete(id);
+  });
+  updateAuditLogBulkButton();
+});
+
+auditLogBulkExportCsvBtn.addEventListener("click", async () => {
+  if (!selectedAuditLogIds.size) return;
+  try {
+    const res = await fetch("/api/audit-log/bulk-export-csv", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ ids: [...selectedAuditLogIds] }),
+    });
+    if (!res.ok) throw new Error(`HTTP ${res.status}`);
+    const blob = await res.blob();
+    const url = URL.createObjectURL(blob);
+    const link = document.createElement("a");
+    link.href = url;
+    link.download = "audit_log_selected.csv";
+    document.body.appendChild(link);
+    link.click();
+    link.remove();
+    URL.revokeObjectURL(url);
+    showToast(`Exported ${selectedAuditLogIds.size} selected action(s).`, "success");
+  } catch (err) {
+    showToast(`Export failed: ${err}`, "error");
+  }
+});
 
 const auditLogSearchInput = document.getElementById("audit-log-search-input");
 let auditLogSearchDebounce = null;
@@ -6936,6 +7035,7 @@ auditLogSearchInput.addEventListener("input", () => {
       const { className, html } = renderAuditLogRows(body.results, "No actions match that search.");
       auditLogListEl.className = className;
       auditLogListEl.innerHTML = html;
+      wireAuditLogCheckboxes(auditLogListEl);
     } catch (err) {
       auditLogListEl.className = "runs-empty";
       auditLogListEl.textContent = `Search failed: ${err}`;

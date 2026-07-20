@@ -2458,6 +2458,57 @@ def bulk_protect_runs(payload: BulkProtectRuns):
     return {"protected": payload.protected, "updated": updated}
 
 
+class BulkExportRuns(BaseModel):
+    run_ids: list[int]
+
+
+@app.post("/api/runs/bulk-export-csv")
+def bulk_export_runs_csv(payload: BulkExportRuns):
+    """Same id/started_at/finished_at/status/duration_seconds row shape as
+    GET /api/runs.csv, scoped to a checkbox selection -- the selection-scoped
+    counterpart to the full-list export, mirroring notifications/artifacts/
+    schedules/memory's existing bulk-export-csv pattern."""
+    wanted = set(payload.run_ids)
+    buffer = io.StringIO()
+    writer = csv.DictWriter(buffer, fieldnames=["id", "started_at", "finished_at", "status", "duration_seconds"])
+    writer.writeheader()
+    for run in store.recent_runs(limit=100000):
+        if run["id"] not in wanted:
+            continue
+        duration = None
+        if run["started_at"] and run["finished_at"]:
+            duration = round(
+                (datetime.fromisoformat(run["finished_at"]) - datetime.fromisoformat(run["started_at"])).total_seconds(),
+                3,
+            )
+        writer.writerow({**run, "duration_seconds": duration})
+
+    return StreamingResponse(
+        iter([buffer.getvalue()]),
+        media_type="text/csv",
+        headers={"Content-Disposition": "attachment; filename=runs_selected.csv"},
+    )
+
+
+@app.post("/api/runs/bulk-export-json")
+def bulk_export_runs_json(payload: BulkExportRuns):
+    """Same summary run shape as GET /api/runs.json, scoped to a checkbox
+    selection -- the selection-scoped counterpart to the full-list export."""
+    wanted = set(payload.run_ids)
+    notes_by_run = store.all_run_notes()
+    rows = []
+    for run in store.recent_runs(limit=100000):
+        if run["id"] not in wanted:
+            continue
+        rows.append({**run, "note": notes_by_run.get(run["id"], "")})
+
+    return StreamingResponse(
+        iter([json.dumps(rows, indent=2)]),
+        media_type="application/json",
+        headers={"Content-Disposition": "attachment; filename=runs_selected.json"},
+    )
+
+
 def _parsed_steps_for_run(run_id: int) -> list[dict]:
     steps = store.steps_for_run(run_id)
     for step in steps:
@@ -2994,6 +3045,34 @@ def audit_log_csv(limit: int = 1000):
         iter([buffer.getvalue()]),
         media_type="text/csv",
         headers={"Content-Disposition": "attachment; filename=audit_log.csv"},
+    )
+
+
+class BulkExportAuditLog(BaseModel):
+    ids: list[int]
+
+
+@app.post("/api/audit-log/bulk-export-csv")
+def bulk_export_audit_log_csv(payload: BulkExportAuditLog):
+    """Same id/action/detail/created_at row shape as GET /api/audit-log.csv,
+    scoped to a checkbox selection -- the selection-scoped counterpart to
+    the full-list export, mirroring the bulk-export-csv pattern already
+    used for runs/notifications/artifacts/schedules/memory. Read-only --
+    unlike those, the audit log has no bulk-delete-by-selection, since its
+    existing clear-all/age-purge controls are intentionally coarse-grained
+    to keep the trail's integrity simple to reason about."""
+    wanted = set(payload.ids)
+    buffer = io.StringIO()
+    writer = csv.DictWriter(buffer, fieldnames=["id", "action", "detail", "created_at"])
+    writer.writeheader()
+    for event in store.list_audit_events(limit=100000):
+        if event["id"] in wanted:
+            writer.writerow(event)
+
+    return StreamingResponse(
+        iter([buffer.getvalue()]),
+        media_type="text/csv",
+        headers={"Content-Disposition": "attachment; filename=audit_log_selected.csv"},
     )
 
 

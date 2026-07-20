@@ -179,6 +179,33 @@ def test_audit_log_csv_export_respects_limit():
     assert "run_purge" in lines[1]
 
 
+def test_bulk_export_audit_log_csv_contains_only_the_selected_rows():
+    client.post("/api/artifacts/purge", params={"older_than_hours": 999999})
+    client.post("/api/runs/purge", params={"older_than_hours": 999999})
+    events = client.get("/api/audit-log").json()
+    artifact_purge_event = next(e for e in events if e["action"] == "artifact_purge")
+    run_purge_event = next(e for e in events if e["action"] == "run_purge")
+
+    res = client.post("/api/audit-log/bulk-export-csv", json={"ids": [artifact_purge_event["id"]]})
+    assert res.status_code == 200
+    assert res.headers["content-type"].startswith("text/csv")
+    assert "attachment; filename=audit_log_selected.csv" in res.headers["content-disposition"]
+
+    lines = res.text.strip().splitlines()
+    assert lines[0] == "id,action,detail,created_at"
+    assert len(lines) == 2
+    assert "artifact_purge" in lines[1]
+    assert "run_purge" not in res.text
+    assert str(run_purge_event["id"]) not in lines[1]
+
+
+def test_bulk_export_audit_log_csv_is_just_a_header_on_an_empty_selection():
+    res = client.post("/api/audit-log/bulk-export-csv", json={"ids": []})
+    assert res.status_code == 200
+    lines = res.text.strip().splitlines()
+    assert lines == ["id,action,detail,created_at"]
+
+
 # ---- Batch 20: search across the audit log ----
 
 def test_search_audit_log_finds_a_keyword_in_the_detail():

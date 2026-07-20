@@ -528,6 +528,13 @@
         breaker resets, schedule pause/resume, version restores — newest first.
       </p>
       <input type="search" id="audit-log-search-input" class="artifact-search-input" placeholder="Search recent actions…" />
+      <div class="notification-section-actions" style="padding: 4px 0;">
+        <label class="schedule-select-all-label">
+          <input type="checkbox" id="audit-log-select-all" />
+          Select all
+        </label>
+        <button id="audit-log-bulk-export-csv-btn" class="btn btn-secondary btn-small" type="button" disabled>Export selected CSV</button>
+      </div>
       <div id="audit-log-list" class="runs-empty">Loading…</div>
     </section>
 
@@ -543,6 +550,8 @@
           <button id="runs-bulk-delete-btn" class="btn btn-secondary btn-small" type="button" disabled>Delete selected</button>
           <button id="runs-bulk-protect-btn" class="btn btn-secondary btn-small" type="button" disabled title="Protect selected runs from age-based purge">Protect selected</button>
           <button id="runs-bulk-unprotect-btn" class="btn btn-secondary btn-small" type="button" disabled title="Remove purge protection from selected runs">Unprotect selected</button>
+          <button id="runs-bulk-export-csv-btn" class="btn btn-secondary btn-small" type="button" disabled>Export selected CSV</button>
+          <button id="runs-bulk-export-json-btn" class="btn btn-secondary btn-small" type="button" disabled>Export selected JSON</button>
           <a id="export-csv-link" class="btn btn-secondary btn-small" href="/api/runs.csv" download>Export CSV</a>
           <a id="export-xlsx-link" class="btn btn-secondary btn-small" href="/api/runs.xlsx" download>Export XLSX</a>
           <a id="export-json-link" class="btn btn-secondary btn-small" href="/api/runs.json" download>Export JSON</a>

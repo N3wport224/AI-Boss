@@ -3460,6 +3460,49 @@ only a JSON parse error or timeout falls back to an empty issue list.
      clean full-suite runs) pass immediately — confirming this was pure
      environment leakage, not an application bug.
 
+283. **Add bulk-export selected runs to CSV and JSON**
+     (`POST /api/runs/bulk-export-csv` / `-json`, body `{run_ids:
+     list[int]}` -- the selection-scoped counterpart to the existing
+     `GET /api/runs.csv`/`.json` full-list export, mirroring the
+     bulk-export-csv/-json pattern already used for notifications,
+     artifacts, schedules, and memory. The CSV keeps the same
+     id/started_at/finished_at/status/duration_seconds row shape as the
+     full export; the JSON keeps the same summary shape including each
+     run's note. **Export selected CSV** / **Export selected JSON**
+     buttons added to Recent Runs' existing bulk-action row, alongside
+     **Protect selected**/**Unprotect selected**/**Delete selected**).
+284. **Add checkbox bulk-selection to the audit log panel**
+     (the audit log previously had no selection UI at all -- a
+     **Select all** checkbox plus a per-row checkbox added to each
+     rendered entry, wired via a `wireAuditLogCheckboxes()` helper called
+     after both the normal `loadAuditLog()` render and the debounced
+     search-results render, the same two-call-site convention every
+     other bulk-selection panel already follows).
+285. **Add bulk-export selected audit log entries to CSV**
+     (`POST /api/audit-log/bulk-export-csv`, body `{ids: list[int]}` --
+     same id/action/detail/created_at row shape as `GET
+     /api/audit-log.csv`, scoped to the new checkbox selection. Read-only
+     by design: unlike runs/notifications/artifacts, the audit log gets
+     no bulk-delete-by-selection, since its existing clear-all/age-purge
+     controls are intentionally coarse-grained to keep the trail's
+     integrity simple to reason about. **Export selected CSV** button
+     added to a new bulk-action row above the audit log list).
+286. **Add tests for all of Batch 47**: bulk-export-runs CSV and JSON
+     tests confirming only the selected run ids appear in the output
+     (and an excluded run does not), plus empty-selection tests for both
+     formats; a bulk-export-audit-log CSV test confirming only the
+     selected event appears (and a purposely-excluded event's id and
+     action name do not appear anywhere in the output), plus an
+     empty-selection test. 695 tests total, stable across two repeated
+     clean full-suite runs. Live-verified end to end with Playwright
+     against a freshly started server: running two real pipelines to
+     completion, checkbox-selecting both resulting runs and downloading
+     both the CSV and JSON selected-run exports and confirming their
+     contents match exactly the selection; then triggering an artifact
+     purge to produce a fresh audit log entry, checkbox-selecting it, and
+     confirming the downloaded CSV contains exactly one header row plus
+     one data row.
+
 ## 9. Roadmap
 
 The current engine is intentionally a single-process, synchronous, SQLite-backed

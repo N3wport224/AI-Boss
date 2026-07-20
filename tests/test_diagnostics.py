@@ -577,6 +577,53 @@ def test_bulk_protect_runs_is_a_no_op_on_an_empty_selection():
     assert res.json() == {"protected": True, "updated": []}
 
 
+def test_bulk_export_runs_csv_contains_only_the_selected_rows():
+    run_a = _run_full_pipeline_to_completion()
+    run_b = _run_full_pipeline_to_completion()
+    run_excluded = _run_full_pipeline_to_completion()
+
+    res = client.post("/api/runs/bulk-export-csv", json={"run_ids": [run_a, run_b]})
+    assert res.status_code == 200
+    assert res.headers["content-type"].startswith("text/csv")
+    assert "attachment; filename=runs_selected.csv" in res.headers["content-disposition"]
+
+    lines = res.text.strip().splitlines()
+    assert lines[0] == "id,started_at,finished_at,status,duration_seconds"
+    ids_in_export = {int(line.split(",")[0]) for line in lines[1:]}
+    assert ids_in_export == {run_a, run_b}
+    assert run_excluded not in ids_in_export
+
+
+def test_bulk_export_runs_csv_is_just_a_header_on_an_empty_selection():
+    res = client.post("/api/runs/bulk-export-csv", json={"run_ids": []})
+    assert res.status_code == 200
+    lines = res.text.strip().splitlines()
+    assert lines == ["id,started_at,finished_at,status,duration_seconds"]
+
+
+def test_bulk_export_runs_json_contains_only_the_selected_rows_with_notes():
+    run_a = _run_full_pipeline_to_completion()
+    run_excluded = _run_full_pipeline_to_completion()
+    client.put(f"/api/runs/{run_a}/note", json={"note": "batch47 marker note"})
+
+    res = client.post("/api/runs/bulk-export-json", json={"run_ids": [run_a]})
+    assert res.status_code == 200
+    assert res.headers["content-type"].startswith("application/json")
+    assert "attachment; filename=runs_selected.json" in res.headers["content-disposition"]
+
+    rows = res.json()
+    assert len(rows) == 1
+    assert rows[0]["id"] == run_a
+    assert rows[0]["note"] == "batch47 marker note"
+    assert not any(r["id"] == run_excluded for r in rows)
+
+
+def test_bulk_export_runs_json_is_an_empty_list_on_an_empty_selection():
+    res = client.post("/api/runs/bulk-export-json", json={"run_ids": []})
+    assert res.status_code == 200
+    assert res.json() == []
+
+
 def test_restore_snapshot_is_additive_and_idempotent(tmp_path):
     from engine.state_store import StateStore
 
