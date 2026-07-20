@@ -3401,6 +3401,65 @@ only a JSON parse error or timeout falls back to an empty issue list.
      chip and confirming it narrows Recent Runs to exactly those two
      runs.
 
+282. **Final top-down audit across all 46 batches**: a systematic pass over
+     the whole codebase after the batch-building phase concluded, rather
+     than per-batch spot checks. Covered: (1) a live browser sweep
+     opening every dashboard section and the notifications panel,
+     checking for console/page errors and failed HTTP responses — none
+     found (the only 404 seen was the browser's own automatic
+     `favicon.ico` request, which the app doesn't serve and was never
+     asked to); (2) a static cross-check of every `document.getElementById`
+     call in `app.js` against every `id="..."` in `index.html` — the 9
+     mismatches found were all legitimate dynamically-rendered elements
+     (e.g. `pipeline-tracker`, `run-select-all`) looked up immediately
+     after their own `innerHTML` render, not orphaned references; (3) a
+     programmatic scan of all 186 FastAPI routes for same-method
+     path-template shadowing — zero conflicts, confirming every manual
+     route-ordering check made throughout the previous 46 batches was
+     correct; (4) grep sweeps for bare `except:`, mutable default
+     arguments, unparameterized SQL string interpolation, `eval`/`exec`,
+     and stray debug `print`/`console.log` calls — none found (the one
+     f-string-built SQL fragment is a safe `IN (?,?,...)` placeholder
+     list built from `len(ids)`, never from user-controlled string
+     content; the one `print()` call is intentional server-side
+     diagnostic logging alongside a circuit-breaker-trip notification);
+     (5) confirming every filename-taking endpoint (artifacts, automatic
+     backup snapshots) guards against path traversal via `Path(...).name`
+     or an equivalent literal-prefix/suffix check before ever touching
+     the filesystem; (6) a full-repo import scan confirming no
+     undeclared third-party dependencies exist beyond what's already in
+     `requirements.txt`; (7) two more clean full-suite pytest runs (689
+     tests) plus a final live Playwright smoke pass exercising a module
+     run, a pipeline save+tag round trip, schedule creation, the
+     notifications panel, the command palette, and a manual backup
+     snapshot trigger — all clean.
+
+     One real gap was found and fixed: `pipelines/` (a runtime artifact
+     directory cleaned up before every commit throughout the whole
+     project, per the same convention as `artifacts/`/`watched_input/`/
+     `backups/`) was never actually added to `.gitignore` — it had only
+     ever been kept out of history by manual discipline, not a safety
+     net. Added it alongside the other four. `git log --all` across
+     every runtime-artifact path (`*.db`, `artifacts/`, `watched_input/`,
+     `backups/`, `pipelines/`) confirmed none was ever actually
+     committed despite the missing entry.
+
+     One transient false alarm during the audit is worth recording since
+     it looked like a real regression at first: three `test_watcher.py`
+     tests failed with duplicate-ingestion assertions when the full suite
+     was run mid-audit. Root cause, confirmed via a multi-step tracing
+     session (patching `FilesystemWatcher._scan_once`, `save_artifact`,
+     and `Path.write_bytes` to log every call and stack trace): a
+     `uvicorn webapp.main:app` server process from an earlier audit step
+     had been left running in the background (a session hygiene slip —
+     it was never `pkill`-ed after that step finished), and its own
+     module-level filesystem-watcher thread was independently polling
+     the same real `watched_input/`/`artifacts/` directories on disk,
+     racing against the pytest process's own watcher instance. Killing
+     the stray process made all five watcher tests (and two subsequent
+     clean full-suite runs) pass immediately — confirming this was pure
+     environment leakage, not an application bug.
+
 ## 9. Roadmap
 
 The current engine is intentionally a single-process, synchronous, SQLite-backed

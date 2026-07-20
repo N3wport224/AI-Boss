@@ -1194,6 +1194,22 @@ A few things live in the header/subheader on every page load:
 - **"🔒 Protected" filter chip** — joins the existing status-filter chips,
   narrowing Recent Runs to just the protected ones.
 
+## Final top-down audit
+
+After the batch-building phase wrapped up, a systematic audit covered: a live
+browser sweep of every dashboard section for console/page errors (none, aside
+from the browser's own harmless `favicon.ico` request); a static check of every
+JS `getElementById` call against the HTML (no orphaned references); an
+automated scan of all 186 backend routes for path-shadowing conflicts (none);
+grep sweeps for bare excepts, mutable default args, SQL injection risks, and
+stray debug code (none found); a path-traversal check on every filename-taking
+endpoint (all guarded); an unused-dependency scan (none); and a final full test
+suite + live Playwright smoke pass (all clean). One real gap was found and
+fixed: `pipelines/` — a runtime artifact directory cleaned up before every
+commit throughout the project — was missing from `.gitignore` and only ever
+kept out of history by manual discipline. It's now protected the same way
+`artifacts/`, `watched_input/`, and `backups/` already were.
+
 ## Tech stack
 
 - **Language:** Python 3.11+ — first-class async/sync support and native SDKs

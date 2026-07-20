@@ -11,5 +11,6 @@ orchestrator.db
 artifacts/
 watched_input/
 backups/
+pipelines/
 
 .DS_Store
