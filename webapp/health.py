@@ -114,3 +114,24 @@ def run_health_checks(tier_dirs: dict, store) -> dict:
     ]
     overall_ok = all(check["ok"] for check in checks)
     return {"status": "ready" if overall_ok else "degraded", "checks": checks}
+
+
+def run_liveness_check(store, background_threads: dict) -> dict:
+    """A cheap liveness probe, distinct from run_health_checks() above: no
+    manifest parsing or entrypoint instantiation (that's readiness-grade
+    diagnostic work, not something a monitoring system should pay for on
+    every poll). Just the two things that mean the process is actually
+    still doing its job -- the database answers a trivial query, and every
+    named background thread (scheduler/watcher/auto-backup) is still
+    running -- so an external prober (a container orchestrator, a cron
+    job) can catch "the process is up but its scheduler thread silently
+    died" without touching the module registry at all.
+
+    `background_threads` maps a name to an object with an `is_alive()`
+    method (Scheduler/FilesystemWatcher/AutoBackup all have one)."""
+    checks = {"database": dict(zip(("ok", "detail"), _check_state_store(store)))}
+    for name, component in background_threads.items():
+        alive = component.is_alive()
+        checks[name] = {"ok": alive, "detail": "running" if alive else "not running"}
+    overall_ok = all(check["ok"] for check in checks.values())
+    return {"status": "ok" if overall_ok else "degraded", "checks": checks}

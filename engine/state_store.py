@@ -1,10 +1,14 @@
 import json
 import sqlite3
 import threading
+import time
 from datetime import datetime, timedelta, timezone
 from typing import Optional
 
 from .context import StepRecord
+from .logging_config import get_logger
+
+logger = get_logger(__name__)
 
 SCHEMA = """
 CREATE TABLE IF NOT EXISTS runs (
@@ -172,14 +176,68 @@ class StateStore:
     not just the single-threaded CLI.
     """
 
-    def __init__(self, db_path: str = "orchestrator.db"):
+    # A deployment restart can race a still-closing handle from the previous
+    # process (or a concurrent backup/inspection tool briefly holding the
+    # file), which surfaces as sqlite3's "database is locked" -- transient,
+    # not a real failure. These bound how hard __init__ retries past it
+    # before giving up for good.
+    DEFAULT_INIT_MAX_RETRIES = 5
+    DEFAULT_INIT_BACKOFF_SECONDS = 0.2
+    # sqlite3 itself busy-waits up to `timeout` seconds inside a single
+    # connect/execute call before ever raising "database is locked" -- kept
+    # short so it's *our* exponential backoff loop deciding how patient to
+    # be overall (and logging each attempt), not one long silent wait
+    # sqlite does internally with no visibility.
+    CONNECT_TIMEOUT_SECONDS = 0.1
+
+    def __init__(
+        self,
+        db_path: str = "orchestrator.db",
+        max_retries: int = DEFAULT_INIT_MAX_RETRIES,
+        backoff_seconds: float = DEFAULT_INIT_BACKOFF_SECONDS,
+        _sleep=time.sleep,
+    ):
         self.db_path = db_path
-        self._conn = sqlite3.connect(self.db_path, check_same_thread=False)
         self._lock = threading.Lock()
-        with self._lock:
-            self._conn.executescript(SCHEMA)
-            self._migrate_locked()
-            self._conn.commit()
+        self._conn = self._connect_with_retry(max_retries, backoff_seconds, _sleep)
+
+    def _connect_with_retry(self, max_retries: int, backoff_seconds: float, sleep_fn) -> sqlite3.Connection:
+        """Open the connection and run the schema/migration step, retrying
+        the whole attempt with exponential backoff (0.2s, 0.4s, 0.8s, ...)
+        on a locked database. Any other OperationalError (a bad path, a
+        corrupt file) is not a locking issue and is never retried -- it
+        fails immediately, since waiting would only delay a real,
+        unrecoverable startup error."""
+        attempt = 0
+        while True:
+            conn = None
+            try:
+                conn = sqlite3.connect(self.db_path, check_same_thread=False, timeout=self.CONNECT_TIMEOUT_SECONDS)
+                with self._lock:
+                    conn.executescript(SCHEMA)
+                    self._conn = conn  # _migrate_locked reads/writes via self._conn
+                    self._migrate_locked()
+                    conn.commit()
+                return conn
+            except sqlite3.OperationalError as exc:
+                if conn is not None:
+                    conn.close()
+                self._conn = None
+                if "locked" not in str(exc).lower() or attempt >= max_retries:
+                    raise
+                delay = backoff_seconds * (2**attempt)
+                logger.warning(
+                    "state store initialization found the database locked, retrying",
+                    extra={
+                        "db_path": self.db_path,
+                        "attempt": attempt + 1,
+                        "max_retries": max_retries,
+                        "delay_seconds": delay,
+                        "error": str(exc),
+                    },
+                )
+                sleep_fn(delay)
+                attempt += 1
 
     def _migrate_locked(self) -> None:
         """Lightweight schema migrations for columns added after a table

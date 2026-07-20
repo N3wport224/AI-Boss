@@ -31,6 +31,48 @@ def test_health_check_reports_ready_for_the_bundled_modules():
     assert all(check["ok"] for check in body["checks"])
 
 
+def test_livez_reports_ok_with_database_and_thread_checks():
+    res = client.get("/healthz")
+    assert res.status_code == 200
+
+    body = res.json()
+    assert body["status"] == "ok"
+    assert set(body["checks"].keys()) == {"database", "scheduler", "watcher", "auto_backup"}
+    assert all(check["ok"] for check in body["checks"].values())
+    # Unlike /api/health, this must never touch manifests/entrypoints --
+    # it's meant to be cheap enough to poll frequently.
+    assert "manifests" not in body["checks"]
+    assert "entrypoints" not in body["checks"]
+
+
+def test_livez_is_open_by_default_with_no_token_configured():
+    """AIBOSS_HEALTH_TOKEN is unset in the test environment (conftest never
+    sets it), so the endpoint must not demand a header nobody configured."""
+    import os
+
+    assert "AIBOSS_HEALTH_TOKEN" not in os.environ
+    res = client.get("/healthz")
+    assert res.status_code == 200
+
+
+def test_livez_requires_the_configured_token_when_one_is_set():
+    import os
+
+    os.environ["AIBOSS_HEALTH_TOKEN"] = "test-secret-token"
+    try:
+        res = client.get("/healthz")
+        assert res.status_code == 401
+
+        res = client.get("/healthz", headers={"X-Health-Token": "wrong-token"})
+        assert res.status_code == 401
+
+        res = client.get("/healthz", headers={"X-Health-Token": "test-secret-token"})
+        assert res.status_code == 200
+        assert res.json()["status"] == "ok"
+    finally:
+        del os.environ["AIBOSS_HEALTH_TOKEN"]
+
+
 def test_performance_reports_a_live_process_snapshot():
     res = client.get("/api/performance")
     assert res.status_code == 200
@@ -298,6 +340,37 @@ def test_memory_csv_export_is_empty_but_valid_with_no_entries():
     assert res.status_code == 200
     lines = res.text.strip().splitlines()
     assert lines == ["key,value,updated_at"]
+
+
+def test_memory_csv_and_json_exports_stream_correctly_at_moderate_scale():
+    """CSV/JSON exports were rewritten to generator-based chunked streaming
+    (each row/key formatted and sent one at a time, rather than the whole
+    export built as one buffered string first) -- this exercises that
+    refactor at a scale where a per-row bug (an off-by-one in the
+    generator, a broken comma/bracket boundary) would actually show up,
+    not just on the single- or zero-row cases other tests already cover."""
+    from webapp.main import store
+
+    store.clear_memory()
+    for i in range(250):
+        store.set_memory(f"streamtest_key_{i:04d}", f"value {i}")
+
+    res = client.get("/api/memory.csv")
+    assert res.status_code == 200
+    lines = res.text.strip().splitlines()
+    assert lines[0] == "key,value,updated_at"
+    assert len(lines) - 1 == 250
+    assert any(line.startswith("streamtest_key_0000,") for line in lines[1:])
+    assert any(line.startswith("streamtest_key_0249,") for line in lines[1:])
+
+    res = client.get("/api/memory.json")
+    assert res.status_code == 200
+    body = json.loads(res.text)  # must be valid, complete JSON, not truncated
+    assert len(body) == 250
+    assert body["streamtest_key_0000"] == "value 0"
+    assert body["streamtest_key_0249"] == "value 249"
+
+    store.clear_memory()
 
 
 # ---- Batch 27: export agent memory to JSON ----

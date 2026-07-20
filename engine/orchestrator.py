@@ -7,8 +7,11 @@ from typing import Callable, Optional, Sequence, Union
 
 from .base import BaseModule
 from .context import ExecutionContext, StepRecord
+from .logging_config import get_logger
 from .redaction import redact_secrets
 from .state_store import StateStore
+
+logger = get_logger(__name__)
 
 EventCallback = Callable[[dict], None]
 SeedFn = Callable[[ExecutionContext], dict]
@@ -219,6 +222,8 @@ class Orchestrator:
         context = ExecutionContext(initial_context, on_event=emit, state_store=self.state_store)
         run_id = self.state_store.start_run() if self.state_store else None
         had_failure = False
+        run_started_at = time.monotonic()
+        logger.info("run started", extra={"run_id": run_id, "step_count": len(self.pipeline)})
 
         for index, step in enumerate(self.pipeline):
             if isinstance(step, ParallelGroup):
@@ -230,6 +235,7 @@ class Orchestrator:
                             self.state_store.finish_run(run_id, "failed", redact_secrets(context.blackboard.all()))
                         error = f"Parallel group '{step.name}' had a failing branch."
                         emit({"kind": "run_failed", "error": error, "context": redact_secrets(context.variables)})
+                        logger.error("run failed", extra={"run_id": run_id, "error": error})
                         raise RuntimeError(error)
                 continue
 
@@ -281,11 +287,22 @@ class Orchestrator:
                     }
                 )
                 had_failure = True
+                logger.warning(
+                    "step failed",
+                    # "name" is a reserved LogRecord attribute (the logger's own
+                    # name) -- extra={} can't override it, so this is
+                    # "module_name" rather than the natural "name".
+                    extra={"run_id": run_id, "tier": module.tier.value, "module_name": module.name, "error": str(exc)},
+                )
 
                 if self.stop_on_error:
                     if self.state_store:
                         self.state_store.finish_run(run_id, "failed", redact_secrets(context.blackboard.all()))
                     emit({"kind": "run_failed", "error": str(exc), "context": redact_secrets(context.variables)})
+                    logger.error(
+                        "run failed",
+                        extra={"run_id": run_id, "error": str(exc), "duration_ms": round((time.monotonic() - run_started_at) * 1000, 1)},
+                    )
                     raise
                 continue
 
@@ -319,6 +336,12 @@ class Orchestrator:
                 "kind": "run_failed" if had_failure else "run_completed",
                 "context": redact_secrets(context.variables),
             }
+        )
+        duration_ms = round((time.monotonic() - run_started_at) * 1000, 1)
+        log_fn = logger.warning if had_failure else logger.info
+        log_fn(
+            "run completed" if not had_failure else "run completed with failures",
+            extra={"run_id": run_id, "status": "failed" if had_failure else "completed", "duration_ms": duration_ms},
         )
         return context
 

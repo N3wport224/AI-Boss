@@ -27,7 +27,7 @@ from typing import Any, Callable, Optional
 
 import yaml
 from fastapi import FastAPI, File, HTTPException, Request, UploadFile
-from fastapi.responses import FileResponse, StreamingResponse
+from fastapi.responses import FileResponse, JSONResponse, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 
@@ -42,6 +42,7 @@ from engine import (
     redact_secrets,
     resolve_path,
 )
+from engine.logging_config import get_logger
 from engine.registry import instantiate, load_manifests
 
 from . import cache, graph, health, ingestion, linting, perf, pipelines as pipeline_store, scaffold
@@ -65,11 +66,14 @@ TIER_DIRS = {
 # reached by raising this, but nothing today runs anywhere close to it.
 DEFAULT_STEP_TIMEOUT_SECONDS = 60.0
 
+logger = get_logger(__name__)
+
 # AIBOSS_DB_PATH lets a test session (or any secondary deployment) point the
 # app at its own database instead of the repo-root one, so suites can run
 # against a throwaway store without touching real runs/schedules/cache.
 store = StateStore(os.environ.get("AIBOSS_DB_PATH", str(ROOT / "orchestrator.db")))
 bus = RunEventBus()
+logger.info("state store ready", extra={"db_path": store.db_path})
 
 
 # Cells beginning with any of these are interpreted as a formula by Excel /
@@ -108,6 +112,67 @@ class _SafeCsvDictWriter:
         for row in rows:
             self.writerow(row)
 
+
+def _stream_csv_rows(fieldnames, rows, extrasaction="raise"):
+    """Generator-based CSV body: yields the header line, then one line per
+    row, reusing a single small StringIO instead of building the entire
+    export as one buffered string before StreamingResponse sends anything.
+    `rows` is whatever the caller already fetched from the store (a plain
+    list) -- the state store's shared SQLite connection is guarded by one
+    process-wide lock, so holding it open across a slow client's download
+    would stall every other request; fetching stays quick and eager, only
+    the CSV *formatting and transfer* is chunked. That's still the part
+    that matters for memory: with the old approach, a wide or heavily
+    populated table (long audit-log details, many memory values) built one
+    Python string the size of the whole export before the first byte went
+    out. Here, peak memory for the response body is one row, not all of
+    them."""
+    line = io.StringIO()
+    writer = _SafeCsvDictWriter(line, fieldnames=fieldnames, extrasaction=extrasaction)
+    writer.writeheader()
+    yield line.getvalue()
+    for row in rows:
+        line.seek(0)
+        line.truncate(0)
+        writer.writerow(row)
+        yield line.getvalue()
+
+
+def _stream_json_array(items, default=None):
+    """Yield a JSON array one element at a time instead of building the
+    whole array as one json.dumps() string first. Each element is dumped
+    (and indented) independently, so peak memory is one row's JSON text,
+    not the whole array's. `default` is passed straight through to
+    json.dumps (e.g. `str`, for a value shape that isn't natively
+    JSON-serializable)."""
+    yield "["
+    first = True
+    for item in items:
+        text = "\n".join("  " + line for line in json.dumps(item, indent=2, default=default).splitlines())
+        yield ("\n" if first else ",\n") + text
+        first = False
+    yield "\n]" if not first else "]"
+
+
+def _stream_json_object(obj, default=None):
+    """Yield a JSON object one top-level key at a time. Used for exports
+    whose memory cost is concentrated in a handful of large top-level list
+    values (e.g. the full backup snapshot's runs/steps arrays) rather than
+    a single flat array -- a list-valued key streams via
+    _stream_json_array; anything else is assumed small enough to dump
+    directly."""
+    yield "{\n"
+    first = True
+    for key, value in obj.items():
+        yield ("" if first else ",\n") + f"  {json.dumps(key)}: "
+        first = False
+        if isinstance(value, list):
+            yield from _stream_json_array(value, default=default)
+        else:
+            yield json.dumps(value, indent=2, default=default)
+    yield "\n}"
+
+
 # Guards every run-triggering endpoint against an accidental request storm —
 # generous enough for normal interactive use, tight enough to catch a stuck
 # retry loop or a misconfigured schedule hammering the thread pool.
@@ -138,7 +203,9 @@ _active_run_threads_lock = threading.Lock()
 
 @contextlib.asynccontextmanager
 async def lifespan(app: FastAPI):
+    logger.info("application startup")
     yield
+    logger.info("application shutdown starting")
     # Stop the things that can START new runs first (each stop() joins its
     # thread), THEN wait for in-flight run threads -- the other order leaves
     # a window where the scheduler fires a fresh run after we've already
@@ -152,9 +219,28 @@ async def lifespan(app: FastAPI):
     for thread in threads:
         thread.join(timeout=5.0)
     store.close()
+    logger.info("application shutdown complete")
 
 
 app = FastAPI(title="AI-Boss Control Center", lifespan=lifespan)
+
+
+@app.exception_handler(Exception)
+async def _log_unhandled_exception(request: Request, exc: Exception):
+    """FastAPI's default behavior for an exception no route handler caught
+    is a bare 500 with no server-side record beyond whatever uvicorn's own
+    plain-text logger happens to print -- easy to lose in a log stream that
+    isn't grepping for it. This logs the same structured JSON shape as
+    every other log line in the app (path, method, exception + traceback)
+    before still returning the generic 500 body a client would otherwise
+    have gotten."""
+    logger.error(
+        "unhandled exception",
+        extra={"path": request.url.path, "method": request.method},
+        exc_info=exc,
+    )
+    return JSONResponse(status_code=500, content={"detail": "Internal server error."})
+
 
 ingestion.ensure_artifacts_dir()
 ingestion.purge_old_artifacts(older_than_hours=24 * 7)  # sweep anything left over a week ago
@@ -684,18 +770,16 @@ def modules_used_by_csv():
     semicolon-joined list of the saved pipeline slugs that reference it
     (a plain comma would collide with the CSV column separator).
     Mirrors every other CSV export in this app."""
-    buffer = io.StringIO()
-    writer = _SafeCsvDictWriter(buffer, fieldnames=["tier", "name", "used_by"])
-    writer.writeheader()
-    for tier, directory in TIER_DIRS.items():
-        for manifest in load_manifests(directory):
-            if not manifest.get("enabled", True):
-                continue
-            used_by = pipeline_store.pipelines_using_module(tier, manifest["name"])
-            writer.writerow({"tier": tier, "name": manifest["name"], "used_by": ";".join(used_by)})
+    def _rows():
+        for tier, directory in TIER_DIRS.items():
+            for manifest in load_manifests(directory):
+                if not manifest.get("enabled", True):
+                    continue
+                used_by = pipeline_store.pipelines_using_module(tier, manifest["name"])
+                yield {"tier": tier, "name": manifest["name"], "used_by": ";".join(used_by)}
 
     return StreamingResponse(
-        iter([buffer.getvalue()]),
+        _stream_csv_rows(["tier", "name", "used_by"], _rows()),
         media_type="text/csv",
         headers={"Content-Disposition": "attachment; filename=modules_used_by.csv"},
     )
@@ -707,21 +791,19 @@ def modules_used_by_json():
     downloadable JSON array -- unlike the CSV export, used_by is a real JSON
     list here rather than a semicolon-joined string, since JSON has no
     column-separator collision to work around."""
-    rows = []
-    for tier, directory in TIER_DIRS.items():
-        for manifest in load_manifests(directory):
-            if not manifest.get("enabled", True):
-                continue
-            rows.append(
-                {
+    def _rows():
+        for tier, directory in TIER_DIRS.items():
+            for manifest in load_manifests(directory):
+                if not manifest.get("enabled", True):
+                    continue
+                yield {
                     "tier": tier,
                     "name": manifest["name"],
                     "used_by": pipeline_store.pipelines_using_module(tier, manifest["name"]),
                 }
-            )
 
     return StreamingResponse(
-        iter([json.dumps(rows, indent=2)]),
+        _stream_json_array(_rows()),
         media_type="application/json",
         headers={"Content-Disposition": "attachment; filename=modules_used_by.json"},
     )
@@ -737,20 +819,14 @@ def modules_directory_csv():
     carries the description or the enabled/runtime-status fields together,
     so this is the one CSV that captures "what modules exist and are they
     healthy" at a glance."""
-    buffer = io.StringIO()
-    writer = _SafeCsvDictWriter(
-        buffer,
-        fieldnames=["tier", "name", "description", "enabled", "status", "breaker_tripped"],
-    )
-    writer.writeheader()
-    for tier, directory in TIER_DIRS.items():
-        for manifest in load_manifests(directory):
-            if not manifest.get("enabled", True):
-                continue
-            last_success = store.latest_step_status(manifest["name"])
-            health = store.get_module_health(tier, manifest["name"])
-            writer.writerow(
-                {
+    def _rows():
+        for tier, directory in TIER_DIRS.items():
+            for manifest in load_manifests(directory):
+                if not manifest.get("enabled", True):
+                    continue
+                last_success = store.latest_step_status(manifest["name"])
+                health = store.get_module_health(tier, manifest["name"])
+                yield {
                     "tier": tier,
                     "name": manifest["name"],
                     "description": manifest.get("description", ""),
@@ -758,10 +834,9 @@ def modules_directory_csv():
                     "status": "error" if last_success is False else "ready",
                     "breaker_tripped": health["tripped"],
                 }
-            )
 
     return StreamingResponse(
-        iter([buffer.getvalue()]),
+        _stream_csv_rows(["tier", "name", "description", "enabled", "status", "breaker_tripped"], _rows()),
         media_type="text/csv",
         headers={"Content-Disposition": "attachment; filename=modules_directory.csv"},
     )
@@ -779,15 +854,14 @@ def modules_directory_json():
     enabled, status, breaker_tripped, one row per enabled module), as a
     downloadable JSON array instead -- mirrors the JSON-mirrors-CSV pattern
     already used by runs.json/memory.json/notifications.json/audit-log.json."""
-    rows = []
-    for tier, directory in TIER_DIRS.items():
-        for manifest in load_manifests(directory):
-            if not manifest.get("enabled", True):
-                continue
-            last_success = store.latest_step_status(manifest["name"])
-            health = store.get_module_health(tier, manifest["name"])
-            rows.append(
-                {
+    def _rows():
+        for tier, directory in TIER_DIRS.items():
+            for manifest in load_manifests(directory):
+                if not manifest.get("enabled", True):
+                    continue
+                last_success = store.latest_step_status(manifest["name"])
+                health = store.get_module_health(tier, manifest["name"])
+                yield {
                     "tier": tier,
                     "name": manifest["name"],
                     "description": manifest.get("description", ""),
@@ -795,10 +869,9 @@ def modules_directory_json():
                     "status": "error" if last_success is False else "ready",
                     "breaker_tripped": health["tripped"],
                 }
-            )
 
     return StreamingResponse(
-        iter([json.dumps(rows, indent=2)]),
+        _stream_json_array(_rows()),
         media_type="application/json",
         headers={"Content-Disposition": "attachment; filename=modules_directory.json"},
     )
@@ -847,16 +920,11 @@ def module_stats():
 def module_stats_csv():
     """Same per-module run statistics as GET /api/modules/stats, as a
     downloadable CSV -- mirrors every other CSV export in this app."""
-    buffer = io.StringIO()
-    writer = _SafeCsvDictWriter(
-        buffer, fieldnames=["tier", "name", "total_runs", "success_count", "success_rate", "avg_duration_seconds"]
-    )
-    writer.writeheader()
-    for row in store.module_stats():
-        writer.writerow(row)
-
     return StreamingResponse(
-        iter([buffer.getvalue()]),
+        _stream_csv_rows(
+            ["tier", "name", "total_runs", "success_count", "success_rate", "avg_duration_seconds"],
+            store.module_stats(),
+        ),
         media_type="text/csv",
         headers={"Content-Disposition": "attachment; filename=module_stats.csv"},
     )
@@ -868,7 +936,7 @@ def module_stats_json():
     downloadable JSON file -- mirrors the JSON-mirrors-CSV pattern already
     used by runs.json, memory.json, notifications.json, and audit-log.json."""
     return StreamingResponse(
-        iter([json.dumps(store.module_stats(), indent=2)]),
+        _stream_json_array(store.module_stats()),
         media_type="application/json",
         headers={"Content-Disposition": "attachment; filename=module_stats.json"},
     )
@@ -986,15 +1054,8 @@ def breakers_csv():
     mirrors every other CSV export in this app. A literal path, not a
     suffix on a dynamic segment, so there's no route-ordering conflict
     with /api/breakers/{tier}/{name}/reset (also a different HTTP method)."""
-    buffer = io.StringIO()
-    writer = _SafeCsvDictWriter(
-        buffer, fieldnames=["tier", "name", "consecutive_failures", "tripped", "updated_at"]
-    )
-    writer.writeheader()
-    for entry in store.all_module_health():
-        writer.writerow(entry)
     return StreamingResponse(
-        iter([buffer.getvalue()]),
+        _stream_csv_rows(["tier", "name", "consecutive_failures", "tripped", "updated_at"], store.all_module_health()),
         media_type="text/csv",
         headers={"Content-Disposition": "attachment; filename=breakers.csv"},
     )
@@ -1007,7 +1068,7 @@ def breakers_json():
     literal path, so no route-ordering conflict with
     /api/breakers/{tier}/{name}/reset (a different HTTP method besides)."""
     return StreamingResponse(
-        iter([json.dumps(store.all_module_health(), indent=2)]),
+        _stream_json_array(store.all_module_health()),
         media_type="application/json",
         headers={"Content-Disposition": "attachment; filename=breakers.json"},
     )
@@ -1240,22 +1301,17 @@ def bulk_export_modules_csv(payload: BulkExportModules):
     doesn't exist is simply absent from the output rather than failing
     the whole export."""
     wanted = {(ref.tier, ref.name) for ref in payload.modules}
-    buffer = io.StringIO()
-    writer = _SafeCsvDictWriter(
-        buffer,
-        fieldnames=["tier", "name", "description", "enabled", "status", "breaker_tripped"],
-    )
-    writer.writeheader()
-    for tier, directory in TIER_DIRS.items():
-        for manifest in load_manifests(directory):
-            if not manifest.get("enabled", True):
-                continue
-            if (tier, manifest["name"]) not in wanted:
-                continue
-            last_success = store.latest_step_status(manifest["name"])
-            health = store.get_module_health(tier, manifest["name"])
-            writer.writerow(
-                {
+
+    def _rows():
+        for tier, directory in TIER_DIRS.items():
+            for manifest in load_manifests(directory):
+                if not manifest.get("enabled", True):
+                    continue
+                if (tier, manifest["name"]) not in wanted:
+                    continue
+                last_success = store.latest_step_status(manifest["name"])
+                health = store.get_module_health(tier, manifest["name"])
+                yield {
                     "tier": tier,
                     "name": manifest["name"],
                     "description": manifest.get("description", ""),
@@ -1263,10 +1319,9 @@ def bulk_export_modules_csv(payload: BulkExportModules):
                     "status": "error" if last_success is False else "ready",
                     "breaker_tripped": health["tripped"],
                 }
-            )
 
     return StreamingResponse(
-        iter([buffer.getvalue()]),
+        _stream_csv_rows(["tier", "name", "description", "enabled", "status", "breaker_tripped"], _rows()),
         media_type="text/csv",
         headers={"Content-Disposition": "attachment; filename=modules_selected.csv"},
     )
@@ -1342,12 +1397,9 @@ def saved_pipelines_csv():
     pipelines = pipeline_store.list_pipelines()
     tags_by_slug = store.all_pipeline_tags()
 
-    buffer = io.StringIO()
-    writer = _SafeCsvDictWriter(buffer, fieldnames=["slug", "name", "description", "tags", "step_count", "modified_at"])
-    writer.writeheader()
-    for p in pipelines:
-        writer.writerow(
-            {
+    def _rows():
+        for p in pipelines:
+            yield {
                 "slug": p.get("slug", ""),
                 "name": p.get("name", ""),
                 "description": p.get("description", ""),
@@ -1355,10 +1407,9 @@ def saved_pipelines_csv():
                 "step_count": len(p.get("steps", [])),
                 "modified_at": datetime.fromtimestamp(p["modified_at"], tz=timezone.utc).isoformat(),
             }
-        )
 
     return StreamingResponse(
-        iter([buffer.getvalue()]),
+        _stream_csv_rows(["slug", "name", "description", "tags", "step_count", "modified_at"], _rows()),
         media_type="text/csv",
         headers={"Content-Disposition": "attachment; filename=pipelines.csv"},
     )
@@ -1886,13 +1937,8 @@ def pipeline_tags_summary():
 def pipeline_tags_summary_csv():
     """Same tag/count directory as GET /api/pipelines/tags-summary, as a
     downloadable CSV -- mirrors the artifact tags-summary CSV export."""
-    buffer = io.StringIO()
-    writer = _SafeCsvDictWriter(buffer, fieldnames=["tag", "count"])
-    writer.writeheader()
-    for entry in pipeline_tags_summary():
-        writer.writerow(entry)
     return StreamingResponse(
-        iter([buffer.getvalue()]),
+        _stream_csv_rows(["tag", "count"], pipeline_tags_summary()),
         media_type="text/csv",
         headers={"Content-Disposition": "attachment; filename=pipeline_tags.csv"},
     )
@@ -1904,7 +1950,7 @@ def pipeline_tags_summary_json():
     downloadable JSON file -- mirrors the artifact tags-summary JSON export
     and the JSON-mirrors-CSV pattern used throughout this app."""
     return StreamingResponse(
-        iter([json.dumps(pipeline_tags_summary(), indent=2)]),
+        _stream_json_array(pipeline_tags_summary()),
         media_type="application/json",
         headers={"Content-Disposition": "attachment; filename=pipeline_tags.json"},
     )
@@ -2066,17 +2112,12 @@ def schedules_csv():
     mirrors every other CSV export in this app. A literal path, not a
     suffix on a dynamic segment, so there's no route-ordering conflict
     with /api/schedules/{schedule_id}."""
-    buffer = io.StringIO()
     fieldnames = [
         "id", "kind", "tier", "name", "label", "schedule_type", "interval_seconds",
         "daily_time", "day_of_week", "enabled", "next_run_at", "last_run_at", "last_status",
     ]
-    writer = _SafeCsvDictWriter(buffer, fieldnames=fieldnames, extrasaction="ignore")
-    writer.writeheader()
-    for schedule in store.list_schedules():
-        writer.writerow(schedule)
     return StreamingResponse(
-        iter([buffer.getvalue()]),
+        _stream_csv_rows(fieldnames, store.list_schedules(), extrasaction="ignore"),
         media_type="text/csv",
         headers={"Content-Disposition": "attachment; filename=schedules.csv"},
     )
@@ -2334,9 +2375,8 @@ def bulk_export_schedules(payload: BulkScheduleIds):
     skipped rather than failing the whole request."""
     all_schedules = {s["id"]: s for s in store.list_schedules()}
     selected = [all_schedules[sid] for sid in payload.schedule_ids if sid in all_schedules]
-    buffer = json.dumps(selected, indent=2)
     return StreamingResponse(
-        iter([buffer]),
+        _stream_json_array(selected),
         media_type="application/json",
         headers={"Content-Disposition": "attachment; filename=schedules_selected.json"},
     )
@@ -2352,18 +2392,12 @@ def bulk_export_schedules_csv(payload: BulkScheduleIds):
     all_schedules = {s["id"]: s for s in store.list_schedules()}
     selected = [all_schedules[sid] for sid in payload.schedule_ids if sid in all_schedules]
 
-    buffer = io.StringIO()
     fieldnames = [
         "id", "kind", "tier", "name", "label", "schedule_type", "interval_seconds",
         "daily_time", "day_of_week", "enabled", "next_run_at", "last_run_at", "last_status",
     ]
-    writer = _SafeCsvDictWriter(buffer, fieldnames=fieldnames, extrasaction="ignore")
-    writer.writeheader()
-    for schedule in selected:
-        writer.writerow(schedule)
-
     return StreamingResponse(
-        iter([buffer.getvalue()]),
+        _stream_csv_rows(fieldnames, selected, extrasaction="ignore"),
         media_type="text/csv",
         headers={"Content-Disposition": "attachment; filename=schedules_selected.csv"},
     )
@@ -2452,20 +2486,18 @@ def recent_runs(limit: int = 10):
 
 @app.get("/api/runs.csv")
 def recent_runs_csv(limit: int = 100):
-    buffer = io.StringIO()
-    writer = _SafeCsvDictWriter(buffer, fieldnames=["id", "started_at", "finished_at", "status", "duration_seconds"])
-    writer.writeheader()
-    for run in store.recent_runs(limit):
-        duration = None
-        if run["started_at"] and run["finished_at"]:
-            duration = round(
-                (datetime.fromisoformat(run["finished_at"]) - datetime.fromisoformat(run["started_at"])).total_seconds(),
-                3,
-            )
-        writer.writerow({**run, "duration_seconds": duration})
+    def _rows():
+        for run in store.recent_runs(limit):
+            duration = None
+            if run["started_at"] and run["finished_at"]:
+                duration = round(
+                    (datetime.fromisoformat(run["finished_at"]) - datetime.fromisoformat(run["started_at"])).total_seconds(),
+                    3,
+                )
+            yield {**run, "duration_seconds": duration}
 
     return StreamingResponse(
-        iter([buffer.getvalue()]),
+        _stream_csv_rows(["id", "started_at", "finished_at", "status", "duration_seconds"], _rows()),
         media_type="text/csv",
         headers={"Content-Disposition": "attachment; filename=run_history.csv"},
     )
@@ -2531,7 +2563,7 @@ def recent_runs_json(limit: int = 100):
     for run in runs:
         run["note"] = notes_by_run.get(run["id"], "")
     return StreamingResponse(
-        iter([json.dumps(runs, indent=2)]),
+        _stream_json_array(runs),
         media_type="application/json",
         headers={"Content-Disposition": "attachment; filename=run_history.json"},
     )
@@ -2626,22 +2658,21 @@ def bulk_export_runs_csv(payload: BulkExportRuns):
     counterpart to the full-list export, mirroring notifications/artifacts/
     schedules/memory's existing bulk-export-csv pattern."""
     wanted = set(payload.run_ids)
-    buffer = io.StringIO()
-    writer = _SafeCsvDictWriter(buffer, fieldnames=["id", "started_at", "finished_at", "status", "duration_seconds"])
-    writer.writeheader()
-    for run in store.recent_runs(limit=100000):
-        if run["id"] not in wanted:
-            continue
-        duration = None
-        if run["started_at"] and run["finished_at"]:
-            duration = round(
-                (datetime.fromisoformat(run["finished_at"]) - datetime.fromisoformat(run["started_at"])).total_seconds(),
-                3,
-            )
-        writer.writerow({**run, "duration_seconds": duration})
+
+    def _rows():
+        for run in store.recent_runs(limit=100000):
+            if run["id"] not in wanted:
+                continue
+            duration = None
+            if run["started_at"] and run["finished_at"]:
+                duration = round(
+                    (datetime.fromisoformat(run["finished_at"]) - datetime.fromisoformat(run["started_at"])).total_seconds(),
+                    3,
+                )
+            yield {**run, "duration_seconds": duration}
 
     return StreamingResponse(
-        iter([buffer.getvalue()]),
+        _stream_csv_rows(["id", "started_at", "finished_at", "status", "duration_seconds"], _rows()),
         media_type="text/csv",
         headers={"Content-Disposition": "attachment; filename=runs_selected.csv"},
     )
@@ -2653,14 +2684,15 @@ def bulk_export_runs_json(payload: BulkExportRuns):
     selection -- the selection-scoped counterpart to the full-list export."""
     wanted = set(payload.run_ids)
     notes_by_run = store.all_run_notes()
-    rows = []
-    for run in store.recent_runs(limit=100000):
-        if run["id"] not in wanted:
-            continue
-        rows.append({**run, "note": notes_by_run.get(run["id"], "")})
+
+    def _rows():
+        for run in store.recent_runs(limit=100000):
+            if run["id"] not in wanted:
+                continue
+            yield {**run, "note": notes_by_run.get(run["id"], "")}
 
     return StreamingResponse(
-        iter([json.dumps(rows, indent=2)]),
+        _stream_json_array(_rows()),
         media_type="application/json",
         headers={"Content-Disposition": "attachment; filename=runs_selected.json"},
     )
@@ -2815,6 +2847,33 @@ def health_check():
     return health.run_health_checks(TIER_DIRS, store)
 
 
+@app.get("/healthz")
+def liveness_check(request: Request):
+    """A cheap liveness probe for a monitoring system or container
+    orchestrator to poll frequently -- distinct from GET /api/health, which
+    also parses every manifest and instantiates every entrypoint (real
+    diagnostic work, too heavy to run on every liveness tick). This only
+    checks that the database answers and the scheduler/watcher/auto-backup
+    threads are still alive, so a thread that silently died gets caught
+    without touching the module registry at all.
+
+    Optionally gated behind a shared secret: if AIBOSS_HEALTH_TOKEN is set
+    in the environment, a request must carry a matching X-Health-Token
+    header or get 401 -- this endpoint reveals internal process state
+    (thread liveness, DB path in error detail), which a deployment that
+    cares about that can choose to lock down. Unset (the default), it's
+    open, matching every other endpoint in this single-user-targeted app."""
+    required_token = os.environ.get("AIBOSS_HEALTH_TOKEN")
+    if required_token and request.headers.get("x-health-token") != required_token:
+        raise HTTPException(status_code=401, detail="Missing or invalid X-Health-Token header.")
+
+    result = health.run_liveness_check(
+        store,
+        {"scheduler": _scheduler, "watcher": _watcher, "auto_backup": _auto_backup},
+    )
+    return JSONResponse(content=result, status_code=200 if result["status"] == "ok" else 503)
+
+
 @app.get("/api/environment")
 def environment_view():
     """Browsable environment + runtime-config view: which declared env vars
@@ -2847,7 +2906,7 @@ def export_backup():
     not a byte-for-byte database copy (see /api/backup/db for that)."""
     snapshot = _build_backup_snapshot()
     return StreamingResponse(
-        iter([json.dumps(snapshot, indent=2, default=str)]),
+        _stream_json_object(snapshot, default=str),
         media_type="application/json",
         headers={"Content-Disposition": "attachment; filename=ai-boss-backup.json"},
     )
@@ -2967,12 +3026,8 @@ def list_auto_backups():
 def list_auto_backups_csv():
     """Same snapshot listing as GET /api/backup/auto/list, as a downloadable
     CSV -- mirroring every other list-to-CSV export in this app."""
-    buffer = io.StringIO()
-    writer = _SafeCsvDictWriter(buffer, fieldnames=["filename", "size_bytes", "modified_at", "protected"])
-    writer.writeheader()
-    writer.writerows(_list_auto_backups())
     return StreamingResponse(
-        iter([buffer.getvalue()]),
+        _stream_csv_rows(["filename", "size_bytes", "modified_at", "protected"], _list_auto_backups()),
         media_type="text/csv",
         headers={"Content-Disposition": "attachment; filename=auto_backup_snapshots.csv"},
     )
@@ -3135,15 +3190,14 @@ def bulk_export_auto_backups_csv(payload: BackupBulkExport):
     the selection is simply absent from the output rather than failing
     the whole export, same as bulk-protect."""
     wanted = set(payload.filenames)
-    buffer = io.StringIO()
-    writer = _SafeCsvDictWriter(buffer, fieldnames=["filename", "size_bytes", "modified_at", "protected"])
-    writer.writeheader()
-    for snapshot in _list_auto_backups():
-        if snapshot["filename"] in wanted:
-            writer.writerow(snapshot)
+
+    def _rows():
+        for snapshot in _list_auto_backups():
+            if snapshot["filename"] in wanted:
+                yield snapshot
 
     return StreamingResponse(
-        iter([buffer.getvalue()]),
+        _stream_csv_rows(["filename", "size_bytes", "modified_at", "protected"], _rows()),
         media_type="text/csv",
         headers={"Content-Disposition": "attachment; filename=auto_backup_snapshots_selected.csv"},
     )
@@ -3220,14 +3274,8 @@ def purge_audit_log(older_than_hours: float = 24):
 def audit_log_csv(limit: int = 1000):
     """Same audit trail as the dashboard panel, as a downloadable CSV --
     mirrors the run-history CSV export pattern (GET /api/runs.csv)."""
-    buffer = io.StringIO()
-    writer = _SafeCsvDictWriter(buffer, fieldnames=["id", "action", "detail", "created_at"])
-    writer.writeheader()
-    for event in store.list_audit_events(limit):
-        writer.writerow(event)
-
     return StreamingResponse(
-        iter([buffer.getvalue()]),
+        _stream_csv_rows(["id", "action", "detail", "created_at"], store.list_audit_events(limit)),
         media_type="text/csv",
         headers={"Content-Disposition": "attachment; filename=audit_log.csv"},
     )
@@ -3247,15 +3295,14 @@ def bulk_export_audit_log_csv(payload: BulkExportAuditLog):
     existing clear-all/age-purge controls are intentionally coarse-grained
     to keep the trail's integrity simple to reason about."""
     wanted = set(payload.ids)
-    buffer = io.StringIO()
-    writer = _SafeCsvDictWriter(buffer, fieldnames=["id", "action", "detail", "created_at"])
-    writer.writeheader()
-    for event in store.list_audit_events(limit=100000):
-        if event["id"] in wanted:
-            writer.writerow(event)
+
+    def _rows():
+        for event in store.list_audit_events(limit=100000):
+            if event["id"] in wanted:
+                yield event
 
     return StreamingResponse(
-        iter([buffer.getvalue()]),
+        _stream_csv_rows(["id", "action", "detail", "created_at"], _rows()),
         media_type="text/csv",
         headers={"Content-Disposition": "attachment; filename=audit_log_selected.csv"},
     )
@@ -3267,9 +3314,8 @@ def audit_log_json(limit: int = 1000):
     file instead -- mirrors the existing runs.json/memory.json/
     notifications.json exports, which each offer their data both plain
     (for the UI to fetch) and as a Content-Disposition attachment."""
-    buffer = json.dumps(store.list_audit_events(limit), indent=2)
     return StreamingResponse(
-        iter([buffer]),
+        _stream_json_array(store.list_audit_events(limit)),
         media_type="application/json",
         headers={"Content-Disposition": "attachment; filename=audit_log.json"},
     )
@@ -3294,14 +3340,8 @@ def notifications_csv(limit: int = 1000):
     """Same alert/notification history as the bell-icon dropdown, as a
     downloadable CSV -- mirrors the audit-log CSV export pattern
     (GET /api/audit-log.csv)."""
-    buffer = io.StringIO()
-    writer = _SafeCsvDictWriter(buffer, fieldnames=["id", "kind", "message", "created_at", "read"])
-    writer.writeheader()
-    for notification in store.list_notifications(limit=limit):
-        writer.writerow(notification)
-
     return StreamingResponse(
-        iter([buffer.getvalue()]),
+        _stream_csv_rows(["id", "kind", "message", "created_at", "read"], store.list_notifications(limit=limit)),
         media_type="text/csv",
         headers={"Content-Disposition": "attachment; filename=notifications.csv"},
     )
@@ -3314,9 +3354,8 @@ def notifications_json(limit: int = 1000):
     memory.json exports, which offer the same data both plain (for the UI
     to fetch) and as a Content-Disposition attachment (for saving to
     disk)."""
-    buffer = json.dumps(store.list_notifications(limit=limit), indent=2)
     return StreamingResponse(
-        iter([buffer]),
+        _stream_json_array(store.list_notifications(limit=limit)),
         media_type="application/json",
         headers={"Content-Disposition": "attachment; filename=notifications.json"},
     )
@@ -3395,14 +3434,14 @@ def bulk_export_notifications(payload: BulkNotificationIds):
     finer-grained counterpart to the full-list GET /api/notifications.csv
     export, for a checkbox multi-select in the Alerts list."""
     wanted = set(payload.notification_ids)
-    buffer = io.StringIO()
-    writer = _SafeCsvDictWriter(buffer, fieldnames=["id", "kind", "message", "created_at", "read"])
-    writer.writeheader()
-    for notification in store.list_notifications(limit=100000):
-        if notification["id"] in wanted:
-            writer.writerow(notification)
+
+    def _rows():
+        for notification in store.list_notifications(limit=100000):
+            if notification["id"] in wanted:
+                yield notification
+
     return StreamingResponse(
-        iter([buffer.getvalue()]),
+        _stream_csv_rows(["id", "kind", "message", "created_at", "read"], _rows()),
         media_type="text/csv",
         headers={"Content-Disposition": "attachment; filename=notifications_selected.csv"},
     )
@@ -3415,9 +3454,14 @@ def bulk_export_notifications_json(payload: BulkNotificationIds):
     checkbox multi-select, mirroring how runs got both formats in
     Batch 47."""
     wanted = set(payload.notification_ids)
-    rows = [n for n in store.list_notifications(limit=100000) if n["id"] in wanted]
+
+    def _rows():
+        for n in store.list_notifications(limit=100000):
+            if n["id"] in wanted:
+                yield n
+
     return StreamingResponse(
-        iter([json.dumps(rows, indent=2)]),
+        _stream_json_array(_rows()),
         media_type="application/json",
         headers={"Content-Disposition": "attachment; filename=notifications_selected.json"},
     )
@@ -3588,18 +3632,16 @@ def memory_csv():
     entries = store.all_memory()
     redacted = redact_secrets({entry["key"]: entry["value"] for entry in entries})
 
-    buffer = io.StringIO()
-    writer = _SafeCsvDictWriter(buffer, fieldnames=["key", "value", "updated_at"])
-    writer.writeheader()
-    for entry in entries:
-        writer.writerow({
-            "key": entry["key"],
-            "value": json.dumps(redacted[entry["key"]]),
-            "updated_at": entry["updated_at"],
-        })
+    def _rows():
+        for entry in entries:
+            yield {
+                "key": entry["key"],
+                "value": json.dumps(redacted[entry["key"]]),
+                "updated_at": entry["updated_at"],
+            }
 
     return StreamingResponse(
-        iter([buffer.getvalue()]),
+        _stream_csv_rows(["key", "value", "updated_at"], _rows()),
         media_type="text/csv",
         headers={"Content-Disposition": "attachment; filename=memory.csv"},
     )
@@ -3614,9 +3656,8 @@ def memory_json():
     same redact_secrets() pass as GET /api/memory and the CSV export."""
     entries = store.all_memory()
     redacted = redact_secrets({entry["key"]: entry["value"] for entry in entries})
-    buffer = json.dumps(redacted, indent=2)
     return StreamingResponse(
-        iter([buffer]),
+        _stream_json_object(redacted),
         media_type="application/json",
         headers={"Content-Disposition": "attachment; filename=memory.json"},
     )
@@ -3726,18 +3767,16 @@ def bulk_export_memory_csv(payload: BulkExportMemoryKeys):
     entries = [entry for entry in store.all_memory() if entry["key"] in wanted]
     redacted = redact_secrets({entry["key"]: entry["value"] for entry in entries})
 
-    buffer = io.StringIO()
-    writer = _SafeCsvDictWriter(buffer, fieldnames=["key", "value", "updated_at"])
-    writer.writeheader()
-    for entry in entries:
-        writer.writerow({
-            "key": entry["key"],
-            "value": json.dumps(redacted[entry["key"]]),
-            "updated_at": entry["updated_at"],
-        })
+    def _rows():
+        for entry in entries:
+            yield {
+                "key": entry["key"],
+                "value": json.dumps(redacted[entry["key"]]),
+                "updated_at": entry["updated_at"],
+            }
 
     return StreamingResponse(
-        iter([buffer.getvalue()]),
+        _stream_csv_rows(["key", "value", "updated_at"], _rows()),
         media_type="text/csv",
         headers={"Content-Disposition": "attachment; filename=memory_selected.csv"},
     )
@@ -3754,13 +3793,12 @@ def bulk_export_memory_json(payload: BulkExportMemoryKeys):
     entries = [entry for entry in store.all_memory() if entry["key"] in wanted]
     redacted = redact_secrets({entry["key"]: entry["value"] for entry in entries})
 
-    rows = [
-        {"key": entry["key"], "value": redacted[entry["key"]], "updated_at": entry["updated_at"]}
-        for entry in entries
-    ]
+    def _rows():
+        for entry in entries:
+            yield {"key": entry["key"], "value": redacted[entry["key"]], "updated_at": entry["updated_at"]}
 
     return StreamingResponse(
-        iter([json.dumps(rows, indent=2)]),
+        _stream_json_array(_rows()),
         media_type="application/json",
         headers={"Content-Disposition": "attachment; filename=memory_selected.json"},
     )
@@ -3917,19 +3955,17 @@ def artifacts_csv():
     files = ingestion.list_artifacts()
     tags_by_file = store.all_artifact_tags()
 
-    buffer = io.StringIO()
-    writer = _SafeCsvDictWriter(buffer, fieldnames=["filename", "size_bytes", "tags", "modified_at"])
-    writer.writeheader()
-    for f in files:
-        writer.writerow({
-            "filename": f["name"],
-            "size_bytes": f["size_bytes"],
-            "tags": ";".join(tags_by_file.get(f["name"], [])),
-            "modified_at": datetime.fromtimestamp(f["modified_at"], tz=timezone.utc).isoformat(),
-        })
+    def _rows():
+        for f in files:
+            yield {
+                "filename": f["name"],
+                "size_bytes": f["size_bytes"],
+                "tags": ";".join(tags_by_file.get(f["name"], [])),
+                "modified_at": datetime.fromtimestamp(f["modified_at"], tz=timezone.utc).isoformat(),
+            }
 
     return StreamingResponse(
-        iter([buffer.getvalue()]),
+        _stream_csv_rows(["filename", "size_bytes", "tags", "modified_at"], _rows()),
         media_type="text/csv",
         headers={"Content-Disposition": "attachment; filename=artifacts.csv"},
     )
@@ -3947,18 +3983,17 @@ def artifacts_json():
     files = ingestion.list_artifacts()
     tags_by_file = store.all_artifact_tags()
 
-    rows = [
-        {
-            "filename": f["name"],
-            "size_bytes": f["size_bytes"],
-            "tags": tags_by_file.get(f["name"], []),
-            "modified_at": datetime.fromtimestamp(f["modified_at"], tz=timezone.utc).isoformat(),
-        }
-        for f in files
-    ]
+    def _rows():
+        for f in files:
+            yield {
+                "filename": f["name"],
+                "size_bytes": f["size_bytes"],
+                "tags": tags_by_file.get(f["name"], []),
+                "modified_at": datetime.fromtimestamp(f["modified_at"], tz=timezone.utc).isoformat(),
+            }
 
     return StreamingResponse(
-        iter([json.dumps(rows, indent=2)]),
+        _stream_json_array(_rows()),
         media_type="application/json",
         headers={"Content-Disposition": "attachment; filename=artifacts.json"},
     )
@@ -3989,13 +4024,8 @@ def artifact_tags_summary_csv():
     downloadable CSV -- mirrors every other CSV export in this app. A
     literal path, not a suffix on a dynamic segment, so there's no
     route-ordering conflict with any /api/artifacts/{name}-style route."""
-    buffer = io.StringIO()
-    writer = _SafeCsvDictWriter(buffer, fieldnames=["tag", "count"])
-    writer.writeheader()
-    for entry in artifact_tags_summary():
-        writer.writerow(entry)
     return StreamingResponse(
-        iter([buffer.getvalue()]),
+        _stream_csv_rows(["tag", "count"], artifact_tags_summary()),
         media_type="text/csv",
         headers={"Content-Disposition": "attachment; filename=artifact_tags.csv"},
     )
@@ -4009,7 +4039,7 @@ def artifact_tags_summary_json():
     audit-log.json). A literal path, so no route-ordering conflict with any
     /api/artifacts/{name}-style route."""
     return StreamingResponse(
-        iter([json.dumps(artifact_tags_summary(), indent=2)]),
+        _stream_json_array(artifact_tags_summary()),
         media_type="application/json",
         headers={"Content-Disposition": "attachment; filename=artifact_tags.json"},
     )
@@ -4086,21 +4116,19 @@ def bulk_export_artifacts_csv(payload: BulkDownloadArtifacts):
     wanted = {Path(name).name for name in payload.filenames}
     tags_by_file = store.all_artifact_tags()
 
-    buffer = io.StringIO()
-    writer = _SafeCsvDictWriter(buffer, fieldnames=["filename", "size_bytes", "tags", "modified_at"])
-    writer.writeheader()
-    for f in ingestion.list_artifacts():
-        if f["name"] not in wanted:
-            continue
-        writer.writerow({
-            "filename": f["name"],
-            "size_bytes": f["size_bytes"],
-            "tags": ";".join(tags_by_file.get(f["name"], [])),
-            "modified_at": datetime.fromtimestamp(f["modified_at"], tz=timezone.utc).isoformat(),
-        })
+    def _rows():
+        for f in ingestion.list_artifacts():
+            if f["name"] not in wanted:
+                continue
+            yield {
+                "filename": f["name"],
+                "size_bytes": f["size_bytes"],
+                "tags": ";".join(tags_by_file.get(f["name"], [])),
+                "modified_at": datetime.fromtimestamp(f["modified_at"], tz=timezone.utc).isoformat(),
+            }
 
     return StreamingResponse(
-        iter([buffer.getvalue()]),
+        _stream_csv_rows(["filename", "size_bytes", "tags", "modified_at"], _rows()),
         media_type="text/csv",
         headers={"Content-Disposition": "attachment; filename=artifacts_selected.csv"},
     )

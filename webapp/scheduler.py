@@ -16,7 +16,10 @@ import threading
 from datetime import datetime, timedelta, timezone
 from typing import Callable
 
+from engine.logging_config import get_logger
 from engine.state_store import StateStore
+
+logger = get_logger(__name__)
 
 
 def next_daily_run_at(daily_time: str, after: datetime) -> datetime:
@@ -127,6 +130,12 @@ class Scheduler:
         if self._thread is not None:
             self._thread.join(timeout=5.0)
 
+    def is_alive(self) -> bool:
+        """Whether the polling thread is up and running -- used by the
+        liveness health check to catch a scheduler thread that's died
+        without anyone tearing it down deliberately."""
+        return self._thread is not None and self._thread.is_alive()
+
     def _loop(self) -> None:
         while not self._stop.is_set():
             self._tick()
@@ -140,8 +149,24 @@ class Scheduler:
             try:
                 self.trigger(schedule)
                 status = "triggered"
+                # "schedule_name", not "name" -- the latter is a reserved
+                # LogRecord attribute (the logger's own name) that extra={}
+                # can't override.
+                logger.info(
+                    "schedule triggered",
+                    extra={"schedule_id": schedule["id"], "kind": schedule["kind"], "schedule_name": schedule["name"]},
+                )
             except Exception as exc:
                 status = f"error: {exc}"
+                logger.warning(
+                    "schedule trigger failed",
+                    extra={
+                        "schedule_id": schedule["id"],
+                        "kind": schedule["kind"],
+                        "schedule_name": schedule["name"],
+                        "error": str(exc),
+                    },
+                )
                 if self.on_error is not None:
                     self.on_error(schedule, str(exc))
             schedule_type = schedule.get("schedule_type")

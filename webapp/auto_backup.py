@@ -12,6 +12,10 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Callable, Optional
 
+from engine.logging_config import get_logger
+
+logger = get_logger(__name__)
+
 BACKUP_FILENAME_FORMAT = "backup_%Y%m%dT%H%M%SZ.json"
 
 
@@ -70,6 +74,11 @@ class AutoBackup:
         if self._thread is not None:
             self._thread.join(timeout=5.0)
 
+    def is_alive(self) -> bool:
+        """Whether the timer thread is up and running -- used by the
+        liveness health check."""
+        return self._thread is not None and self._thread.is_alive()
+
     def run_now(self) -> str:
         """Write a snapshot immediately, outside the timer's own interval
         check -- used by the manual "back up now" trigger and by tests."""
@@ -101,11 +110,13 @@ class AutoBackup:
                 return
         try:
             self.run_now()
+            logger.info("auto backup snapshot written", extra={"last_backup_at": self.last_backup_at})
         except Exception as exc:
             # A write failure here (disk full, permissions, etc.) must not
             # kill the background thread's loop -- swallow it, but surface
             # it via on_failure so the caller can raise a notification, and
             # leave last_backup_at untouched so the next tick retries.
+            logger.error("auto backup snapshot failed", extra={"error": str(exc)})
             if self.on_failure is not None:
                 self.on_failure(exc)
 
