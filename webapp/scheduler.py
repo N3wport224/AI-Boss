@@ -50,6 +50,30 @@ def next_weekly_run_at(day_of_week: int, daily_time: str, after: datetime) -> da
     return candidate.astimezone(timezone.utc)
 
 
+def next_n_daily_run_ats(daily_time: str, after: datetime, count: int) -> list[datetime]:
+    """The next `count` fire times for a daily schedule, each strictly after
+    the previous -- chains next_daily_run_at() forward one day at a time
+    (feeding each result back in as the new `after` rolls it forward by
+    exactly one day, since the hour/minute already match)."""
+    results = []
+    current = after
+    for _ in range(count):
+        current = next_daily_run_at(daily_time, current)
+        results.append(current)
+    return results
+
+
+def next_n_weekly_run_ats(day_of_week: int, daily_time: str, after: datetime, count: int) -> list[datetime]:
+    """Same idea as next_n_daily_run_ats() but for a weekly schedule --
+    chains next_weekly_run_at() forward one week at a time."""
+    results = []
+    current = after
+    for _ in range(count):
+        current = next_weekly_run_at(day_of_week, daily_time, current)
+        results.append(current)
+    return results
+
+
 class Scheduler:
     def __init__(
         self,

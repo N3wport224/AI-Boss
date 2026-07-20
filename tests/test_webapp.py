@@ -463,6 +463,42 @@ def test_bulk_duplicate_a_daily_schedule_recomputes_its_own_next_occurrence():
     client.post("/api/schedules/bulk-delete", json={"schedule_ids": [original_id, clone["id"]]})
 
 
+def test_next_occurrences_returns_evenly_spaced_future_fire_times_for_a_daily_schedule():
+    create_res = client.post(
+        "/api/schedules",
+        json={
+            "kind": "module",
+            "tier": "automation",
+            "name": "fetch_raw_metrics",
+            "inputs": {},
+            "schedule_type": "daily",
+            "daily_time": "23:58",
+        },
+    )
+    schedule_id = create_res.json()["id"]
+
+    res = client.get(f"/api/schedules/{schedule_id}/next-occurrences?count=3")
+    assert res.status_code == 200
+    occurrences = res.json()["occurrences"]
+    assert len(occurrences) == 3
+    parsed = [datetime.fromisoformat(o) for o in occurrences]
+    assert parsed[0] < parsed[1] < parsed[2]
+
+    client.post("/api/schedules/bulk-delete", json={"schedule_ids": [schedule_id]})
+
+
+def test_next_occurrences_400s_for_an_interval_or_once_schedule():
+    schedule_id = _create_test_schedule()
+    res = client.get(f"/api/schedules/{schedule_id}/next-occurrences")
+    assert res.status_code == 400
+    client.post("/api/schedules/bulk-delete", json={"schedule_ids": [schedule_id]})
+
+
+def test_next_occurrences_404s_for_an_unknown_schedule():
+    res = client.get("/api/schedules/9999999/next-occurrences")
+    assert res.status_code == 404
+
+
 def test_bulk_delete_schedules_removes_every_selected_one():
     id_a = _create_test_schedule()
     id_b = _create_test_schedule()

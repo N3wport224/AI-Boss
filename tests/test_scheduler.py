@@ -2,7 +2,7 @@ import time
 from datetime import datetime, timedelta, timezone
 
 from engine.state_store import StateStore
-from webapp.scheduler import Scheduler, next_daily_run_at, next_weekly_run_at
+from webapp.scheduler import Scheduler, next_daily_run_at, next_n_daily_run_ats, next_n_weekly_run_ats, next_weekly_run_at
 
 
 def test_scheduler_fires_due_schedules_and_reschedules_next_run(tmp_path):
@@ -159,6 +159,34 @@ def test_next_weekly_run_at_picks_the_correct_day_of_week():
     assert result.astimezone().weekday() == target_day
     delta = result - after
     assert timedelta(days=2, hours=23) <= delta <= timedelta(days=3, hours=1)
+
+
+def test_next_n_daily_run_ats_returns_evenly_spaced_future_occurrences():
+    after = datetime.now(timezone.utc)
+    local_after = after.astimezone()
+    target = (local_after + timedelta(hours=2)).strftime("%H:%M")
+
+    occurrences = next_n_daily_run_ats(target, after, 3)
+
+    assert len(occurrences) == 3
+    assert all(occurrences[i] < occurrences[i + 1] for i in range(2))
+    for i in range(1, 3):
+        gap = occurrences[i] - occurrences[i - 1]
+        assert timedelta(hours=23, minutes=58) <= gap <= timedelta(hours=24, minutes=1)
+
+
+def test_next_n_weekly_run_ats_returns_evenly_spaced_future_occurrences():
+    after = datetime.now(timezone.utc).astimezone().replace(hour=12, minute=0, second=0, microsecond=0).astimezone(timezone.utc)
+    local_after = after.astimezone()
+    target_time = (local_after + timedelta(hours=2)).strftime("%H:%M")
+    target_day = local_after.weekday()
+
+    occurrences = next_n_weekly_run_ats(target_day, target_time, after, 3)
+
+    assert len(occurrences) == 3
+    for i in range(1, 3):
+        gap = occurrences[i] - occurrences[i - 1]
+        assert timedelta(days=6, hours=23) <= gap <= timedelta(days=7, hours=1)
 
 
 def test_scheduler_fires_a_weekly_schedule_whose_day_and_time_are_already_due(tmp_path):

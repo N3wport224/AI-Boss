@@ -134,6 +134,8 @@
         <div class="ingest-url-row">
           <input type="text" id="ingest-url-input" class="artifact-search-input" placeholder="…or paste a URL to a .csv, .json, or .xlsx file" />
           <button id="ingest-url-btn" class="btn btn-secondary btn-small" type="button">Fetch &amp; Ingest</button>
+          <label class="btn btn-secondary btn-small" for="artifact-import-zip-input" title="Ingest every CSV/JSON/XLSX/PDF file inside a zip bundle at once">Import zip…</label>
+          <input type="file" id="artifact-import-zip-input" accept=".zip" hidden />
         </div>
         <div id="ingestion-result" class="log-tabs-wrap hidden"></div>
 
@@ -456,6 +458,8 @@
         <button id="auto-backup-save-btn" class="btn btn-secondary btn-small" type="button">Save</button>
         <button id="auto-backup-run-now-btn" class="btn btn-secondary btn-small" type="button">Back up now</button>
         <span id="auto-backup-status" class="runs-purge-label"></span>
+        <a class="btn btn-secondary btn-small" href="/api/backup/auto/list.csv" download title="Export the snapshot list (filename, size, modified time) as CSV">⬇ Export snapshots CSV</a>
+        <a class="btn btn-secondary btn-small" href="/api/backup/auto/download-all" download title="Download every automatic backup snapshot as a single zip">⬇ Download all as zip</a>
       </div>
       <div id="auto-backup-snapshots-list" class="runs-empty"></div>
     </section>

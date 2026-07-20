@@ -913,6 +913,12 @@ body.density-compact .tier-section {
   color: var(--text-dim);
 }
 
+.schedule-next-occurrences {
+  font-size: 0.75rem;
+  color: var(--text-dim);
+  margin-top: 2px;
+}
+
 .schedule-row-label {
   display: inline-block;
   font-size: 0.75rem;

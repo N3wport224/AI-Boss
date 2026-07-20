@@ -1025,3 +1025,72 @@ def test_bulk_export_artifacts_csv_is_header_only_on_an_empty_selection():
     res = client.post("/api/artifacts/bulk-export-csv", json={"filenames": []})
     assert res.status_code == 200
     assert res.text.strip().splitlines() == ["filename,size_bytes,tags,modified_at"]
+
+
+# ---- Batch 34: bulk import artifacts from a zip bundle ----
+
+
+def _build_artifacts_zip(entries):
+    import io as _io
+    import zipfile as _zipfile
+
+    buffer = _io.BytesIO()
+    with _zipfile.ZipFile(buffer, "w") as zf:
+        for filename, content in entries.items():
+            zf.writestr(filename, content)
+    return buffer.getvalue()
+
+
+def test_import_artifacts_zip_ingests_every_recognized_file_type():
+    zip_bytes = _build_artifacts_zip({
+        "zipart_a.csv": "x,y\n8001,8002\n",
+        "zipart_b.json": '[{"x": 8003, "y": 8004}]',
+    })
+    res = client.post("/api/artifacts/import-zip", files={"file": ("bundle.zip", zip_bytes, "application/zip")})
+    assert res.status_code == 200
+    body = res.json()
+    assert set(body["imported"]) == {"zipart_a.csv", "zipart_b.json"}
+    assert body["duplicates"] == []
+    assert body["failed"] == []
+
+    names = {f["name"] for f in client.get("/api/artifacts").json()}
+    assert any(n.endswith("zipart_a.csv") for n in names)
+    assert any(n.endswith("zipart_b.json") for n in names)
+
+
+def test_import_artifacts_zip_ignores_unrecognized_members():
+    zip_bytes = _build_artifacts_zip({
+        "zipart_c.csv": "x,y\n8005,8006\n",
+        "readme.txt": "not an ingestible type",
+    })
+    res = client.post("/api/artifacts/import-zip", files={"file": ("bundle.zip", zip_bytes, "application/zip")})
+    assert res.status_code == 200
+    assert res.json()["imported"] == ["zipart_c.csv"]
+
+
+def test_import_artifacts_zip_reports_duplicates_without_blocking_the_rest():
+    csv_bytes = "x,y\n8007,8008\n"
+    client.post("/api/ingest/csv", files={"file": ("zipart_dup_source.csv", csv_bytes, "text/csv")})
+
+    zip_bytes = _build_artifacts_zip({
+        "zipart_dup_source.csv": csv_bytes,  # identical content -> duplicate
+        "zipart_new.csv": "x,y\n8009,8010\n",
+    })
+    res = client.post("/api/artifacts/import-zip", files={"file": ("bundle.zip", zip_bytes, "application/zip")})
+    assert res.status_code == 200
+    body = res.json()
+    assert body["imported"] == ["zipart_new.csv"]
+    assert body["duplicates"] == ["zipart_dup_source.csv"]
+    assert body["failed"] == []
+
+
+def test_import_artifacts_zip_rejects_a_non_zip_file():
+    res = client.post("/api/artifacts/import-zip", files={"file": ("not_a_zip.zip", b"just some bytes", "application/zip")})
+    assert res.status_code == 400
+    assert "zip" in res.json()["detail"].lower()
+
+
+def test_import_artifacts_zip_400s_when_no_recognized_files_are_present():
+    zip_bytes = _build_artifacts_zip({"readme.txt": "nothing ingestible here"})
+    res = client.post("/api/artifacts/import-zip", files={"file": ("bundle.zip", zip_bytes, "application/zip")})
+    assert res.status_code == 400

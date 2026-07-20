@@ -3362,6 +3362,33 @@ document.getElementById("pipeline-import-zip-input").addEventListener("change", 
   e.target.value = "";
 });
 
+document.getElementById("artifact-import-zip-input").addEventListener("change", async (e) => {
+  const file = e.target.files[0];
+  if (!file) return;
+
+  const formData = new FormData();
+  formData.append("file", file);
+  try {
+    const res = await fetch("/api/artifacts/import-zip", { method: "POST", body: formData });
+    const body = await res.json();
+    if (!res.ok) {
+      showToast(`Import failed: ${body.detail || "unknown error"}`, "error");
+      return;
+    }
+    const parts = [`Imported ${body.imported.length} file(s) from zip`];
+    if (body.duplicates.length) parts.push(`${body.duplicates.length} duplicate(s)`);
+    if (body.failed.length) parts.push(`${body.failed.length} failed`);
+    showToast(parts.join(", ") + ".", body.failed.length ? "error" : "success");
+    if (body.failed.length) {
+      console.warn("Artifact zip import failures:", body.failed);
+    }
+    await loadArtifacts();
+  } catch (err) {
+    showToast(`Import failed: ${err}`, "error");
+  }
+  e.target.value = "";
+});
+
 const pipelineImportUrlInput = document.getElementById("pipeline-import-url-input");
 const pipelineImportUrlBtn = document.getElementById("pipeline-import-url-btn");
 
@@ -5490,6 +5517,10 @@ function renderSchedulesList() {
       const labelBadge = s.label
         ? `<span class="schedule-row-label" data-schedule-label-text="${s.id}">${escapeHtml(s.label)}</span>`
         : "";
+      const previewBtn =
+        s.schedule_type === "daily" || s.schedule_type === "weekly"
+          ? `<button class="btn btn-secondary btn-small" data-schedule-preview="${s.id}" title="Show the next few times this schedule will fire">Preview next</button>`
+          : "";
       return `
         <div class="schedule-row" id="schedule-row__${s.id}">
           <input type="checkbox" class="schedule-select-checkbox" data-schedule-id="${s.id}" ${checked} />
@@ -5497,11 +5528,13 @@ function renderSchedulesList() {
             <strong>${escapeHtml(targetLabel)}</strong>
             ${labelBadge}
             <span class="schedule-row-meta">${cadence} · next ${s.enabled ? timeUntil(s.next_run_at) : "paused"} · ${status}</span>
+            <div class="schedule-next-occurrences hidden" data-next-occurrences-for="${s.id}"></div>
           </div>
           <div class="schedule-row-actions">
             ${favoriteButtonHtml(`schedule::${s.id}`)}
             <button class="btn btn-secondary btn-small" data-schedule-edit-label="${s.id}">${s.label ? "Edit label" : "Add label"}</button>
             <button class="btn btn-secondary btn-small" data-schedule-run-now="${s.id}" title="Run this schedule's target once, right now, without changing its next scheduled run">▶ Run now</button>
+            ${previewBtn}
             <button class="btn btn-secondary btn-small" data-schedule-toggle="${s.id}" data-enabled="${s.enabled}">
               ${s.enabled ? "Pause" : "Resume"}
             </button>
@@ -5568,6 +5601,26 @@ function renderSchedulesList() {
         showToast(`Run now failed: ${err.message}`, "error");
       } finally {
         btn.disabled = false;
+      }
+    });
+  });
+
+  schedulesListEl.querySelectorAll("[data-schedule-preview]").forEach((btn) => {
+    btn.addEventListener("click", async () => {
+      const id = btn.dataset.schedulePreview;
+      const panel = schedulesListEl.querySelector(`[data-next-occurrences-for="${id}"]`);
+      if (!panel.classList.contains("hidden")) {
+        panel.classList.add("hidden");
+        return;
+      }
+      try {
+        const res = await fetch(`/api/schedules/${id}/next-occurrences?count=5`);
+        const body = await res.json();
+        if (!res.ok) throw new Error(body.detail || `HTTP ${res.status}`);
+        panel.textContent = "Next: " + body.occurrences.map((iso) => new Date(iso).toLocaleString()).join(" · ");
+        panel.classList.remove("hidden");
+      } catch (err) {
+        showToast(`Could not load next occurrences: ${err.message}`, "error");
       }
     });
   });

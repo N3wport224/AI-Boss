@@ -994,6 +994,26 @@ A few things live in the header/subheader on every page load:
   list as a `.json` file (distinct from the existing single-run JSON
   export, which downloads one run's full nested detail).
 
+## Backup snapshot CSV/zip exports, bulk artifact import, and a schedule preview
+
+- **Export the automatic backup snapshot list to CSV** — an **Export
+  snapshots CSV** link joins the JSON listing added last batch, downloading
+  filename/size/modified-time for every snapshot, mirroring every other
+  list-to-CSV export in this app.
+- **Bulk import artifacts from a zip bundle** — an **Import zip…** control
+  in the ingestion panel ingests every CSV/JSON/XLSX/PDF file inside a zip
+  at once through the same per-type ingestion path (and content-hash
+  dedupe) as a direct single-file upload, mirroring the existing bulk
+  pipeline zip import.
+- **Download all automatic backup snapshots as a zip** — a **Download all
+  as zip** link bundles every snapshot in `backups/` into a single
+  download, for offline safekeeping of the whole automatic-backup history
+  at once.
+- **Next-occurrences preview for daily/weekly schedules** — a **Preview
+  next** button on any daily or weekly schedule shows its next 5 fire
+  times inline, computed by chaining the existing next-run-time helpers
+  forward.
+
 ## Tech stack
 
 - **Language:** Python 3.11+ — first-class async/sync support and native SDKs

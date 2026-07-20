@@ -46,7 +46,7 @@ from .templates import PIPELINE_TEMPLATES
 from .events import RunEventBus
 from .ratelimit import RateLimiter
 from .auto_backup import AutoBackup
-from .scheduler import Scheduler, next_daily_run_at, next_weekly_run_at
+from .scheduler import Scheduler, next_daily_run_at, next_n_daily_run_ats, next_n_weekly_run_ats, next_weekly_run_at
 from .watcher import FilesystemWatcher, WATCH_DIR, ensure_watch_dir
 
 ROOT = Path(__file__).resolve().parent.parent
@@ -1776,6 +1776,32 @@ def run_schedule_now(schedule_id: int):
     return {"triggered": True}
 
 
+@app.get("/api/schedules/{schedule_id}/next-occurrences")
+def schedule_next_occurrences(schedule_id: int, count: int = 5):
+    """The next `count` fire times for a daily or weekly schedule -- unlike
+    an interval schedule (whose next occurrences are just a trivial
+    now + n*interval) or a one-time schedule (which only ever fires once),
+    daily/weekly cadences are the only kind where "what are my next few
+    fire times" is genuinely useful to preview before it happens."""
+    schedule = next((s for s in store.list_schedules() if s["id"] == schedule_id), None)
+    if schedule is None:
+        raise HTTPException(status_code=404, detail=f"No schedule with id {schedule_id}.")
+    if schedule["schedule_type"] not in ("daily", "weekly"):
+        raise HTTPException(
+            status_code=400,
+            detail="next-occurrences is only meaningful for 'daily' or 'weekly' schedules.",
+        )
+    if count < 1:
+        raise HTTPException(status_code=400, detail="count must be at least 1.")
+
+    now = datetime.now(timezone.utc)
+    if schedule["schedule_type"] == "daily":
+        occurrences = next_n_daily_run_ats(schedule["daily_time"], now, count)
+    else:
+        occurrences = next_n_weekly_run_ats(schedule["day_of_week"], schedule["daily_time"], now, count)
+    return {"occurrences": [dt.isoformat() for dt in occurrences]}
+
+
 class BulkScheduleIds(BaseModel):
     schedule_ids: list[int]
 
@@ -2357,12 +2383,7 @@ async def restore_backup(file: UploadFile = File(...)):
     return counts
 
 
-@app.get("/api/backup/auto/list")
-def list_auto_backups():
-    """The automatic-backup snapshots currently sitting in backups/ --
-    newest first -- so the dashboard can offer a one-click restore from one
-    of them without the user having to find and re-upload the file by
-    hand."""
+def _list_auto_backups() -> list[dict]:
     if not BACKUPS_DIR.exists():
         return []
     files = sorted(BACKUPS_DIR.glob("backup_*.json"), key=lambda p: p.name, reverse=True)
@@ -2370,6 +2391,56 @@ def list_auto_backups():
         {"filename": f.name, "size_bytes": f.stat().st_size, "modified_at": datetime.fromtimestamp(f.stat().st_mtime, timezone.utc).isoformat()}
         for f in files
     ]
+
+
+@app.get("/api/backup/auto/list")
+def list_auto_backups():
+    """The automatic-backup snapshots currently sitting in backups/ --
+    newest first -- so the dashboard can offer a one-click restore from one
+    of them without the user having to find and re-upload the file by
+    hand."""
+    return _list_auto_backups()
+
+
+@app.get("/api/backup/auto/list.csv")
+def list_auto_backups_csv():
+    """Same snapshot listing as GET /api/backup/auto/list, as a downloadable
+    CSV -- mirroring every other list-to-CSV export in this app."""
+    buffer = io.StringIO()
+    writer = csv.DictWriter(buffer, fieldnames=["filename", "size_bytes", "modified_at"])
+    writer.writeheader()
+    writer.writerows(_list_auto_backups())
+    return StreamingResponse(
+        iter([buffer.getvalue()]),
+        media_type="text/csv",
+        headers={"Content-Disposition": "attachment; filename=auto_backup_snapshots.csv"},
+    )
+
+
+@app.get("/api/backup/auto/download-all")
+def download_all_auto_backups():
+    """Every automatic-backup snapshot currently in backups/ bundled into a
+    single zip -- for offline safekeeping of the whole automatic-backup
+    history at once, mirroring how POST /api/artifacts/bulk-download zips a
+    selection of artifacts. Unlike that endpoint this one is a plain GET
+    with no selection to make (there's exactly one thing to download: all
+    of it), so no request body or query string is needed. 404s if
+    backups/ is empty rather than returning an empty zip."""
+    snapshots = _list_auto_backups()
+    if not snapshots:
+        raise HTTPException(status_code=404, detail="No automatic backup snapshots to download yet.")
+
+    buffer = io.BytesIO()
+    with zipfile.ZipFile(buffer, "w", zipfile.ZIP_DEFLATED) as zf:
+        for snapshot in snapshots:
+            zf.write(BACKUPS_DIR / snapshot["filename"], arcname=snapshot["filename"])
+
+    buffer.seek(0)
+    return StreamingResponse(
+        buffer,
+        media_type="application/zip",
+        headers={"Content-Disposition": "attachment; filename=auto_backup_snapshots.zip"},
+    )
 
 
 def _resolve_auto_backup_path(filename: str) -> Path:
@@ -2999,6 +3070,62 @@ def bulk_export_artifacts_csv(payload: BulkDownloadArtifacts):
         media_type="text/csv",
         headers={"Content-Disposition": "attachment; filename=artifacts_selected.csv"},
     )
+
+
+_ZIP_INGEST_DISPATCH = {**_URL_INGEST_DISPATCH, ".pdf": ingestion.ingest_pdf_bytes}
+
+
+@app.post("/api/artifacts/import-zip")
+async def import_artifacts_zip(file: UploadFile = File(...)):
+    """Ingest every CSV/JSON/XLSX/PDF file inside a zip bundle at once --
+    the artifact-side counterpart to POST /api/pipelines/import-zip, for
+    bulk-loading a folder's worth of files without dragging them in one at
+    a time. Each member is dispatched by its own extension through the
+    exact same per-type ingest_*_bytes() function (and therefore the same
+    content-hash dedupe) as a direct single-file upload; one bad or
+    duplicate file doesn't block the rest of the batch. Any member whose
+    extension isn't csv/json/xlsx/pdf is silently skipped rather than
+    reported as a failure -- a zip full of a user's other files shouldn't
+    read as broken."""
+    try:
+        data = await ingestion.read_upload_with_limit(file)
+    except ingestion.UploadTooLargeError as exc:
+        raise HTTPException(status_code=413, detail=str(exc))
+
+    try:
+        zf = zipfile.ZipFile(io.BytesIO(data))
+    except zipfile.BadZipFile:
+        raise HTTPException(status_code=400, detail="Could not read this file as a zip archive.")
+
+    imported = []
+    duplicates = []
+    failed = []
+    for name in zf.namelist():
+        if name.endswith("/"):
+            continue  # directory entry
+        suffix = Path(name).suffix.lower()
+        ingest_fn = _ZIP_INGEST_DISPATCH.get(suffix)
+        if ingest_fn is None:
+            continue
+        member_name = Path(name).name  # strip any folder path inside the zip
+        try:
+            result = ingest_fn(member_name, zf.read(name), store)
+        except Exception as exc:
+            failed.append({"name": name, "error": str(exc)})
+            continue
+        if result.get("duplicate"):
+            duplicates.append(name)
+        else:
+            imported.append(name)
+
+    if not imported and not duplicates and not failed:
+        raise HTTPException(status_code=400, detail="No .csv, .json, .xlsx, or .pdf files found in this zip.")
+
+    store.record_audit_event(
+        "artifacts_bulk_import_zip",
+        f"Imported {len(imported)} artifact(s) from a zip bundle ({len(duplicates)} duplicate(s), {len(failed)} failed).",
+    )
+    return {"imported": imported, "duplicates": duplicates, "failed": failed}
 
 
 @app.get("/api/artifacts/search")

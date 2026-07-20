@@ -610,6 +610,78 @@ def test_delete_auto_backup_snapshot_404s_for_an_unknown_or_unsafe_filename():
     assert res.status_code == 404
 
 
+def test_auto_backup_list_csv_export_has_a_header_and_matches_the_json_list():
+    from webapp.main import BACKUPS_DIR, _auto_backup
+    import shutil
+
+    shutil.rmtree(BACKUPS_DIR, ignore_errors=True)
+    try:
+        client.post("/api/backup/auto/run-now")
+        json_list = client.get("/api/backup/auto/list").json()
+        assert len(json_list) == 1
+
+        csv_res = client.get("/api/backup/auto/list.csv")
+        assert csv_res.status_code == 200
+        assert csv_res.headers["content-type"].startswith("text/csv")
+
+        lines = csv_res.text.strip().splitlines()
+        assert lines[0] == "filename,size_bytes,modified_at"
+        assert len(lines) == 2
+        assert lines[1].startswith(json_list[0]["filename"])
+    finally:
+        _auto_backup.configure(enabled=False, interval_hours=24.0, keep_count=7)
+        shutil.rmtree(BACKUPS_DIR, ignore_errors=True)
+
+
+def test_auto_backup_list_csv_export_is_just_a_header_when_empty():
+    from webapp.main import BACKUPS_DIR
+    import shutil
+
+    shutil.rmtree(BACKUPS_DIR, ignore_errors=True)
+    res = client.get("/api/backup/auto/list.csv")
+    assert res.status_code == 200
+    assert res.text.strip().splitlines() == ["filename,size_bytes,modified_at"]
+
+
+def test_download_all_auto_backups_bundles_every_snapshot_into_a_zip():
+    import io
+    import zipfile
+
+    from webapp.main import BACKUPS_DIR, _auto_backup
+    import shutil
+
+    shutil.rmtree(BACKUPS_DIR, ignore_errors=True)
+    try:
+        client.post("/api/backup/auto/run-now")
+        import time as _time
+
+        _time.sleep(1.1)  # filenames are second-resolution timestamps -- force a distinct second file
+        client.post("/api/backup/auto/run-now")
+
+        json_list = client.get("/api/backup/auto/list").json()
+        assert len(json_list) == 2
+
+        res = client.get("/api/backup/auto/download-all")
+        assert res.status_code == 200
+        assert res.headers["content-type"] == "application/zip"
+        assert res.headers["content-disposition"] == "attachment; filename=auto_backup_snapshots.zip"
+
+        zf = zipfile.ZipFile(io.BytesIO(res.content))
+        assert set(zf.namelist()) == {s["filename"] for s in json_list}
+    finally:
+        _auto_backup.configure(enabled=False, interval_hours=24.0, keep_count=7)
+        shutil.rmtree(BACKUPS_DIR, ignore_errors=True)
+
+
+def test_download_all_auto_backups_404s_when_there_are_none():
+    from webapp.main import BACKUPS_DIR
+    import shutil
+
+    shutil.rmtree(BACKUPS_DIR, ignore_errors=True)
+    res = client.get("/api/backup/auto/download-all")
+    assert res.status_code == 404
+
+
 def test_a_failing_automatic_backup_tick_records_a_backup_failed_notification():
     from webapp.main import _auto_backup
 

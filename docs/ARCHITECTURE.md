@@ -2750,6 +2750,68 @@ only a JSON parse error or timeout falls back to an empty issue list.
      clicking **Add note**, and accepting a prompt saved the note, visible
      in `GET /api/artifacts`; the **Export JSON** link pointed at
      `/api/runs.json`, which returned a JSON list.
+229. **Add exporting the automatic backup snapshot list to CSV**
+     (`GET /api/backup/auto/list.csv` -- the listing logic itself was
+     factored out of the existing `GET /api/backup/auto/list` into a
+     shared `_list_auto_backups()` helper so the JSON and CSV endpoints
+     can never drift into two different listings of the same directory.
+     An **Export snapshots CSV** link joins the panel added in Batch 32).
+230. **Add bulk import artifacts from a zip bundle**
+     (`POST /api/artifacts/import-zip` -- the artifact-side counterpart to
+     the existing `POST /api/pipelines/import-zip` (Batch 19). Each zip
+     member is dispatched by its own extension through the exact same
+     per-type `ingest_*_bytes()` function (and therefore the same
+     content-hash dedupe) as a direct single-file upload, reusing the
+     `_URL_INGEST_DISPATCH` dict already built for the URL-ingest feature
+     plus a `.pdf` entry (`_ZIP_INGEST_DISPATCH = {**_URL_INGEST_DISPATCH,
+     ".pdf": ingest_pdf_bytes}`). One bad or duplicate file doesn't block
+     the rest; an unrecognized extension is silently skipped rather than
+     reported as a failure -- a zip full of a user's other files
+     shouldn't read as broken. Response shape:
+     `{imported, duplicates, failed}`. An **Import zip…** control joins
+     the ingestion panel's existing upload/URL controls).
+231. **Add downloading all automatic backup snapshots as a zip**
+     (`GET /api/backup/auto/download-all` -- mirrors how
+     `POST /api/artifacts/bulk-download` (Batch 24) zips a selection of
+     artifacts, except there's no selection to make here: it's a plain
+     GET that bundles every file `_list_auto_backups()` currently
+     reports, 404ing only if the directory is empty rather than returning
+     an empty zip. A **Download all as zip** link joins the snapshot
+     panel).
+232. **Add a next-occurrences preview for daily/weekly schedules**
+     (`GET /api/schedules/{id}/next-occurrences?count=5` -- two new
+     helpers in `webapp/scheduler.py`, `next_n_daily_run_ats()` and
+     `next_n_weekly_run_ats()`, chain the existing
+     `next_daily_run_at()`/`next_weekly_run_at()` forward one period at a
+     time (feeding each result back in as the next call's `after`, which
+     works because the hour/minute/weekday already match on the second
+     call, so the "already passed" check reliably rolls forward by
+     exactly one day or one week rather than needing any new date math).
+     400s for an interval schedule (whose next occurrences are just a
+     trivial `now + n*interval`) or a one-time schedule (which only ever
+     fires once) -- daily/weekly are the only cadences where "what are my
+     next few fire times" is genuinely non-obvious enough to preview. A
+     **Preview next** button appears only on daily/weekly schedule rows,
+     toggling an inline list of the next 5 fire times).
+233. **Add tests for all of Batch 34**: a CSV-list round trip (header-only
+     when empty, matching the JSON listing when populated) for automatic
+     backups; a zip-import round trip for artifacts (every recognized type
+     ingested, non-ingestible members ignored, a duplicate reported
+     without blocking a new file, a non-zip rejected, an all-unrecognized
+     zip 400s); a download-all-snapshots round trip (the zip's member
+     names match the JSON listing exactly) and a 404 when empty; unit
+     tests for `next_n_daily_run_ats()`/`next_n_weekly_run_ats()`
+     (evenly-spaced future occurrences) plus webapp-level tests for the
+     next-occurrences endpoint (a daily schedule's occurrences strictly
+     increasing, a 400 for an interval/once schedule, a 404 for an
+     unknown id). 610 tests total, stable across two repeated clean
+     full-suite runs. Live-verified end to end with Playwright against a
+     freshly started server: the snapshot CSV export had the right header
+     and rows; uploading a zip with a `.csv` and a `.json` member ingested
+     both, visible in `GET /api/artifacts`; the "download all" zip's
+     member names matched `GET /api/backup/auto/list` exactly; clicking
+     **Preview next** on a freshly created daily schedule showed 5
+     evenly-spaced future fire times inline.
 
 ## 9. Roadmap
 
