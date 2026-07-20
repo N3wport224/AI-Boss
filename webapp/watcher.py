@@ -57,3 +57,7 @@ class FilesystemWatcher:
 
     def stop(self) -> None:
         self._stop.set()
+        # Join so teardown can't close shared resources under a scan
+        # that's still running.
+        if self._thread is not None:
+            self._thread.join(timeout=5.0)

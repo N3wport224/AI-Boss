@@ -102,13 +102,18 @@ _active_run_threads_lock = threading.Lock()
 @contextlib.asynccontextmanager
 async def lifespan(app: FastAPI):
     yield
+    # Stop the things that can START new runs first (each stop() joins its
+    # thread), THEN wait for in-flight run threads -- the other order leaves
+    # a window where the scheduler fires a fresh run after we've already
+    # finished waiting for run threads, and that run then finds the store
+    # closed out from under it.
+    _watcher.stop()
+    _scheduler.stop()
+    _auto_backup.stop()
     with _active_run_threads_lock:
         threads = list(_active_run_threads)
     for thread in threads:
         thread.join(timeout=5.0)
-    _watcher.stop()
-    _scheduler.stop()
-    _auto_backup.stop()
     store.close()
 
 

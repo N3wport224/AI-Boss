@@ -65,6 +65,10 @@ class AutoBackup:
 
     def stop(self) -> None:
         self._stop.set()
+        # Join so teardown can't close the StateStore while a snapshot
+        # write is still in progress.
+        if self._thread is not None:
+            self._thread.join(timeout=5.0)
 
     def run_now(self) -> str:
         """Write a snapshot immediately, outside the timer's own interval

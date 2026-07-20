@@ -122,6 +122,10 @@ class Scheduler:
 
     def stop(self) -> None:
         self._stop.set()
+        # Join so a caller tearing down (and about to close the shared
+        # StateStore) knows no tick is still mid-flight on the connection.
+        if self._thread is not None:
+            self._thread.join(timeout=5.0)
 
     def _loop(self) -> None:
         while not self._stop.is_set():
