@@ -1,4 +1,5 @@
 import json
+import time
 from datetime import datetime, timezone
 
 from fastapi.testclient import TestClient
@@ -345,6 +346,36 @@ def test_bulk_export_schedules_returns_only_selected_and_skips_unknown_ids():
     assert id_other not in returned_ids
 
     client.post("/api/schedules/bulk-delete", json={"schedule_ids": [id_a, id_b, id_other]})
+
+
+def test_run_schedule_now_executes_immediately_without_touching_cadence():
+    schedule_id = _create_test_schedule()
+    before = next(s for s in client.get("/api/schedules").json() if s["id"] == schedule_id)
+    runs_before = len(client.get("/api/runs?limit=200").json())
+
+    res = client.post(f"/api/schedules/{schedule_id}/run-now")
+    assert res.status_code == 200
+    assert res.json() == {"triggered": True}
+
+    runs_after = []
+    for _ in range(30):
+        runs_after = client.get("/api/runs?limit=200").json()
+        if len(runs_after) > runs_before:
+            break
+        time.sleep(0.1)
+    assert len(runs_after) > runs_before, "expected run-now to actually launch a new run"
+
+    after = next(s for s in client.get("/api/schedules").json() if s["id"] == schedule_id)
+    assert after["last_run_at"] == before["last_run_at"]
+    assert after["next_run_at"] == before["next_run_at"]
+    assert after["last_status"] == before["last_status"]
+
+    client.delete(f"/api/schedules/{schedule_id}")
+
+
+def test_run_schedule_now_404s_for_an_unknown_schedule():
+    res = client.post("/api/schedules/9999999/run-now")
+    assert res.status_code == 404
 
 
 def test_bulk_delete_schedules_removes_every_selected_one():

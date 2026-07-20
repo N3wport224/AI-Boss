@@ -4289,6 +4289,27 @@ async function renamePipeline(slug, currentName) {
   }
 }
 
+async function renameArtifact(currentName) {
+  const newName = prompt(`Rename "${currentName}" to:`, currentName);
+  if (!newName || !newName.trim() || newName.trim() === currentName) return;
+  try {
+    const res = await fetch(`/api/artifacts/${encodeURIComponent(currentName)}/rename`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ new_name: newName.trim() }),
+    });
+    const body = await res.json();
+    if (!res.ok) {
+      showToast(body.detail || "Failed to rename this file.", "error");
+      return;
+    }
+    showToast(`Renamed to "${body.new_name}".`, "success");
+    await loadArtifacts();
+  } catch (err) {
+    showToast(`Rename failed: ${err}`, "error");
+  }
+}
+
 async function runSavedPipeline(slug, name, pipelinesList) {
   const card = document.getElementById(`pipeline-card__${slug}`);
   card.scrollIntoView({ behavior: "smooth", block: "center" });
@@ -4566,6 +4587,7 @@ async function loadArtifacts() {
         </td>
         <td>
           <button class="btn btn-secondary btn-small artifact-view-btn" data-artifact="${escapeHtml(f.name)}" type="button">View</button>
+          <button class="btn btn-secondary btn-small artifact-rename-btn" data-artifact="${escapeHtml(f.name)}" type="button" title="Rename this file">Rename</button>
           <a class="btn btn-secondary btn-small" href="/api/artifacts/${encodeURIComponent(f.name)}/download" download title="Download the original file">⬇</a>
         </td>
       </tr>
@@ -4608,6 +4630,10 @@ async function loadArtifacts() {
 
   artifactsListEl.querySelectorAll(".artifact-view-btn").forEach((btn) => {
     btn.addEventListener("click", () => toggleArtifactContent(btn.dataset.artifact));
+  });
+
+  artifactsListEl.querySelectorAll(".artifact-rename-btn").forEach((btn) => {
+    btn.addEventListener("click", () => renameArtifact(btn.dataset.artifact));
   });
 
   artifactsListEl.querySelectorAll(".tag-chip-remove").forEach((btn) => {
@@ -5373,6 +5399,7 @@ function renderSchedulesList() {
           <div class="schedule-row-actions">
             ${favoriteButtonHtml(`schedule::${s.id}`)}
             <button class="btn btn-secondary btn-small" data-schedule-edit-label="${s.id}">${s.label ? "Edit label" : "Add label"}</button>
+            <button class="btn btn-secondary btn-small" data-schedule-run-now="${s.id}" title="Run this schedule's target once, right now, without changing its next scheduled run">▶ Run now</button>
             <button class="btn btn-secondary btn-small" data-schedule-toggle="${s.id}" data-enabled="${s.enabled}">
               ${s.enabled ? "Pause" : "Resume"}
             </button>
@@ -5422,6 +5449,24 @@ function renderSchedulesList() {
       await fetch(`/api/schedules/${btn.dataset.scheduleDelete}`, { method: "DELETE" });
       await loadSchedules();
       showToast("Schedule deleted.", "success");
+    });
+  });
+
+  schedulesListEl.querySelectorAll("[data-schedule-run-now]").forEach((btn) => {
+    btn.addEventListener("click", async () => {
+      const id = btn.dataset.scheduleRunNow;
+      btn.disabled = true;
+      try {
+        const res = await fetch(`/api/schedules/${id}/run-now`, { method: "POST" });
+        const body = await res.json();
+        if (!res.ok) throw new Error(body.detail || `HTTP ${res.status}`);
+        showToast("Schedule run started.", "success");
+        await loadRecentRuns();
+      } catch (err) {
+        showToast(`Run now failed: ${err.message}`, "error");
+      } finally {
+        btn.disabled = false;
+      }
     });
   });
 
@@ -6109,6 +6154,41 @@ function buildCommandPaletteCommands() {
           card.scrollIntoView({ behavior: "smooth", block: "center" });
           flashHighlight(card);
         }
+      },
+    });
+  });
+
+  cachedSchedules.forEach((s) => {
+    const label = s.kind === "module" ? `[${s.tier}] ${s.name}` : `pipeline: ${s.name}`;
+    commands.push({
+      kind: "Schedule",
+      title: label,
+      desc: "Jump to this schedule",
+      action: () => {
+        closeCommandPalette();
+        const row = document.getElementById(`schedule-row__${s.id}`);
+        if (row) {
+          row.scrollIntoView({ behavior: "smooth", block: "center" });
+          row.classList.add("jump-highlight");
+          setTimeout(() => row.classList.remove("jump-highlight"), 1500);
+        }
+      },
+    });
+  });
+
+  [
+    ["Jump to Ingestion & Artifacts", "ingestion-section"],
+    ["Jump to Schedules", "schedules-section"],
+    ["Jump to Agent Memory", "memory-section"],
+    ["Jump to Recent Runs", "recent-runs-section"],
+  ].forEach(([title, sectionId]) => {
+    commands.push({
+      kind: "Action",
+      title,
+      desc: "Scroll to this section of the dashboard",
+      action: () => {
+        closeCommandPalette();
+        document.getElementById(sectionId)?.scrollIntoView({ behavior: "smooth", block: "start" });
       },
     });
   });

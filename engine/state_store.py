@@ -930,6 +930,17 @@ class StateStore:
             rows = self._conn.execute("SELECT filename, tags FROM artifact_tags").fetchall()
         return {filename: json.loads(tags) for filename, tags in rows}
 
+    def rename_artifact_tags(self, old_filename: str, new_filename: str) -> None:
+        """Move an artifact's tag row to follow it when the underlying file
+        is renamed -- tags are keyed by filename, so without this a rename
+        would silently orphan them under the old name. A no-op if the old
+        filename was never tagged."""
+        with self._lock:
+            self._conn.execute(
+                "UPDATE artifact_tags SET filename = ? WHERE filename = ?", (new_filename, old_filename)
+            )
+            self._conn.commit()
+
     def set_pipeline_tags(self, slug: str, tags: list[str]) -> list[str]:
         """Replace the full tag set for a saved pipeline (keyed by its slug).
         An empty list clears tagging entirely."""

@@ -498,3 +498,25 @@ def delete_artifact(filename: str) -> bool:
         return False
     path.unlink()
     return True
+
+
+class ArtifactRenameError(ValueError):
+    """Raised when an artifact rename can't be carried out as requested."""
+
+
+def rename_artifact(old_name: str, new_name: str) -> None:
+    """Rename an ingested artifact's underlying file. Distinct from
+    renaming a *tag* (which relabels a tag across every file that carries
+    it) -- this moves one specific file to a new name. Only the filename
+    itself moves; the caller is responsible for moving the tag-store row
+    (and any favorites/recently-viewed keys) to the new name, since those
+    live in the state store and localStorage respectively, not on disk."""
+    old_path = ARTIFACTS_DIR / old_name
+    if not old_path.is_file():
+        raise ArtifactRenameError(f"No artifact named '{old_name}'.")
+    new_path = ARTIFACTS_DIR / Path(new_name).name
+    if new_path == old_path:
+        return
+    if new_path.exists():
+        raise ArtifactRenameError(f"An artifact named '{new_path.name}' already exists.")
+    old_path.rename(new_path)

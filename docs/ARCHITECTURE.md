@@ -2511,6 +2511,54 @@ only a JSON parse error or timeout falls back to an empty issue list.
      whose header and a row for that tag were both present; checkbox-
      selecting that same artifact and clicking its own **Export selected
      CSV** button downloaded a CSV row with its filename and tag.
+212. **Add a "Run now" button for a schedule**
+     (`POST /api/schedules/{id}/run-now` -- looks the schedule up and
+     calls the exact same `_trigger_schedule()` function the real
+     scheduler's own timer calls, so a manual run goes through the same
+     breaker/enabled checks and lands in Recent Runs identically to a
+     real fire. Deliberately does *not* call `record_schedule_run()` --
+     the schedule's own `next_run_at`/`last_run_at`/`last_status`
+     bookkeeping is untouched, which is the entire point: this is "don't
+     make me wait for the next tick," not "reschedule." A **▶ Run now**
+     button sits next to the existing Pause/Resume button on each
+     schedule row).
+213. **Add renaming an artifact file**
+     (`POST /api/artifacts/{filename}/rename`, backed by a new
+     `ingestion.rename_artifact()` that moves the file on disk and a new
+     `StateStore.rename_artifact_tags()` that moves its tag-store row to
+     follow -- tags are keyed by filename, so without the second step a
+     rename would silently orphan them under the old name. Distinct from
+     the existing `POST /api/artifacts/rename-tag`, which relabels a
+     *tag* across every file that carries it, not a single file's own
+     name. 404s for an unknown source file, 409s if the destination name
+     is already taken. A **Rename** button sits next to the existing
+     **View** button on each artifact row, using the same `prompt()`
+     pattern as the existing pipeline-rename feature).
+214. **Add "Jump to section" and per-schedule commands to the command
+     palette** (frontend-only -- the palette (Batch 8) had only Run/
+     Pipeline-jump commands plus 3 generic actions and hadn't been
+     extended since, even though Schedules, Agent Memory, and Recent Runs
+     sections were all added in later batches. Added a "Jump to
+     Ingestion & Artifacts/Schedules/Agent Memory/Recent Runs" command
+     per section, plus a per-schedule "jump to this schedule" command
+     mirroring the existing per-pipeline jump command -- scrolls the row
+     into view and flashes it with the existing `.jump-highlight` class).
+215. **Add tests for all of Batch 30**: running a schedule now launches a
+     real run without changing its `last_run_at`/`next_run_at`/
+     `last_status`, and 404s for an unknown schedule id; renaming an
+     artifact moves both the file and its tags, 404s for an unknown
+     source file, 409s if the destination name is taken, and rejects a
+     blank destination name. 570 tests total, stable across two repeated
+     clean full-suite runs. Live-verified end to end with Playwright
+     against a freshly started server: clicking **▶ Run now** on a
+     schedule (with the real background scheduler paused first, since
+     the test schedule's own `next_run_at` was already due and would
+     otherwise race the assertion) launched a new run while leaving the
+     schedule's own `last_run_at` untouched; clicking **Rename** on an
+     artifact and accepting the native `prompt()` moved both the file and
+     its tag to the new name in `GET /api/artifacts`; opening the command
+     palette (Ctrl/Cmd+K) and typing found both "Jump to Schedules" and
+     "Jump to Agent Memory" entries.
 
 ## 9. Roadmap
 

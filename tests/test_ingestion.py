@@ -697,6 +697,51 @@ def test_rename_tag_rejects_identical_old_and_new():
     assert res.status_code == 400
 
 
+# ---- Batch 30: rename an artifact file ----
+
+
+def test_rename_artifact_moves_the_file_and_its_tags():
+    client.post("/api/ingest/csv", files={"file": ("renamefile_a.csv", b"x,y\n1101,1102\n", "text/csv")})
+    old_name = next(f["name"] for f in client.get("/api/artifacts").json() if f["name"].endswith("renamefile_a.csv"))
+    client.put(f"/api/artifacts/{old_name}/tags", json={"tags": ["carry_over_tag"]})
+
+    new_name = old_name.replace("renamefile_a.csv", "renamefile_a_renamed.csv")
+    res = client.post(f"/api/artifacts/{old_name}/rename", json={"new_name": new_name})
+    assert res.status_code == 200
+    assert res.json() == {"old_name": old_name, "new_name": new_name}
+
+    files = {f["name"]: f for f in client.get("/api/artifacts").json()}
+    assert old_name not in files
+    assert new_name in files
+    assert files[new_name]["tags"] == ["carry_over_tag"]
+
+    content_res = client.get(f"/api/artifacts/{new_name}/content")
+    assert content_res.status_code == 200
+
+
+def test_rename_artifact_404s_for_an_unknown_file():
+    res = client.post("/api/artifacts/does-not-exist.csv/rename", json={"new_name": "whatever.csv"})
+    assert res.status_code == 404
+
+
+def test_rename_artifact_409s_if_the_new_name_already_exists():
+    client.post("/api/ingest/csv", files={"file": ("renamefile_b.csv", b"x,y\n1103,1104\n", "text/csv")})
+    client.post("/api/ingest/csv", files={"file": ("renamefile_c.csv", b"x,y\n1105,1106\n", "text/csv")})
+    files = client.get("/api/artifacts").json()
+    b_name = next(f["name"] for f in files if f["name"].endswith("renamefile_b.csv"))
+    c_name = next(f["name"] for f in files if f["name"].endswith("renamefile_c.csv"))
+
+    res = client.post(f"/api/artifacts/{b_name}/rename", json={"new_name": c_name})
+    assert res.status_code == 409
+
+
+def test_rename_artifact_rejects_a_blank_new_name():
+    client.post("/api/ingest/csv", files={"file": ("renamefile_d.csv", b"x,y\n1107,1108\n", "text/csv")})
+    d_name = next(f["name"] for f in client.get("/api/artifacts").json() if f["name"].endswith("renamefile_d.csv"))
+    res = client.post(f"/api/artifacts/{d_name}/rename", json={"new_name": "   "})
+    assert res.status_code == 400
+
+
 # ---- Batch 16: compare two artifacts' schemas ----
 
 def test_compare_schema_reports_matching_columns_when_schemas_agree():

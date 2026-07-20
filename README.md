@@ -924,6 +924,18 @@ A few things live in the header/subheader on every page load:
   multiple artifacts and download just their metadata (name/size/tags) as
   a CSV, distinct from the existing bulk zip-of-content download.
 
+## Schedule run-now, artifact rename, and a bigger command palette
+
+- **"Run now" for a schedule** — a **▶ Run now** button fires a schedule's
+  target immediately, once, without touching its next scheduled run or
+  cadence.
+- **Rename an artifact file** — a **Rename** button renames the
+  underlying file (distinct from the existing rename-a-tag feature),
+  carrying its tags along to the new name.
+- **A bigger command palette** — "Jump to Schedules/Agent Memory/Recent
+  Runs/Ingestion" section shortcuts and a per-schedule jump command join
+  the existing Run/Pipeline-jump/theme/density commands.
+
 ## Tech stack
 
 - **Language:** Python 3.11+ — first-class async/sync support and native SDKs

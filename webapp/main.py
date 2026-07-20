@@ -1731,6 +1731,29 @@ def delete_schedule(schedule_id: int):
     return {"deleted": schedule_id}
 
 
+@app.post("/api/schedules/{schedule_id}/run-now")
+def run_schedule_now(schedule_id: int):
+    """Fire a schedule's target immediately, once, without touching its
+    next_run_at or cadence -- for "I don't want to wait for the next
+    tick" rather than editing the schedule itself. Reuses the exact same
+    _trigger_schedule() dispatch the scheduler's own timer calls, so a
+    manual run goes through the same breaker/enabled checks and lands in
+    Recent Runs identically to a real scheduled fire; the only thing that
+    doesn't happen is the schedule row's own bookkeeping (next_run_at,
+    last_run_at, last_status), which is exactly the point."""
+    schedule = next((s for s in store.list_schedules() if s["id"] == schedule_id), None)
+    if schedule is None:
+        raise HTTPException(status_code=404, detail=f"No schedule with id {schedule_id}.")
+    try:
+        _trigger_schedule(schedule)
+    except Exception as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
+    store.record_audit_event(
+        "schedule_run_now", f"Manually ran schedule {schedule_id} ({schedule['kind']}/{schedule['name']}) now."
+    )
+    return {"triggered": True}
+
+
 class BulkScheduleIds(BaseModel):
     schedule_ids: list[int]
 
@@ -2779,6 +2802,34 @@ def set_artifact_tags(filename: str, payload: ArtifactTagsUpdate):
         raise HTTPException(status_code=404, detail=f"No artifact named '{safe_name}'.")
     cleaned = sorted({t.strip() for t in payload.tags if t.strip()})
     return {"filename": safe_name, "tags": store.set_artifact_tags(safe_name, cleaned)}
+
+
+class ArtifactRename(BaseModel):
+    new_name: str
+
+
+@app.post("/api/artifacts/{filename}/rename")
+def rename_artifact(filename: str, payload: ArtifactRename):
+    """Rename an artifact's underlying file -- distinct from
+    POST /api/artifacts/rename-tag, which relabels a *tag* across every
+    file that carries it. Moves the file on disk, then moves its tag-store
+    row (keyed by filename) to follow it, so tagging survives the rename;
+    a favorited or recently-viewed reference to the old filename simply
+    stops resolving, the same way it already does when an artifact is
+    deleted outright."""
+    safe_old = Path(filename).name
+    safe_new = Path(payload.new_name).name
+    if not safe_new.strip():
+        raise HTTPException(status_code=400, detail="new_name must not be empty.")
+    try:
+        ingestion.rename_artifact(safe_old, safe_new)
+    except ingestion.ArtifactRenameError as exc:
+        detail = str(exc)
+        status_code = 404 if "No artifact named" in detail else 409
+        raise HTTPException(status_code=status_code, detail=detail)
+    store.rename_artifact_tags(safe_old, safe_new)
+    store.record_audit_event("artifact_rename", f"Renamed artifact '{safe_old}' to '{safe_new}'.")
+    return {"old_name": safe_old, "new_name": safe_new}
 
 
 class ArtifactBulkTag(BaseModel):
