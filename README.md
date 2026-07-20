@@ -1130,6 +1130,21 @@ A few things live in the header/subheader on every page load:
   Pipelines filter row, the pipeline counterpart to the existing artifact
   tag directory.
 
+## Clearing module overrides, notification kind filtering, and pipeline sorting
+
+- **Clear a module's enable/disable override** — a **Use default** button
+  appears per module card only when its runtime on/off state has actually
+  been overridden away from the manifest default, letting you revert it
+  instead of leaving a stale override in place forever; a **Clear enabled
+  overrides** bulk button does the same for a checkbox selection. Mirrors
+  the existing circuit-breaker-threshold-override clear pattern exactly.
+- **Filter notifications by kind** — a **Filter by kind** dropdown in the
+  Alerts panel narrows the list to one notification kind at a time,
+  composing with the existing sort control and search box.
+- **Sort saved pipelines by name or date modified** — a sort control in the
+  Saved Pipelines filter row mirrors the existing artifact sort control,
+  defaulting to newest-modified-first.
+
 ## Tech stack
 
 - **Language:** Python 3.11+ — first-class async/sync support and native SDKs

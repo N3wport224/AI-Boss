@@ -173,3 +173,81 @@ def test_bulk_set_modules_enabled_is_a_no_op_on_an_empty_selection():
     res = client.post("/api/modules/bulk-set-enabled", json={"modules": [], "enabled": False})
     assert res.status_code == 200
     assert res.json() == {"updated": [], "enabled": False}
+
+
+def test_clear_module_enabled_override_reverts_to_manifest_default():
+    client.patch("/api/modules/automation/fetch_raw_metrics", json={"enabled": False})
+    listed = client.get("/api/modules").json()
+    module = next(m for m in listed["automation"] if m["name"] == "fetch_raw_metrics")
+    assert module["enabled_overridden"] is True
+
+    res = client.delete("/api/modules/automation/fetch_raw_metrics/enabled-override")
+    assert res.status_code == 200
+    assert res.json() == {"tier": "automation", "name": "fetch_raw_metrics", "runtime_enabled": True}
+
+    listed2 = client.get("/api/modules").json()
+    module2 = next(m for m in listed2["automation"] if m["name"] == "fetch_raw_metrics")
+    assert module2["runtime_enabled"] is True
+    assert module2["enabled_overridden"] is False
+
+
+def test_clear_module_enabled_override_404s_for_an_unknown_module():
+    res = client.delete("/api/modules/automation/does_not_exist/enabled-override")
+    assert res.status_code == 404
+
+
+def test_bulk_clear_modules_enabled_override_reverts_every_selected_module():
+    client.post(
+        "/api/modules/bulk-set-enabled",
+        json={
+            "modules": [
+                {"tier": "automation", "name": "fetch_raw_metrics"},
+                {"tier": "automation", "name": "http_request"},
+            ],
+            "enabled": False,
+        },
+    )
+
+    res = client.post(
+        "/api/modules/bulk-clear-enabled-override",
+        json={
+            "modules": [
+                {"tier": "automation", "name": "fetch_raw_metrics"},
+                {"tier": "automation", "name": "http_request"},
+            ]
+        },
+    )
+    assert res.status_code == 200
+    body = res.json()
+    assert len(body["updated"]) == 2
+
+    listed = client.get("/api/modules").json()
+    metrics = next(m for m in listed["automation"] if m["name"] == "fetch_raw_metrics")
+    http_req = next(m for m in listed["automation"] if m["name"] == "http_request")
+    assert metrics["runtime_enabled"] is True
+    assert metrics["enabled_overridden"] is False
+    assert http_req["runtime_enabled"] is True
+    assert http_req["enabled_overridden"] is False
+
+
+def test_bulk_clear_modules_enabled_override_skips_an_unknown_module():
+    client.patch("/api/modules/automation/fetch_raw_metrics", json={"enabled": False})
+
+    res = client.post(
+        "/api/modules/bulk-clear-enabled-override",
+        json={
+            "modules": [
+                {"tier": "automation", "name": "fetch_raw_metrics"},
+                {"tier": "automation", "name": "does_not_exist"},
+            ]
+        },
+    )
+    assert res.status_code == 200
+    body = res.json()
+    assert body["updated"] == [{"tier": "automation", "name": "fetch_raw_metrics"}]
+
+
+def test_bulk_clear_modules_enabled_override_is_a_no_op_on_an_empty_selection():
+    res = client.post("/api/modules/bulk-clear-enabled-override", json={"modules": []})
+    assert res.status_code == 200
+    assert res.json() == {"updated": []}

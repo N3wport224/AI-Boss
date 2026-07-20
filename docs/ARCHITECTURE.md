@@ -3185,6 +3185,61 @@ only a JSON parse error or timeout falls back to an empty issue list.
      the new tag directory panel shows the tag with its count, and
      clicking the tag chip to confirm it populates the tag filter box.
 
+261. **Add clearing a module's enable/disable override**
+     (`StateStore.clear_module_enabled_override()`, a single `DELETE FROM
+     module_overrides WHERE tier = ? AND name = ?` -- mirrors the existing
+     circuit-breaker-threshold-override clear pattern
+     (`clear_breaker_threshold_override()`, Batch 24) exactly. `GET
+     /api/modules` now reports `enabled_overridden` per module (parallel
+     to the pre-existing `breaker.threshold_overridden`), so `DELETE
+     /api/modules/{tier}/{name}/enabled-override` and `POST
+     /api/modules/bulk-clear-enabled-override` (skip-unknown-module,
+     no-op-on-empty-selection, audit-logged) let a user revert a module
+     back to its manifest-declared `enabled` default instead of leaving a
+     stale runtime on/off override in place forever. A **Use default**
+     button appears per module card only when an override actually
+     exists, next to the existing On/Off toggle; a **Clear enabled
+     overrides** bulk button added alongside the existing bulk
+     enable/disable/reset-breaker/clear-threshold buttons).
+262. **Add filtering notifications by kind**
+     (a **Filter by kind** `<select>` added to the Alerts panel, populated
+     from the same five notification kinds
+     (`breaker_tripped`/`schedule_failed`/`resource_alert`/
+     `schedule_once_fired`/`backup_failed`) already used by the mute-
+     preferences panel -- purely client-side, composing with the existing
+     sort control and the existing debounced search box rather than
+     adding a new backend endpoint. Selecting a kind narrows both the
+     normal alert list and any active search's results to just that
+     kind; "All kinds" clears it).
+263. **Add sorting saved pipelines by name or date modified**
+     (`webapp/pipelines.py`'s `list_pipelines()` now stamps each
+     definition with `modified_at` (the YAML file's mtime, the same raw
+     epoch-float convention `ingestion.list_artifacts()` already uses for
+     artifacts) -- a **Sort: date modified / Sort: name** `<select>`
+     added to the Saved Pipelines filter row, sorting the already-fetched
+     list client-side exactly like the existing artifact sort control
+     does, defaulting to newest-modified-first).
+264. **Add tests for all of Batch 42**: a module-enabled-override-clear
+     round trip (disable via the existing toggle endpoint, clear the
+     override, confirm it reverts to the manifest default and
+     `enabled_overridden` flips back to false) plus a 404-for-unknown-
+     module test; the equivalent bulk-clear trio (reverts every selected
+     module, skips an unknown module, no-op on an empty selection),
+     mirroring the existing bulk-clear-breaker-threshold tests; a
+     pipeline-listing test confirming `modified_at` is present on `GET
+     /api/pipelines` and matches the saved file's actual mtime. 668 tests
+     total, stable across two repeated clean full-suite runs.
+     Live-verified end to end with Playwright against a freshly started
+     server: disabling a module, clicking its new **Use default** button,
+     and confirming the toggle flips back to On and the button
+     disappears; checkbox-selecting two disabled modules and clicking
+     **Clear enabled overrides**, confirming both revert to enabled;
+     opening the Alerts panel, selecting a specific kind from the new
+     filter dropdown, and confirming the control is wired without error;
+     and saving two differently-named pipelines, switching the new sort
+     control to **Sort: name**, and confirming they render in alphabetical
+     order.
+
 ## 9. Roadmap
 
 The current engine is intentionally a single-process, synchronous, SQLite-backed

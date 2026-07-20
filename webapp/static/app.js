@@ -38,6 +38,7 @@ const modulesBulkEnableBtn = document.getElementById("modules-bulk-enable-btn");
 const modulesBulkDisableBtn = document.getElementById("modules-bulk-disable-btn");
 const modulesBulkResetBreakerBtn = document.getElementById("modules-bulk-reset-breaker-btn");
 const modulesBulkClearThresholdBtn = document.getElementById("modules-bulk-clear-threshold-btn");
+const modulesBulkClearEnabledBtn = document.getElementById("modules-bulk-clear-enabled-btn");
 const modulesProblemsFilterEl = document.getElementById("modules-problems-filter");
 const pipelineResultEl = document.getElementById("pipeline-result");
 const runPipelineBtn = document.getElementById("run-pipeline-btn");
@@ -92,6 +93,7 @@ const builderCancelEditBtn = document.getElementById("builder-cancel-edit");
 const savedPipelinesSection = document.getElementById("saved-pipelines-section");
 const savedPipelinesGrid = document.getElementById("saved-pipelines-grid");
 const pipelineTagFilterInput = document.getElementById("pipeline-tag-filter");
+const pipelineSortSelect = document.getElementById("pipeline-sort");
 const pipelineDeepSearchInput = document.getElementById("pipeline-deep-search");
 const pipelineDeepSearchResultsEl = document.getElementById("pipeline-deep-search-results");
 const pipelinesBulkDeleteBtn = document.getElementById("pipelines-bulk-delete-btn");
@@ -486,6 +488,7 @@ let persistentUnreadCount = 0;
 let persistentNotifications = [];
 const selectedNotificationIds = new Set();
 let notificationSortMode = "newest";
+let notificationKindFilter = "";
 
 // ---- Desktop browser notifications for critical alerts ----
 // Opt-in, since a browser Notification permission prompt is intrusive --
@@ -561,7 +564,7 @@ function updateNotificationBulkBtns() {
 }
 
 function sortedNotifications() {
-  const copy = [...persistentNotifications];
+  const copy = (notificationKindFilter ? persistentNotifications.filter((n) => n.kind === notificationKindFilter) : [...persistentNotifications]);
   if (notificationSortMode === "kind") {
     copy.sort((a, b) => a.kind.localeCompare(b.kind));
   } else {
@@ -661,6 +664,13 @@ function wireNotificationBulkControls(container) {
     notificationSortMode = sortSelect.value;
     renderNotificationsPanel();
   });
+
+  const kindFilterSelect = container.querySelector("#notifications-kind-filter");
+  kindFilterSelect?.addEventListener("click", (e) => e.stopPropagation());
+  kindFilterSelect?.addEventListener("change", () => {
+    notificationKindFilter = kindFilterSelect.value;
+    renderNotificationsPanel();
+  });
 }
 
 function updateNotifBadge() {
@@ -690,6 +700,10 @@ const NOTIFICATION_KIND_LABELS = {
   schedule_failed: "Scheduled run failures",
   resource_alert: "Resource usage alerts",
   schedule_once_fired: "One-time schedule fired",
+};
+const NOTIFICATION_FILTER_KIND_LABELS = {
+  ...NOTIFICATION_KIND_LABELS,
+  backup_failed: "Backup failures",
 };
 
 function renderNotificationsPanel() {
@@ -736,6 +750,15 @@ function renderNotificationsPanel() {
       <select id="notifications-sort">
         <option value="newest" ${notificationSortMode === "newest" ? "selected" : ""}>Sort: newest first</option>
         <option value="kind" ${notificationSortMode === "kind" ? "selected" : ""}>Sort: kind</option>
+      </select>
+      <select id="notifications-kind-filter">
+        <option value="" ${notificationKindFilter === "" ? "selected" : ""}>All kinds</option>
+        ${Object.keys(NOTIFICATION_FILTER_KIND_LABELS)
+          .map(
+            (kind) =>
+              `<option value="${kind}" ${notificationKindFilter === kind ? "selected" : ""}>${NOTIFICATION_FILTER_KIND_LABELS[kind]}</option>`
+          )
+          .join("")}
       </select>
       <label class="schedule-select-all-label">
         <input type="checkbox" id="notifications-select-all" ${persistentNotifications.length && persistentNotifications.every((n) => selectedNotificationIds.has(n.id)) ? "checked" : ""} />
@@ -849,14 +872,15 @@ function renderNotificationsPanel() {
     clearTimeout(notificationSearchDebounce);
     notificationSearchDebounce = setTimeout(async () => {
       if (!query) {
-        listEl.innerHTML = renderNotificationRows(persistentNotifications, "No alerts yet.");
+        listEl.innerHTML = renderNotificationRows(sortedNotifications(), "No alerts yet.");
         wireNotificationCheckboxes(listEl);
         return;
       }
       try {
         const res = await fetch(`/api/notifications/search?q=${encodeURIComponent(query)}`);
         const body = await res.json();
-        listEl.innerHTML = renderNotificationRows(body.results, "No alerts match that search.");
+        const results = notificationKindFilter ? body.results.filter((n) => n.kind === notificationKindFilter) : body.results;
+        listEl.innerHTML = renderNotificationRows(results, "No alerts match that search.");
         wireNotificationCheckboxes(listEl);
       } catch (err) {
         listEl.innerHTML = `<div class="dropdown-empty">Search failed: ${err}</div>`;
@@ -2163,6 +2187,11 @@ function renderCard(module) {
         <div class="card-head-actions">
           ${favoriteButtonHtml(favKey)}
           <button class="module-toggle-btn ${runtimeEnabled ? "" : "off"}" data-tier="${module.tier}" data-name="${module.name}" data-enabled="${runtimeEnabled}" type="button" title="${runtimeEnabled ? "Disable this module" : "Enable this module"}">${runtimeEnabled ? "⏻ On" : "⏻ Off"}</button>
+          ${
+            module.enabled_overridden
+              ? `<button class="btn btn-secondary btn-small module-enabled-clear-btn" data-tier="${module.tier}" data-name="${module.name}" type="button" title="Revert to this module's manifest-declared enabled state">Use default</button>`
+              : ""
+          }
           <button class="code-toggle" data-tier="${module.tier}" data-name="${module.name}" type="button" title="View source">&lt;/&gt;</button>
           <button class="module-duplicate-btn" data-tier="${module.tier}" data-name="${module.name}" type="button" title="Duplicate this module as a starting point for a new one">⧉</button>
           <div class="status-slot">${tripped ? statusPill("tripped") : statusPill(module.status)}</div>
@@ -2378,6 +2407,20 @@ function renderSections(modulesByTier) {
       }
     });
   });
+  sectionsEl.querySelectorAll(".module-enabled-clear-btn").forEach((btn) => {
+    btn.addEventListener("click", async () => {
+      try {
+        const res = await fetch(`/api/modules/${btn.dataset.tier}/${btn.dataset.name}/enabled-override`, {
+          method: "DELETE",
+        });
+        if (!res.ok) throw new Error((await res.json()).detail || `HTTP ${res.status}`);
+        showToast(`${btn.dataset.name}'s enabled state reset to its manifest default.`, "success");
+        await loadModules();
+      } catch (err) {
+        showToast(`Could not clear enabled override: ${err.message}`, "error");
+      }
+    });
+  });
   sectionsEl.querySelectorAll(".input-presets-row").forEach((row) => {
     wireInputPresetsRow(row.dataset.tier, row.dataset.name);
     loadInputPresetsIntoRow(row.dataset.tier, row.dataset.name);
@@ -2405,11 +2448,13 @@ function updateModulesBulkButtons() {
   modulesBulkDisableBtn.disabled = disabled;
   modulesBulkResetBreakerBtn.disabled = disabled;
   modulesBulkClearThresholdBtn.disabled = disabled;
+  modulesBulkClearEnabledBtn.disabled = disabled;
   const suffix = selectedModuleRefs.size ? ` (${selectedModuleRefs.size})` : "";
   modulesBulkEnableBtn.textContent = `Enable selected${suffix}`;
   modulesBulkDisableBtn.textContent = `Disable selected${suffix}`;
   modulesBulkResetBreakerBtn.textContent = `Reset breakers for selected${suffix}`;
   modulesBulkClearThresholdBtn.textContent = `Clear threshold overrides${suffix}`;
+  modulesBulkClearEnabledBtn.textContent = `Clear enabled overrides${suffix}`;
 }
 
 function wireModuleSelectCheckboxes() {
@@ -2491,6 +2536,22 @@ modulesBulkClearThresholdBtn.addEventListener("click", async () => {
     body: JSON.stringify({ modules }),
   });
   showToast(`Cleared threshold override for ${modules.length} module(s).`, "success");
+  selectedModuleRefs.clear();
+  await loadModules();
+});
+
+modulesBulkClearEnabledBtn.addEventListener("click", async () => {
+  if (!selectedModuleRefs.size) return;
+  const modules = [...selectedModuleRefs].map((ref) => {
+    const [tier, name] = ref.split("::");
+    return { tier, name };
+  });
+  await fetch("/api/modules/bulk-clear-enabled-override", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ modules }),
+  });
+  showToast(`Cleared enabled override for ${modules.length} module(s).`, "success");
   selectedModuleRefs.clear();
   await loadModules();
 });
@@ -4329,10 +4390,17 @@ async function loadSavedPipelines() {
   const url = tagFilter ? `/api/pipelines?tag=${encodeURIComponent(tagFilter)}` : "/api/pipelines";
   const res = await fetch(url);
   const pipelinesList = await res.json();
+  if (pipelineSortSelect.value === "name") {
+    pipelinesList.sort((a, b) => (a.name || "").localeCompare(b.name || ""));
+  } else {
+    pipelinesList.sort((a, b) => (b.modified_at || 0) - (a.modified_at || 0));
+  }
   renderSavedPipelines(pipelinesList);
   loadPipelineTagDirectory();
   return pipelinesList;
 }
+
+pipelineSortSelect.addEventListener("change", () => loadSavedPipelines());
 
 const pipelineTagDirectoryEl = document.getElementById("pipeline-tag-directory");
 

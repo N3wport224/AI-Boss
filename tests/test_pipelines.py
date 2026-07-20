@@ -69,6 +69,20 @@ def test_save_and_launch_pipeline_persists_to_disk_and_runs():
     assert [p["slug"] for p in listed] == ["custom_chain"]
 
 
+def test_list_saved_pipelines_includes_modified_at_for_client_side_sorting():
+    payload = {
+        "name": "Sortable Pipeline",
+        "steps": [{"tier": "automation", "name": "fetch_raw_metrics", "inputs": {"signups": 1, "churn": 1, "revenue": 1}}],
+        "launch": False,
+    }
+    client.post("/api/pipelines", json=payload)
+
+    listed = client.get("/api/pipelines").json()
+    pipeline = next(p for p in listed if p["slug"] == "sortable_pipeline")
+    assert isinstance(pipeline["modified_at"], (int, float))
+    assert pipeline["modified_at"] == (pipeline_store.PIPELINES_DIR / "sortable_pipeline.yaml").stat().st_mtime
+
+
 def test_save_without_launch_persists_but_never_runs():
     payload = {
         "name": "Draft Only",

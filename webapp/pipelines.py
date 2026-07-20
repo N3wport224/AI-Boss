@@ -283,7 +283,12 @@ def branch_pipeline_version(slug: str, version_id: str, new_name: str, tier_dirs
 def list_pipelines() -> list[dict]:
     if not PIPELINES_DIR.exists():
         return []
-    return [yaml.safe_load(path.read_text()) or {} for path in sorted(PIPELINES_DIR.glob("*.yaml"))]
+    pipelines = []
+    for path in sorted(PIPELINES_DIR.glob("*.yaml")):
+        definition = yaml.safe_load(path.read_text()) or {}
+        definition["modified_at"] = path.stat().st_mtime
+        pipelines.append(definition)
+    return pipelines
 
 
 def load_pipeline(slug: str) -> dict:

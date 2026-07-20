@@ -605,6 +605,7 @@ def list_modules():
                     "outputs": manifest.get("outputs", []),
                     "status": "error" if last_success is False else "ready",
                     "runtime_enabled": _is_module_effectively_enabled(tier, manifest["name"]),
+                    "enabled_overridden": store.get_module_enabled_override(tier, manifest["name"]) is not None,
                     "breaker": {
                         "tripped": health["tripped"],
                         "consecutive_failures": health["consecutive_failures"],
@@ -1052,6 +1053,43 @@ def bulk_set_modules_enabled(payload: BulkSetModulesEnabled):
         f"{'Enabled' if payload.enabled else 'Disabled'} {len(updated)} selected module(s): {updated}.",
     )
     return {"updated": updated, "enabled": payload.enabled}
+
+
+@app.delete("/api/modules/{tier}/{name}/enabled-override")
+def clear_module_enabled_override(tier: str, name: str):
+    """Revert to the module's manifest-declared `enabled` flag instead of a
+    specific runtime on/off override -- mirrors
+    DELETE /api/breakers/{tier}/{name}/threshold's same "forget the
+    override, fall back to the manifest" pattern."""
+    _manifest_by_name(tier, name)  # 404 for a module that doesn't exist
+    store.clear_module_enabled_override(tier, name)
+    return {"tier": tier, "name": name, "runtime_enabled": _is_module_effectively_enabled(tier, name)}
+
+
+class BulkClearModulesEnabledOverride(BaseModel):
+    modules: list[ModuleRef]
+
+
+@app.post("/api/modules/bulk-clear-enabled-override")
+def bulk_clear_modules_enabled_override(payload: BulkClearModulesEnabledOverride):
+    """Clear the runtime enable/disable override for a user-picked set of
+    modules at once, mirroring the existing
+    POST /api/breakers/bulk-clear-threshold pattern. A ref naming a
+    tier/name that doesn't exist is skipped rather than failing the whole
+    batch."""
+    updated = []
+    for ref in payload.modules:
+        try:
+            _manifest_by_name(ref.tier, ref.name)
+        except HTTPException:
+            continue
+        store.clear_module_enabled_override(ref.tier, ref.name)
+        updated.append({"tier": ref.tier, "name": ref.name})
+    store.record_audit_event(
+        "module_bulk_clear_enabled_override",
+        f"Cleared enable/disable override for {len(updated)} selected module(s): {updated}.",
+    )
+    return {"updated": updated}
 
 
 class InputPresetSave(BaseModel):

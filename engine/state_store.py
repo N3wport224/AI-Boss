@@ -670,6 +670,15 @@ class StateStore:
             rows = self._conn.execute("SELECT tier, name, enabled FROM module_overrides").fetchall()
         return {(tier, name): bool(enabled) for tier, name, enabled in rows}
 
+    def clear_module_enabled_override(self, tier: str, name: str) -> None:
+        """Revert to the module's manifest-declared `enabled` flag instead
+        of a specific overridden on/off state -- mirrors
+        clear_breaker_threshold_override()'s same "forget the override
+        row" pattern."""
+        with self._lock:
+            self._conn.execute("DELETE FROM module_overrides WHERE tier = ? AND name = ?", (tier, name))
+            self._conn.commit()
+
     def set_breaker_threshold(self, tier: str, name: str, threshold: int) -> None:
         """A runtime override for how many consecutive failures trip a
         module's circuit breaker, independent of its manifest's own

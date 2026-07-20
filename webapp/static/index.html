@@ -239,6 +239,10 @@
       <div class="pipeline-filter-row">
         <input type="text" id="pipeline-tag-filter" placeholder="Filter by tag…" class="artifact-search-input" />
         <input type="text" id="pipeline-deep-search" placeholder="Search inside pipeline definitions (inputs, conditions, descriptions)…" class="artifact-search-input" />
+        <select id="pipeline-sort">
+          <option value="modified" selected>Sort: date modified</option>
+          <option value="name">Sort: name</option>
+        </select>
         <label class="schedule-select-all-label">
           <input type="checkbox" id="pipelines-select-all" />
           Select all
@@ -577,6 +581,7 @@
       <button id="modules-bulk-disable-btn" class="btn btn-secondary btn-small" type="button" disabled>Disable selected</button>
       <button id="modules-bulk-reset-breaker-btn" class="btn btn-secondary btn-small" type="button" disabled title="Reset the circuit breaker for every selected module">Reset breakers for selected</button>
       <button id="modules-bulk-clear-threshold-btn" class="btn btn-secondary btn-small" type="button" disabled title="Revert every selected module's breaker threshold to its manifest default">Clear threshold overrides</button>
+      <button id="modules-bulk-clear-enabled-btn" class="btn btn-secondary btn-small" type="button" disabled title="Revert every selected module's enabled/disabled state to its manifest default">Clear enabled overrides</button>
     </div>
     <div id="sections"></div>
   </main>
