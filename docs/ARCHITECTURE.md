@@ -2689,6 +2689,67 @@ only a JSON parse error or timeout falls back to an empty issue list.
      that produced a "Restored" toast; seeding two interval schedules,
      checkbox-selecting both, and clicking **⧉ Duplicate selected**
      produced exactly two new schedule rows in `GET /api/schedules`.
+224. **Add a one-click "Schedule this pipeline" shortcut**
+     (frontend-only -- while auditing what to build next it turned out
+     Batch 17's "duplicate a schedule" per-row button never actually
+     called a schedule-cloning backend endpoint at all; it only calls the
+     existing `fillScheduleFormFrom()` helper to pre-fill the create form.
+     This batch reuses that exact helper for a genuinely new target: a
+     **🕐 Schedule** button on every saved pipeline card that calls
+     `fillScheduleFormFrom({ kind: "pipeline", name: slug, schedule_type:
+     "interval", interval_seconds: 60 })`, pre-filling kind/target and
+     scrolling the create-schedule form into view -- no new endpoint
+     needed since it reuses the existing `POST /api/schedules`).
+225. **Add deleting an individual automatic backup snapshot**
+     (`DELETE /api/backup/auto/snapshot/{filename}` -- the filename
+     validation from `POST /api/backup/auto/restore/{filename}` (Batch 32)
+     was factored out into a shared `_resolve_auto_backup_path()` helper
+     so both endpoints reject path traversal and non-snapshot filenames
+     identically. A **Delete** button joins the existing **Restore**
+     button on every row of the snapshot list added last batch, for
+     freeing disk space or discarding one bad snapshot without waiting
+     for the configured `keep_count` to prune it on its own schedule).
+226. **Add a free-text note field for artifacts**
+     (new `artifact_notes` SQLite table plus `set_artifact_note()`/
+     `get_artifact_note()`/`all_artifact_notes()`/`rename_artifact_note()`
+     on `StateStore`, keyed by filename the same way `artifact_tags`
+     already is. `PUT /api/artifacts/{filename}/note` sets it (blank
+     clears it); `GET /api/artifacts` now returns a `note` field on every
+     file; `POST /api/artifacts/{filename}/rename` now moves the note row
+     to follow the file the same way it already moves the tag row. This
+     is deliberately separate from tags -- tags are short structured
+     keywords, a note is a single longer human comment, mirroring the
+     existing per-schedule label from Batch 26. An **Add/Edit note**
+     button sits next to the existing **Rename** button on each artifact
+     row, showing a truncated preview underneath the filename when set).
+227. **Add exporting the full run history as JSON**
+     (`GET /api/runs.json` -- the same summary run list `GET /api/runs.csv`
+     and `/api/runs.xlsx` already serve, as a downloadable `.json` file.
+     Distinct from the existing `GET /api/runs/{run_id}.json`, which
+     downloads one run's full nested detail (steps, inputs/outputs, the
+     shared blackboard) rather than the summary list -- confirmed the two
+     routes don't conflict since `/api/runs.json` and
+     `/api/runs/{run_id}.json` have a different number of path segments.
+     A plain `<a href download>` **Export JSON** link joins the existing
+     **Export CSV**/**Export XLSX** links above Recent Runs, no JS wiring
+     needed since it's a static GET like its siblings).
+228. **Add tests for all of Batch 33**: an artifact-note round trip
+     (set/replace/clear, unknown-filename 404, renaming carries the note
+     along with its tags) and a default-empty-note check on the plain
+     list endpoint; an automatic-backup-snapshot delete round trip and a
+     404 on an unknown or path-traversal filename; a `GET /api/runs.json`
+     shape check. The one-click pipeline-scheduling shortcut needed no new
+     backend tests since it calls only the already-tested
+     `POST /api/schedules` endpoint. 596 tests total, stable across
+     three repeated clean full-suite runs. Live-verified end to end with
+     Playwright against a freshly started server: clicking a pipeline
+     card's **🕐 Schedule** button pre-filled the create-schedule form
+     with `kind=pipeline` and the right target slug; enabling auto backup,
+     backing up now, reloading, and clicking a snapshot's **Delete** button
+     removed it from `GET /api/backup/auto/list`; uploading a CSV,
+     clicking **Add note**, and accepting a prompt saved the note, visible
+     in `GET /api/artifacts`; the **Export JSON** link pointed at
+     `/api/runs.json`, which returned a JSON list.
 
 ## 9. Roadmap
 

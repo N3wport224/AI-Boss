@@ -2030,6 +2030,23 @@ def recent_runs_xlsx(limit: int = 100):
     )
 
 
+@app.get("/api/runs.json")
+def recent_runs_json(limit: int = 100):
+    """Same summary run-history list as GET /api/runs.csv and
+    /api/runs.xlsx, as a downloadable JSON file -- distinct from
+    GET /api/runs/{run_id}.json, which downloads one run's full nested
+    detail (steps/inputs/outputs/blackboard), not the whole list."""
+    runs = store.recent_runs(limit)
+    notes_by_run = store.all_run_notes()
+    for run in runs:
+        run["note"] = notes_by_run.get(run["id"], "")
+    return StreamingResponse(
+        iter([json.dumps(runs, indent=2)]),
+        media_type="application/json",
+        headers={"Content-Disposition": "attachment; filename=run_history.json"},
+    )
+
+
 @app.get("/api/runs/search")
 def search_run_history(q: str = "", limit: int = 20):
     """Full-text keyword search across past run step outputs and errors —
@@ -2355,17 +2372,26 @@ def list_auto_backups():
     ]
 
 
+def _resolve_auto_backup_path(filename: str) -> Path:
+    """Shared filename validation for every endpoint below that reads or
+    deletes a specific file out of backups/ -- rejects path traversal
+    (any '/' or '\\') and anything that isn't shaped like a snapshot this
+    timer itself would have written, before ever touching the filesystem."""
+    if "/" in filename or "\\" in filename or not filename.startswith("backup_") or not filename.endswith(".json"):
+        raise HTTPException(status_code=404, detail=f"No automatic backup file named '{filename}'.")
+    path = BACKUPS_DIR / filename
+    if not path.is_file():
+        raise HTTPException(status_code=404, detail=f"No automatic backup file named '{filename}'.")
+    return path
+
+
 @app.post("/api/backup/auto/restore/{filename}")
 def restore_auto_backup(filename: str):
     """Restore directly from one of the timestamped snapshots in backups/
     written by the automatic backup timer (see /api/backup/auto/list) --
     the same additive merge as POST /api/backup/restore, just sourced from
     disk instead of a fresh upload."""
-    if "/" in filename or "\\" in filename or not filename.startswith("backup_") or not filename.endswith(".json"):
-        raise HTTPException(status_code=404, detail=f"No automatic backup file named '{filename}'.")
-    path = BACKUPS_DIR / filename
-    if not path.is_file():
-        raise HTTPException(status_code=404, detail=f"No automatic backup file named '{filename}'.")
+    path = _resolve_auto_backup_path(filename)
     try:
         snapshot = json.loads(path.read_text())
     except json.JSONDecodeError as exc:
@@ -2375,6 +2401,18 @@ def restore_auto_backup(filename: str):
     summary = ", ".join(f"{k}: {v}" for k, v in counts.items())
     store.record_audit_event("backup_restore", f"Restored automatic backup snapshot '{filename}' ({summary}).")
     return counts
+
+
+@app.delete("/api/backup/auto/snapshot/{filename}")
+def delete_auto_backup_snapshot(filename: str):
+    """Remove a single automatic backup snapshot early, without waiting for
+    the configured keep_count to prune it -- useful for freeing disk space
+    or discarding a snapshot taken right before some bad state you don't
+    want to keep around as a restore option."""
+    path = _resolve_auto_backup_path(filename)
+    path.unlink()
+    store.record_audit_event("backup_snapshot_deleted", f"Deleted automatic backup snapshot '{filename}'.")
+    return {"deleted": filename}
 
 
 @app.get("/api/audit-log")
@@ -2797,8 +2835,10 @@ async def ingest_json(file: UploadFile = File(...)):
 def list_artifacts(tag: Optional[str] = None):
     files = ingestion.list_artifacts()
     tags_by_file = store.all_artifact_tags()
+    notes_by_file = store.all_artifact_notes()
     for f in files:
         f["tags"] = tags_by_file.get(f["name"], [])
+        f["note"] = notes_by_file.get(f["name"], "")
     if tag and tag.strip():
         tag_lower = tag.strip().lower()
         files = [f for f in files if tag_lower in (t.lower() for t in f["tags"])]
@@ -2980,6 +3020,22 @@ def set_artifact_tags(filename: str, payload: ArtifactTagsUpdate):
     return {"filename": safe_name, "tags": store.set_artifact_tags(safe_name, cleaned)}
 
 
+class ArtifactNoteUpdate(BaseModel):
+    note: str
+
+
+@app.put("/api/artifacts/{filename}/note")
+def set_artifact_note(filename: str, payload: ArtifactNoteUpdate):
+    """A single free-text note per artifact -- distinct from tags, which
+    are short structured keywords, not a place for a longer human comment.
+    Mirrors the existing per-schedule label. An empty string clears it."""
+    safe_name = Path(filename).name
+    path = ingestion.ARTIFACTS_DIR / safe_name
+    if not path.is_file():
+        raise HTTPException(status_code=404, detail=f"No artifact named '{safe_name}'.")
+    return {"filename": safe_name, "note": store.set_artifact_note(safe_name, payload.note.strip())}
+
+
 class ArtifactRename(BaseModel):
     new_name: str
 
@@ -3004,6 +3060,7 @@ def rename_artifact(filename: str, payload: ArtifactRename):
         status_code = 404 if "No artifact named" in detail else 409
         raise HTTPException(status_code=status_code, detail=detail)
     store.rename_artifact_tags(safe_old, safe_new)
+    store.rename_artifact_note(safe_old, safe_new)
     store.record_audit_event("artifact_rename", f"Renamed artifact '{safe_old}' to '{safe_new}'.")
     return {"old_name": safe_old, "new_name": safe_new}
 

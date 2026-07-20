@@ -579,6 +579,37 @@ def test_restore_auto_backup_404s_for_an_unknown_or_unsafe_filename():
     assert res.status_code == 404
 
 
+def test_delete_an_individual_automatic_backup_snapshot():
+    from webapp.main import BACKUPS_DIR, _auto_backup
+    import shutil
+
+    shutil.rmtree(BACKUPS_DIR, ignore_errors=True)
+    try:
+        client.post("/api/backup/auto/run-now")
+        files = list(BACKUPS_DIR.glob("backup_*.json"))
+        assert len(files) == 1
+        filename = files[0].name
+
+        res = client.delete(f"/api/backup/auto/snapshot/{filename}")
+        assert res.status_code == 200
+        assert res.json() == {"deleted": filename}
+        assert not (BACKUPS_DIR / filename).exists()
+
+        list_res = client.get("/api/backup/auto/list")
+        assert list_res.json() == []
+    finally:
+        _auto_backup.configure(enabled=False, interval_hours=24.0, keep_count=7)
+        shutil.rmtree(BACKUPS_DIR, ignore_errors=True)
+
+
+def test_delete_auto_backup_snapshot_404s_for_an_unknown_or_unsafe_filename():
+    res = client.delete("/api/backup/auto/snapshot/does-not-exist.json")
+    assert res.status_code == 404
+
+    res = client.delete("/api/backup/auto/snapshot/..%2F..%2Fetc%2Fpasswd")
+    assert res.status_code == 404
+
+
 def test_a_failing_automatic_backup_tick_records_a_backup_failed_notification():
     from webapp.main import _auto_backup
 
@@ -628,6 +659,19 @@ def test_runs_csv_export_has_a_header_and_rows():
     lines = res.text.strip().splitlines()
     assert lines[0] == "id,started_at,finished_at,status,duration_seconds"
     assert len(lines) >= 2
+
+
+def test_runs_json_export_matches_the_summary_list_shape():
+    client.post("/api/pipeline/run", json={"inputs": {}})
+    res = client.get("/api/runs.json")
+    assert res.status_code == 200
+    assert "application/json" in res.headers["content-type"]
+    assert res.headers["content-disposition"] == "attachment; filename=run_history.json"
+
+    runs = res.json()
+    assert isinstance(runs, list)
+    assert len(runs) >= 1
+    assert set(runs[0].keys()) == {"id", "started_at", "finished_at", "status", "note"}
 
 
 def test_runs_xlsx_export_carries_runs_and_per_step_detail():

@@ -80,6 +80,12 @@ CREATE TABLE IF NOT EXISTS artifact_tags (
     updated_at TEXT NOT NULL
 );
 
+CREATE TABLE IF NOT EXISTS artifact_notes (
+    filename TEXT PRIMARY KEY,
+    note TEXT NOT NULL,
+    updated_at TEXT NOT NULL
+);
+
 CREATE TABLE IF NOT EXISTS module_overrides (
     tier TEXT NOT NULL,
     name TEXT NOT NULL,
@@ -938,6 +944,44 @@ class StateStore:
         with self._lock:
             self._conn.execute(
                 "UPDATE artifact_tags SET filename = ? WHERE filename = ?", (new_filename, old_filename)
+            )
+            self._conn.commit()
+
+    def set_artifact_note(self, filename: str, note: str) -> str:
+        """A single free-text note per artifact (keyed by filename, same as
+        tags) -- for a longer human comment tags aren't suited to, mirroring
+        the existing per-schedule label. An empty string clears the note."""
+        with self._lock:
+            self._conn.execute(
+                "INSERT INTO artifact_notes (filename, note, updated_at) VALUES (?, ?, ?) "
+                "ON CONFLICT(filename) DO UPDATE SET note = excluded.note, updated_at = excluded.updated_at",
+                (filename, note, datetime.now(timezone.utc).isoformat()),
+            )
+            self._conn.commit()
+        return note
+
+    def get_artifact_note(self, filename: str) -> str:
+        with self._lock:
+            row = self._conn.execute(
+                "SELECT note FROM artifact_notes WHERE filename = ?", (filename,)
+            ).fetchone()
+        return row[0] if row else ""
+
+    def all_artifact_notes(self) -> dict[str, str]:
+        """Every noted artifact's note in one query, for list endpoints that
+        join notes onto every file without a query per row."""
+        with self._lock:
+            rows = self._conn.execute("SELECT filename, note FROM artifact_notes").fetchall()
+        return dict(rows)
+
+    def rename_artifact_note(self, old_filename: str, new_filename: str) -> None:
+        """Move an artifact's note row to follow it when the underlying file
+        is renamed -- notes are keyed by filename, so without this a rename
+        would silently orphan the note under the old name. A no-op if the
+        old filename was never noted."""
+        with self._lock:
+            self._conn.execute(
+                "UPDATE artifact_notes SET filename = ? WHERE filename = ?", (new_filename, old_filename)
             )
             self._conn.commit()
 

@@ -923,6 +923,15 @@ body.density-compact .tier-section {
   width: fit-content;
 }
 
+.artifact-note-text {
+  font-size: 0.75rem;
+  color: var(--text-dim);
+  max-width: 22em;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
 .schedule-row-actions {
   display: flex;
   gap: 8px;

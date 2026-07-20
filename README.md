@@ -975,6 +975,25 @@ A few things live in the header/subheader on every page load:
   review). An interval/daily/weekly clone gets its own freshly computed
   next-run time; a one-time clone carries its `next_run_at` over as-is.
 
+## One-click pipeline scheduling, snapshot cleanup, artifact notes, and a JSON run export
+
+- **One-click "Schedule this pipeline" shortcut** — a **🕐 Schedule** button
+  on every saved pipeline card pre-fills the create-schedule form (kind and
+  target already set) and scrolls to it, the same shortcut the existing
+  per-schedule "Duplicate" button already offered for schedules.
+- **Delete an individual automatic backup snapshot** — each row in the
+  automatic-backup snapshot list (added last batch) now has its own
+  **Delete** button, for discarding a specific snapshot early without
+  waiting for the configured keep-count to prune it.
+- **Free-text note field for artifacts** — an **Add/Edit note** button per
+  artifact stores a single free-text comment (distinct from tags, which
+  are short structured keywords), mirroring the existing per-schedule
+  label. The note travels with the file if it's later renamed.
+- **Export full run history as JSON** — a new **Export JSON** button joins
+  the existing CSV/XLSX run-history exports, downloading the same summary
+  list as a `.json` file (distinct from the existing single-run JSON
+  export, which downloads one run's full nested detail).
+
 ## Tech stack
 
 - **Language:** Python 3.11+ — first-class async/sync support and native SDKs

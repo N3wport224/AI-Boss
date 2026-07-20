@@ -293,6 +293,54 @@ def test_artifact_tags_blank_entries_are_dropped():
     assert res.json()["tags"] == ["kept"]
 
 
+# ---- Batch 33: free-text note field for artifacts ----
+
+
+def test_artifacts_list_unnoted_by_default():
+    client.post("/api/ingest/csv", files={"file": ("unnoted.csv", b"x,y\n151,251\n", "text/csv")})
+    files = client.get("/api/artifacts").json()
+    assert all(f["note"] == "" for f in files)
+
+
+def test_set_and_replace_artifact_note():
+    client.post("/api/ingest/csv", files={"file": ("noteme.csv", b"x,y\n161,261\n", "text/csv")})
+    csv_filename = next(f["name"] for f in client.get("/api/artifacts").json() if f["name"].endswith("noteme.csv"))
+
+    res = client.put(f"/api/artifacts/{csv_filename}/note", json={"note": "  Q3 finance export  "})
+    assert res.status_code == 200
+    assert res.json() == {"filename": csv_filename, "note": "Q3 finance export"}
+
+    files = client.get("/api/artifacts").json()
+    noted = next(f for f in files if f["name"] == csv_filename)
+    assert noted["note"] == "Q3 finance export"
+
+    # a second PUT replaces the note rather than appending
+    res2 = client.put(f"/api/artifacts/{csv_filename}/note", json={"note": "updated note"})
+    assert res2.json()["note"] == "updated note"
+
+    # blank clears it
+    res3 = client.put(f"/api/artifacts/{csv_filename}/note", json={"note": "   "})
+    assert res3.json()["note"] == ""
+
+
+def test_artifact_note_rejects_unknown_filename():
+    res = client.put("/api/artifacts/does-not-exist.csv/note", json={"note": "x"})
+    assert res.status_code == 404
+
+
+def test_rename_artifact_moves_its_note_along_with_its_tags():
+    client.post("/api/ingest/csv", files={"file": ("renamefile_note.csv", b"x,y\n1201,1202\n", "text/csv")})
+    old_name = next(f["name"] for f in client.get("/api/artifacts").json() if f["name"].endswith("renamefile_note.csv"))
+    client.put(f"/api/artifacts/{old_name}/note", json={"note": "carry over note"})
+
+    new_name = old_name.replace("renamefile_note.csv", "renamefile_note_renamed.csv")
+    res = client.post(f"/api/artifacts/{old_name}/rename", json={"new_name": new_name})
+    assert res.status_code == 200
+
+    files = {f["name"]: f for f in client.get("/api/artifacts").json()}
+    assert files[new_name]["note"] == "carry over note"
+
+
 def test_filter_artifacts_by_tag():
     client.post("/api/ingest/csv", files={"file": ("filterme_a.csv", b"x,y\n131,231\n", "text/csv")})
     client.post("/api/ingest/csv", files={"file": ("filterme_b.csv", b"x,y\n141,241\n", "text/csv")})

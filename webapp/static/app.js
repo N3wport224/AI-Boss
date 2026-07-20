@@ -3644,6 +3644,7 @@ function renderSavedPipelines(pipelinesList) {
               <button class="btn btn-secondary btn-small" data-clone-slug="${p.slug}" type="button">Clone</button>
               <button class="btn btn-secondary btn-small" data-graph-slug="${p.slug}" type="button">Graph</button>
               <button class="btn btn-secondary btn-small" data-history-slug="${p.slug}" type="button">History</button>
+              <button class="btn btn-secondary btn-small" data-schedule-slug="${p.slug}" type="button" title="Pre-fill the create-schedule form to run this pipeline on a cadence">🕐 Schedule</button>
               <a class="btn btn-secondary btn-small" href="/api/pipelines/${p.slug}/export" download="${p.slug}.yaml">Export YAML</a>
               <a class="btn btn-secondary btn-small" href="/api/pipelines/${p.slug}/export.json" download="${p.slug}.json">Export JSON</a>
               <button class="btn btn-danger btn-small" data-delete-slug="${p.slug}" data-delete-name="${p.name}" type="button">Delete</button>
@@ -3670,6 +3671,16 @@ function renderSavedPipelines(pipelinesList) {
     });
     savedPipelinesGrid.querySelectorAll("[data-graph-slug]").forEach((btn) => {
       btn.addEventListener("click", () => togglePipelineGraph(btn.dataset.graphSlug));
+    });
+    savedPipelinesGrid.querySelectorAll("[data-schedule-slug]").forEach((btn) => {
+      btn.addEventListener("click", () => {
+        fillScheduleFormFrom({
+          kind: "pipeline",
+          name: btn.dataset.scheduleSlug,
+          schedule_type: "interval",
+          interval_seconds: 60,
+        });
+      });
     });
     savedPipelinesGrid.querySelectorAll("[data-history-slug]").forEach((btn) => {
       btn.addEventListener("click", () => togglePipelineHistory(btn.dataset.historySlug));
@@ -4646,7 +4657,10 @@ async function loadArtifacts() {
       return `
       <tr>
         <td><input type="checkbox" class="artifact-select-checkbox" data-artifact="${escapeHtml(f.name)}" ${checked} /></td>
-        <td>${favoriteButtonHtml(favKey)} ${escapeHtml(f.name)}</td>
+        <td>
+          ${favoriteButtonHtml(favKey)} ${escapeHtml(f.name)}
+          ${f.note ? `<div class="artifact-note-text" data-artifact-note-text="${escapeHtml(f.name)}" title="${escapeHtml(f.note)}">📝 ${escapeHtml(f.note)}</div>` : ""}
+        </td>
         <td>${formatBytes(f.size_bytes)}</td>
         <td>${new Date(f.modified_at * 1000).toLocaleString()}</td>
         <td class="artifact-tags-cell">
@@ -4656,6 +4670,7 @@ async function loadArtifacts() {
         <td>
           <button class="btn btn-secondary btn-small artifact-view-btn" data-artifact="${escapeHtml(f.name)}" type="button">View</button>
           <button class="btn btn-secondary btn-small artifact-rename-btn" data-artifact="${escapeHtml(f.name)}" type="button" title="Rename this file">Rename</button>
+          <button class="btn btn-secondary btn-small artifact-note-btn" data-artifact="${escapeHtml(f.name)}" data-note="${escapeHtml(f.note || "")}" type="button" title="Add or edit a free-text note">${f.note ? "Edit note" : "Add note"}</button>
           <a class="btn btn-secondary btn-small" href="/api/artifacts/${encodeURIComponent(f.name)}/download" download title="Download the original file">⬇</a>
         </td>
       </tr>
@@ -4702,6 +4717,25 @@ async function loadArtifacts() {
 
   artifactsListEl.querySelectorAll(".artifact-rename-btn").forEach((btn) => {
     btn.addEventListener("click", () => renameArtifact(btn.dataset.artifact));
+  });
+
+  artifactsListEl.querySelectorAll(".artifact-note-btn").forEach((btn) => {
+    btn.addEventListener("click", async () => {
+      const filename = btn.dataset.artifact;
+      const next = prompt("Note for this artifact (blank to clear):", btn.dataset.note || "");
+      if (next === null) return;
+      const res = await fetch(`/api/artifacts/${encodeURIComponent(filename)}/note`, {
+        method: "PUT",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ note: next }),
+      });
+      if (!res.ok) {
+        const body = await res.json();
+        showToast(body.detail || "Could not save note.", "error");
+        return;
+      }
+      await loadArtifacts();
+    });
   });
 
   artifactsListEl.querySelectorAll(".tag-chip-remove").forEach((btn) => {
@@ -6089,6 +6123,7 @@ async function loadAutoBackupSnapshots() {
           <span>${escapeHtml(s.filename)}</span>
           <span class="runs-purge-label">${formatBytes(s.size_bytes)} — ${new Date(s.modified_at).toLocaleString()}</span>
           <button class="btn btn-secondary btn-small" data-auto-backup-restore="${escapeHtml(s.filename)}">Restore</button>
+          <button class="btn btn-danger btn-small" data-auto-backup-delete="${escapeHtml(s.filename)}">Delete</button>
         </div>`
     )
     .join("");
@@ -6106,6 +6141,20 @@ async function loadAutoBackupSnapshots() {
         .map(([k, v]) => `${k}: ${v}`)
         .join(", ");
       showToast(`Restored from ${filename} (${summary}).`, "success");
+    });
+  });
+  autoBackupSnapshotsListEl.querySelectorAll("[data-auto-backup-delete]").forEach((btn) => {
+    btn.addEventListener("click", async () => {
+      const filename = btn.dataset.autoBackupDelete;
+      if (!confirm(`Delete snapshot "${filename}"? This can't be undone.`)) return;
+      const res = await fetch(`/api/backup/auto/snapshot/${encodeURIComponent(filename)}`, { method: "DELETE" });
+      const body = await res.json();
+      if (!res.ok) {
+        showToast(body.detail || "Delete failed.", "error");
+        return;
+      }
+      showToast(`Deleted snapshot ${filename}.`, "success");
+      await loadAutoBackupSnapshots();
     });
   });
 }
