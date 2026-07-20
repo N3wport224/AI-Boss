@@ -206,6 +206,38 @@ def test_bulk_export_memory_keys_csv_is_just_a_header_on_an_empty_selection():
     assert lines == ["key,value,updated_at"]
 
 
+def test_bulk_export_memory_keys_json_contains_only_the_selected_rows_and_redacts_secrets():
+    from webapp.main import store
+
+    store.set_memory("batch50_bulk_json_a", "alpha json")
+    store.set_memory("batch50_bulk_json_secret_token", "sk-should-be-hidden")
+    store.set_memory("batch50_bulk_json_excluded", "not selected")
+
+    res = client.post(
+        "/api/memory/bulk-export-json",
+        json={"keys": ["batch50_bulk_json_a", "batch50_bulk_json_secret_token"]},
+    )
+    assert res.status_code == 200
+    assert res.headers["content-type"].startswith("application/json")
+    assert "attachment; filename=memory_selected.json" in res.headers["content-disposition"]
+
+    rows = res.json()
+    keys = {r["key"] for r in rows}
+    assert keys == {"batch50_bulk_json_a", "batch50_bulk_json_secret_token"}
+    marker_row = next(r for r in rows if r["key"] == "batch50_bulk_json_a")
+    assert marker_row["value"] == "alpha json"
+    assert marker_row["updated_at"]
+    secret_row = next(r for r in rows if r["key"] == "batch50_bulk_json_secret_token")
+    assert secret_row["value"] != "sk-should-be-hidden"
+    assert "REDACTED" in secret_row["value"]
+
+
+def test_bulk_export_memory_keys_json_is_an_empty_list_on_an_empty_selection():
+    res = client.post("/api/memory/bulk-export-json", json={"keys": []})
+    assert res.status_code == 200
+    assert res.json() == []
+
+
 def test_memory_csv_export_contains_header_and_entries_and_redacts_secrets():
     from webapp.main import store
 

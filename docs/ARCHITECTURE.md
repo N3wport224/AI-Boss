@@ -3585,6 +3585,44 @@ only a JSON parse error or timeout falls back to an empty issue list.
      label, clicking **Apply label to selected**, and confirming
      `GET /api/schedules` reflects the new label.
 
+295. **Add bulk-favorite selected saved pipelines**
+     (a **★ Favorite selected** button in the Saved Pipelines bulk-action
+     row, mirroring Batch 27 #197's bulk-favorite for schedules -- adds
+     `pipeline::{slug}` for every checkbox-selected pipeline to the same
+     localStorage-backed favorites set the per-card star already uses,
+     then re-renders the Favorites strip. Purely client-side, like every
+     other favorites feature).
+296. **Add bulk-favorite selected modules**
+     (same pattern for the Modules panel -- a **★ Favorite selected**
+     button adding `module::{tier}::{name}` for every selected module,
+     joining the existing bulk enable/disable/reset-breaker/export row).
+297. **Add bulk-export selected memory keys to JSON**
+     (`POST /api/memory/bulk-export-json`, completing the CSV/JSON pair
+     for agent memory's checkbox selection (the CSV side landed in Batch
+     45 #282) the same way runs/notifications got both formats. Goes
+     through the same `redact_secrets()` pass as every other
+     memory-reading endpoint. **Export selected JSON** button added next
+     to the existing **Export selected CSV** button).
+298. **Add tests for Batch 50's server-side feature**: bulk-export-memory-
+     json tests confirming only the selected keys appear, a secret-shaped
+     value comes back REDACTED, and an empty selection yields an empty
+     list. (The two bulk-favorite features are pure client-side
+     localStorage state, like every favorites feature before them, so
+     they are covered by live browser verification rather than pytest.)
+     710 tests total. One pre-existing flaky test surfaced during the
+     first full-suite run (`test_run_note_can_be_set_and_is_returned_by_
+     list_and_detail` -- it assumes the newest run stays newest between
+     two `GET /api/runs?limit=1` calls, so a background run leaking from
+     another test can slip in between); it passes in isolation and on
+     re-run, and is queued for a proper fix in the post-batch audit.
+     Live-verified end to end with Playwright against a freshly started
+     server: checkbox-selecting a freshly saved pipeline and clicking
+     **★ Favorite selected**, confirming `pipeline::{slug}` lands in the
+     localStorage favorites; same for a selected module; and seeding a
+     memory key via the import endpoint, checkbox-selecting it, and
+     downloading the selected-JSON export, confirming exactly that
+     key/value pair comes back.
+
 ## 9. Roadmap
 
 The current engine is intentionally a single-process, synchronous, SQLite-backed

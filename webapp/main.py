@@ -3688,6 +3688,29 @@ def bulk_export_memory_csv(payload: BulkExportMemoryKeys):
     )
 
 
+@app.post("/api/memory/bulk-export-json")
+def bulk_export_memory_json(payload: BulkExportMemoryKeys):
+    """Same key/value/updated_at row shape as bulk_export_memory_csv(), as a
+    downloadable JSON array instead -- completes the CSV/JSON pair for a
+    checkbox multi-select, mirroring how runs/notifications each got both
+    formats. Goes through the same redact_secrets() pass as every other
+    memory-reading endpoint."""
+    wanted = set(payload.keys)
+    entries = [entry for entry in store.all_memory() if entry["key"] in wanted]
+    redacted = redact_secrets({entry["key"]: entry["value"] for entry in entries})
+
+    rows = [
+        {"key": entry["key"], "value": redacted[entry["key"]], "updated_at": entry["updated_at"]}
+        for entry in entries
+    ]
+
+    return StreamingResponse(
+        iter([json.dumps(rows, indent=2)]),
+        media_type="application/json",
+        headers={"Content-Disposition": "attachment; filename=memory_selected.json"},
+    )
+
+
 class MemoryKeyDuplicate(BaseModel):
     new_key: str
 

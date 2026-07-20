@@ -39,6 +39,7 @@ const modulesBulkDisableBtn = document.getElementById("modules-bulk-disable-btn"
 const modulesBulkResetBreakerBtn = document.getElementById("modules-bulk-reset-breaker-btn");
 const modulesBulkClearThresholdBtn = document.getElementById("modules-bulk-clear-threshold-btn");
 const modulesBulkClearEnabledBtn = document.getElementById("modules-bulk-clear-enabled-btn");
+const modulesBulkFavoriteBtn = document.getElementById("modules-bulk-favorite-btn");
 const modulesBulkExportCsvBtn = document.getElementById("modules-bulk-export-csv-btn");
 const modulesProblemsFilterEl = document.getElementById("modules-problems-filter");
 const pipelineResultEl = document.getElementById("pipeline-result");
@@ -104,6 +105,7 @@ const pipelinesBulkUntagBtn = document.getElementById("pipelines-bulk-untag-btn"
 const pipelinesBulkTagInput = document.getElementById("pipelines-bulk-tag-input");
 const pipelinesBulkTagBtn = document.getElementById("pipelines-bulk-tag-btn");
 const pipelinesBulkDuplicateBtn = document.getElementById("pipelines-bulk-duplicate-btn");
+const pipelinesBulkFavoriteBtn = document.getElementById("pipelines-bulk-favorite-btn");
 const pipelinesBulkExportZipBtn = document.getElementById("pipelines-bulk-export-zip-btn");
 
 const selectedPipelineSlugs = new Set();
@@ -125,6 +127,10 @@ function updatePipelinesBulkDeleteBtn() {
   pipelinesBulkDuplicateBtn.textContent = selectedPipelineSlugs.size
     ? `Duplicate selected (${selectedPipelineSlugs.size})`
     : "Duplicate selected";
+  pipelinesBulkFavoriteBtn.disabled = selectedPipelineSlugs.size === 0;
+  pipelinesBulkFavoriteBtn.textContent = selectedPipelineSlugs.size
+    ? `★ Favorite selected (${selectedPipelineSlugs.size})`
+    : "★ Favorite selected";
   pipelinesBulkExportZipBtn.disabled = selectedPipelineSlugs.size === 0;
   pipelinesBulkExportZipBtn.textContent = selectedPipelineSlugs.size
     ? `⬇ Export selected as zip (${selectedPipelineSlugs.size})`
@@ -178,6 +184,15 @@ pipelinesBulkDuplicateBtn.addEventListener("click", async () => {
   } catch (err) {
     showToast(`Bulk duplicate failed: ${err}`, "error");
   }
+});
+
+pipelinesBulkFavoriteBtn.addEventListener("click", () => {
+  if (!selectedPipelineSlugs.size) return;
+  selectedPipelineSlugs.forEach((slug) => favoriteKeys.add(`pipeline::${slug}`));
+  saveFavoriteKeys();
+  renderFavoritesSection();
+  showToast(`Favorited ${selectedPipelineSlugs.size} pipeline(s).`, "success");
+  loadSavedPipelines();
 });
 
 pipelinesBulkTagBtn.addEventListener("click", async () => {
@@ -2508,6 +2523,7 @@ function updateModulesBulkButtons() {
   modulesBulkResetBreakerBtn.disabled = disabled;
   modulesBulkClearThresholdBtn.disabled = disabled;
   modulesBulkClearEnabledBtn.disabled = disabled;
+  modulesBulkFavoriteBtn.disabled = disabled;
   modulesBulkExportCsvBtn.disabled = disabled;
   const suffix = selectedModuleRefs.size ? ` (${selectedModuleRefs.size})` : "";
   modulesBulkEnableBtn.textContent = `Enable selected${suffix}`;
@@ -2515,6 +2531,7 @@ function updateModulesBulkButtons() {
   modulesBulkResetBreakerBtn.textContent = `Reset breakers for selected${suffix}`;
   modulesBulkClearThresholdBtn.textContent = `Clear threshold overrides${suffix}`;
   modulesBulkClearEnabledBtn.textContent = `Clear enabled overrides${suffix}`;
+  modulesBulkFavoriteBtn.textContent = `★ Favorite selected${suffix}`;
   modulesBulkExportCsvBtn.textContent = `Export selected CSV${suffix}`;
 }
 
@@ -2615,6 +2632,15 @@ modulesBulkClearEnabledBtn.addEventListener("click", async () => {
   showToast(`Cleared enabled override for ${modules.length} module(s).`, "success");
   selectedModuleRefs.clear();
   await loadModules();
+});
+
+modulesBulkFavoriteBtn.addEventListener("click", () => {
+  if (!selectedModuleRefs.size) return;
+  selectedModuleRefs.forEach((ref) => favoriteKeys.add(`module::${ref}`));
+  saveFavoriteKeys();
+  renderFavoritesSection();
+  showToast(`Favorited ${selectedModuleRefs.size} module(s).`, "success");
+  loadModules();
 });
 
 modulesBulkExportCsvBtn.addEventListener("click", async () => {
@@ -6433,12 +6459,14 @@ const memoryClearBtn = document.getElementById("memory-clear-btn");
 const memorySearchInput = document.getElementById("memory-search-input");
 const memorySelectAllEl = document.getElementById("memory-select-all");
 const memoryBulkExportCsvBtn = document.getElementById("memory-bulk-export-csv-btn");
+const memoryBulkExportJsonBtn = document.getElementById("memory-bulk-export-json-btn");
 const memoryBulkDeleteBtn = document.getElementById("memory-bulk-delete-btn");
 const selectedMemoryKeys = new Set();
 
 function updateMemoryBulkButtons() {
   const disabled = selectedMemoryKeys.size === 0;
   memoryBulkExportCsvBtn.disabled = disabled;
+  memoryBulkExportJsonBtn.disabled = disabled;
   memoryBulkDeleteBtn.disabled = disabled;
 }
 
@@ -6562,6 +6590,30 @@ memoryBulkExportCsvBtn.addEventListener("click", async () => {
     link.remove();
     URL.revokeObjectURL(url);
     showToast(`Exported ${selectedMemoryKeys.size} memory key(s) as CSV.`, "success");
+  } catch (err) {
+    showToast(`Export failed: ${err}`, "error");
+  }
+});
+
+memoryBulkExportJsonBtn.addEventListener("click", async () => {
+  if (!selectedMemoryKeys.size) return;
+  try {
+    const res = await fetch("/api/memory/bulk-export-json", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ keys: [...selectedMemoryKeys] }),
+    });
+    if (!res.ok) throw new Error(`HTTP ${res.status}`);
+    const blob = await res.blob();
+    const url = URL.createObjectURL(blob);
+    const link = document.createElement("a");
+    link.href = url;
+    link.download = "memory_selected.json";
+    document.body.appendChild(link);
+    link.click();
+    link.remove();
+    URL.revokeObjectURL(url);
+    showToast(`Exported ${selectedMemoryKeys.size} memory key(s) as JSON.`, "success");
   } catch (err) {
     showToast(`Export failed: ${err}`, "error");
   }

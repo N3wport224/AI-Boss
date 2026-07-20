@@ -1251,6 +1251,17 @@ kept out of history by manual discipline. It's now protected the same way
   selected** button join the existing **Clear labels** button in the
   Schedules bulk-action row.
 
+## Bulk favorites and the last memory export gap
+
+- **Bulk-favorite selected saved pipelines** — a **★ Favorite selected**
+  button in the Saved Pipelines bulk-action row stars every checkbox-selected
+  pipeline at once, feeding the same Favorites strip the per-card star does.
+- **Bulk-favorite selected modules** — the same one-click bulk star for the
+  Modules panel's selection.
+- **Bulk-export selected memory keys to JSON** — completes the CSV/JSON pair
+  for agent memory's checkbox selection, with the same secrets redaction as
+  every other memory export.
+
 ## Tech stack
 
 - **Language:** Python 3.11+ — first-class async/sync support and native SDKs
