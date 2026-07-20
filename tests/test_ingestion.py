@@ -840,6 +840,54 @@ def test_rename_artifact_rejects_a_blank_new_name():
     assert res.status_code == 400
 
 
+# ---- Batch 40: duplicate an artifact ----
+
+
+def test_duplicate_artifact_copies_the_file_and_carries_over_tags_and_note():
+    client.post("/api/ingest/csv", files={"file": ("dupefile_a.csv", b"x,y\n1601,1602\n", "text/csv")})
+    old_name = next(f["name"] for f in client.get("/api/artifacts").json() if f["name"].endswith("dupefile_a.csv"))
+    client.put(f"/api/artifacts/{old_name}/tags", json={"tags": ["carry_over_tag"]})
+    client.put(f"/api/artifacts/{old_name}/note", json={"note": "carry over note"})
+
+    new_name = old_name.replace("dupefile_a.csv", "dupefile_a_copy.csv")
+    res = client.post(f"/api/artifacts/{old_name}/duplicate", json={"new_name": new_name})
+    assert res.status_code == 200
+    assert res.json() == {"old_name": old_name, "new_name": new_name}
+
+    files = {f["name"]: f for f in client.get("/api/artifacts").json()}
+    assert old_name in files, "the original artifact must still exist after duplicating"
+    assert new_name in files
+    assert files[new_name]["tags"] == ["carry_over_tag"]
+    assert files[new_name]["note"] == "carry over note"
+
+    original_content = client.get(f"/api/artifacts/{old_name}/content").json()
+    duplicate_content = client.get(f"/api/artifacts/{new_name}/content").json()
+    assert original_content == duplicate_content
+
+
+def test_duplicate_artifact_404s_for_an_unknown_file():
+    res = client.post("/api/artifacts/does-not-exist.csv/duplicate", json={"new_name": "whatever.csv"})
+    assert res.status_code == 404
+
+
+def test_duplicate_artifact_409s_if_the_new_name_already_exists():
+    client.post("/api/ingest/csv", files={"file": ("dupefile_b.csv", b"x,y\n1603,1604\n", "text/csv")})
+    client.post("/api/ingest/csv", files={"file": ("dupefile_c.csv", b"x,y\n1605,1606\n", "text/csv")})
+    files = client.get("/api/artifacts").json()
+    b_name = next(f["name"] for f in files if f["name"].endswith("dupefile_b.csv"))
+    c_name = next(f["name"] for f in files if f["name"].endswith("dupefile_c.csv"))
+
+    res = client.post(f"/api/artifacts/{b_name}/duplicate", json={"new_name": c_name})
+    assert res.status_code == 409
+
+
+def test_duplicate_artifact_rejects_a_blank_new_name():
+    client.post("/api/ingest/csv", files={"file": ("dupefile_d.csv", b"x,y\n1607,1608\n", "text/csv")})
+    d_name = next(f["name"] for f in client.get("/api/artifacts").json() if f["name"].endswith("dupefile_d.csv"))
+    res = client.post(f"/api/artifacts/{d_name}/duplicate", json={"new_name": "   "})
+    assert res.status_code == 400
+
+
 # ---- Batch 16: compare two artifacts' schemas ----
 
 def test_compare_schema_reports_matching_columns_when_schemas_agree():

@@ -1231,6 +1231,37 @@ def export_all_pipelines():
     )
 
 
+class PipelineBulkExportZip(BaseModel):
+    slugs: list[str]
+
+
+@app.post("/api/pipelines/bulk-export-zip")
+def bulk_export_pipelines_zip(payload: PipelineBulkExportZip):
+    """A user-picked set of saved pipelines' YAML files bundled into a
+    single zip -- the finer-grained, checkbox-selection counterpart to
+    GET /api/pipelines/export-all (which always bundles every pipeline),
+    mirroring how POST /api/artifacts/bulk-download zips a selection of
+    artifacts instead of everything. An unknown slug is skipped rather
+    than failing the whole batch."""
+    included = []
+    buffer = io.BytesIO()
+    with zipfile.ZipFile(buffer, "w", zipfile.ZIP_DEFLATED) as zf:
+        for slug in payload.slugs:
+            path = pipeline_store.PIPELINES_DIR / f"{slug}.yaml"
+            if path.is_file():
+                zf.write(path, arcname=f"{slug}.yaml")
+                included.append(slug)
+    if not included:
+        raise HTTPException(status_code=404, detail="None of the requested pipelines exist.")
+    buffer.seek(0)
+
+    return StreamingResponse(
+        buffer,
+        media_type="application/zip",
+        headers={"Content-Disposition": "attachment; filename=pipelines_selected.zip"},
+    )
+
+
 @app.get("/api/pipelines/{slug}/export")
 def export_pipeline(slug: str):
     """The pipeline's own saved YAML file, as a standalone download — for
@@ -2729,6 +2760,20 @@ def audit_log_csv(limit: int = 1000):
     )
 
 
+@app.get("/api/audit-log.json")
+def audit_log_json(limit: int = 1000):
+    """Same audit trail as GET /api/audit-log.csv, as a downloadable JSON
+    file instead -- mirrors the existing runs.json/memory.json/
+    notifications.json exports, which each offer their data both plain
+    (for the UI to fetch) and as a Content-Disposition attachment."""
+    buffer = json.dumps(store.list_audit_events(limit), indent=2)
+    return StreamingResponse(
+        iter([buffer]),
+        media_type="application/json",
+        headers={"Content-Disposition": "attachment; filename=audit_log.json"},
+    )
+
+
 @app.get("/api/notifications")
 def list_notifications(unread_only: bool = False, limit: int = 200):
     """Durable notifications -- unlike a toast (gone on reload), these
@@ -3519,6 +3564,36 @@ def rename_artifact(filename: str, payload: ArtifactRename):
     store.rename_artifact_tags(safe_old, safe_new)
     store.rename_artifact_note(safe_old, safe_new)
     store.record_audit_event("artifact_rename", f"Renamed artifact '{safe_old}' to '{safe_new}'.")
+    return {"old_name": safe_old, "new_name": safe_new}
+
+
+@app.post("/api/artifacts/{filename}/duplicate")
+def duplicate_artifact(filename: str, payload: ArtifactRename):
+    """Copy an artifact's underlying file under a new name -- the artifact
+    counterpart to module scaffolding-by-duplication, saved-pipeline
+    duplication, and schedule duplication, all of which already exist;
+    artifacts were the one entity type in this app you couldn't clone.
+    Distinct from POST /api/artifacts/{filename}/rename, which moves the
+    file rather than copying it. Carries over tags and the free-text note
+    onto the new name, same as rename_artifact does, so the duplicate
+    starts out identically annotated to its source."""
+    safe_old = Path(filename).name
+    safe_new = Path(payload.new_name).name
+    if not safe_new.strip():
+        raise HTTPException(status_code=400, detail="new_name must not be empty.")
+    try:
+        ingestion.duplicate_artifact(safe_old, safe_new)
+    except ingestion.ArtifactRenameError as exc:
+        detail = str(exc)
+        status_code = 404 if "No artifact named" in detail else 409
+        raise HTTPException(status_code=status_code, detail=detail)
+    existing_tags = store.all_artifact_tags().get(safe_old, [])
+    if existing_tags:
+        store.set_artifact_tags(safe_new, existing_tags)
+    existing_note = store.get_artifact_note(safe_old)
+    if existing_note:
+        store.set_artifact_note(safe_new, existing_note)
+    store.record_audit_event("artifact_duplicate", f"Duplicated artifact '{safe_old}' as '{safe_new}'.")
     return {"old_name": safe_old, "new_name": safe_new}
 
 

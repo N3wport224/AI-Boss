@@ -260,3 +260,28 @@ def test_purge_audit_log_is_a_no_op_when_nothing_is_old_enough():
     res = client.post("/api/audit-log/purge", params={"older_than_hours": 999999})
     assert res.status_code == 200
     assert res.json()["deleted"] == 0
+
+
+# ---- Batch 40: export the audit log to JSON ----
+
+
+def test_audit_log_json_export_matches_the_list_endpoint():
+    store.record_audit_event("test_json_export_marker", "unique json export detail 5001")
+
+    res = client.get("/api/audit-log.json")
+    assert res.status_code == 200
+    assert res.headers["content-type"].startswith("application/json")
+    assert "attachment; filename=audit_log.json" in res.headers["content-disposition"]
+
+    exported = res.json()
+    assert any(e["action"] == "test_json_export_marker" for e in exported)
+    assert exported == client.get("/api/audit-log", params={"limit": 1000}).json()
+
+
+def test_audit_log_json_export_respects_limit():
+    for i in range(3):
+        store.record_audit_event("test_json_limit_event", f"limit test {5002 + i}")
+
+    res = client.get("/api/audit-log.json", params={"limit": 1})
+    assert res.status_code == 200
+    assert len(res.json()) == 1

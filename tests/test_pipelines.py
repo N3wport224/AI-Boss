@@ -914,6 +914,46 @@ def test_export_all_pipelines_404s_when_there_are_none():
     assert res.status_code == 404
 
 
+def test_bulk_export_pipelines_zip_contains_only_the_selected_pipelines():
+    import io
+    import zipfile
+
+    client.post(
+        "/api/pipelines",
+        json={"name": "Bulk Export Zip A", "steps": [{"tier": "automation", "name": "fetch_raw_metrics"}]},
+    )
+    client.post(
+        "/api/pipelines",
+        json={"name": "Bulk Export Zip B", "steps": [{"tier": "automation", "name": "fetch_raw_metrics"}]},
+    )
+    client.post(
+        "/api/pipelines",
+        json={"name": "Bulk Export Zip Not Selected", "steps": [{"tier": "automation", "name": "fetch_raw_metrics"}]},
+    )
+
+    res = client.post(
+        "/api/pipelines/bulk-export-zip",
+        json={"slugs": ["bulk_export_zip_a", "bulk_export_zip_b", "totally_made_up_slug"]},
+    )
+    assert res.status_code == 200
+    assert res.headers["content-type"] == "application/zip"
+    assert "attachment; filename=pipelines_selected.zip" in res.headers["content-disposition"]
+
+    zf = zipfile.ZipFile(io.BytesIO(res.content))
+    names = zf.namelist()
+    assert "bulk_export_zip_a.yaml" in names
+    assert "bulk_export_zip_b.yaml" in names
+    assert "bulk_export_zip_not_selected.yaml" not in names
+
+
+def test_bulk_export_pipelines_zip_404s_when_no_selected_slug_exists():
+    res = client.post("/api/pipelines/bulk-export-zip", json={"slugs": ["totally_made_up_slug"]})
+    assert res.status_code == 404
+
+    res2 = client.post("/api/pipelines/bulk-export-zip", json={"slugs": []})
+    assert res2.status_code == 404
+
+
 def test_import_pipeline_creates_a_new_saved_pipeline():
     yaml_text = (
         "name: Imported Fresh\n"

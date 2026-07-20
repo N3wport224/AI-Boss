@@ -101,6 +101,7 @@ const pipelinesBulkUntagBtn = document.getElementById("pipelines-bulk-untag-btn"
 const pipelinesBulkTagInput = document.getElementById("pipelines-bulk-tag-input");
 const pipelinesBulkTagBtn = document.getElementById("pipelines-bulk-tag-btn");
 const pipelinesBulkDuplicateBtn = document.getElementById("pipelines-bulk-duplicate-btn");
+const pipelinesBulkExportZipBtn = document.getElementById("pipelines-bulk-export-zip-btn");
 
 const selectedPipelineSlugs = new Set();
 
@@ -121,7 +122,39 @@ function updatePipelinesBulkDeleteBtn() {
   pipelinesBulkDuplicateBtn.textContent = selectedPipelineSlugs.size
     ? `Duplicate selected (${selectedPipelineSlugs.size})`
     : "Duplicate selected";
+  pipelinesBulkExportZipBtn.disabled = selectedPipelineSlugs.size === 0;
+  pipelinesBulkExportZipBtn.textContent = selectedPipelineSlugs.size
+    ? `⬇ Export selected as zip (${selectedPipelineSlugs.size})`
+    : "⬇ Export selected as zip";
 }
+
+pipelinesBulkExportZipBtn.addEventListener("click", async () => {
+  if (!selectedPipelineSlugs.size) return;
+  try {
+    const res = await fetch("/api/pipelines/bulk-export-zip", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ slugs: [...selectedPipelineSlugs] }),
+    });
+    if (!res.ok) {
+      const body = await res.json();
+      showToast(body.detail || "Failed to export selected pipelines.", "error");
+      return;
+    }
+    const blob = await res.blob();
+    const url = URL.createObjectURL(blob);
+    const link = document.createElement("a");
+    link.href = url;
+    link.download = "pipelines_selected.zip";
+    document.body.appendChild(link);
+    link.click();
+    link.remove();
+    URL.revokeObjectURL(url);
+    showToast(`Exported ${selectedPipelineSlugs.size} pipeline(s) as a zip.`, "success");
+  } catch (err) {
+    showToast(`Bulk export failed: ${err}`, "error");
+  }
+});
 
 pipelinesBulkDuplicateBtn.addEventListener("click", async () => {
   if (!selectedPipelineSlugs.size) return;
@@ -4502,6 +4535,32 @@ async function renameArtifact(currentName) {
   }
 }
 
+async function duplicateArtifact(currentName) {
+  const dotIndex = currentName.lastIndexOf(".");
+  const suggested =
+    dotIndex > 0
+      ? `${currentName.slice(0, dotIndex)}_copy${currentName.slice(dotIndex)}`
+      : `${currentName}_copy`;
+  const newName = prompt(`Duplicate "${currentName}" as:`, suggested);
+  if (!newName || !newName.trim() || newName.trim() === currentName) return;
+  try {
+    const res = await fetch(`/api/artifacts/${encodeURIComponent(currentName)}/duplicate`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ new_name: newName.trim() }),
+    });
+    const body = await res.json();
+    if (!res.ok) {
+      showToast(body.detail || "Failed to duplicate this file.", "error");
+      return;
+    }
+    showToast(`Duplicated as "${body.new_name}".`, "success");
+    await loadArtifacts();
+  } catch (err) {
+    showToast(`Duplicate failed: ${err}`, "error");
+  }
+}
+
 async function runSavedPipeline(slug, name, pipelinesList) {
   const card = document.getElementById(`pipeline-card__${slug}`);
   card.scrollIntoView({ behavior: "smooth", block: "center" });
@@ -4796,6 +4855,7 @@ async function loadArtifacts() {
         <td>
           <button class="btn btn-secondary btn-small artifact-view-btn" data-artifact="${escapeHtml(f.name)}" type="button">View</button>
           <button class="btn btn-secondary btn-small artifact-rename-btn" data-artifact="${escapeHtml(f.name)}" type="button" title="Rename this file">Rename</button>
+          <button class="btn btn-secondary btn-small artifact-duplicate-btn" data-artifact="${escapeHtml(f.name)}" type="button" title="Copy this file under a new name">⧉ Duplicate</button>
           <button class="btn btn-secondary btn-small artifact-note-btn" data-artifact="${escapeHtml(f.name)}" data-note="${escapeHtml(f.note || "")}" type="button" title="Add or edit a free-text note">${f.note ? "Edit note" : "Add note"}</button>
           <a class="btn btn-secondary btn-small" href="/api/artifacts/${encodeURIComponent(f.name)}/download" download title="Download the original file">⬇</a>
         </td>
@@ -4843,6 +4903,10 @@ async function loadArtifacts() {
 
   artifactsListEl.querySelectorAll(".artifact-rename-btn").forEach((btn) => {
     btn.addEventListener("click", () => renameArtifact(btn.dataset.artifact));
+  });
+
+  artifactsListEl.querySelectorAll(".artifact-duplicate-btn").forEach((btn) => {
+    btn.addEventListener("click", () => duplicateArtifact(btn.dataset.artifact));
   });
 
   artifactsListEl.querySelectorAll(".artifact-note-btn").forEach((btn) => {

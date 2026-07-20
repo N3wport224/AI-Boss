@@ -3088,6 +3088,58 @@ only a JSON parse error or timeout falls back to an empty issue list.
      snapshots, clicking **📌 Protect selected**, confirming both report
      `protected: true` in `GET /api/backup/auto/list`, then clicking
      **Unprotect selected** and confirming both flip back to `false`.
+253. **Add exporting the audit log to JSON**
+     (`GET /api/audit-log.json`, mirroring the exact
+     `StreamingResponse`-with-`Content-Disposition`-attachment pattern
+     already used by `runs.json`, `memory.json`, and `notifications.json`
+     -- only a CSV export existed for the audit log before this. An
+     **Export JSON** link added next to the existing **Export CSV** link
+     in the Recent Actions panel).
+254. **Add duplicating an artifact**
+     (`ingestion.duplicate_artifact()`, a new `shutil.copy2`-based sibling
+     to the existing `rename_artifact()` -- copies rather than moves, and
+     raises the same `ArtifactRenameError` for an unknown source or a
+     name collision on the destination, reusing its exact error-to-status-
+     code mapping (404 vs 409) in the new
+     `POST /api/artifacts/{filename}/duplicate` endpoint. Copies the
+     source's tags and note onto the new name, same as rename does. Every
+     other entity type in this app (modules, saved pipelines, schedules)
+     already had a duplicate feature; artifacts were the one gap. A **⧉
+     Duplicate** button added per artifact row, prompting for the new name
+     with a `<stem>_copy<ext>` suggestion).
+255. **Add bulk-exporting selected saved pipelines as a zip bundle**
+     (`POST /api/pipelines/bulk-export-zip`, body `{slugs: list[str]}` --
+     the checkbox-selection counterpart to `GET /api/pipelines/export-all`
+     (always bundles every saved pipeline, no selection to make),
+     mirroring how `POST /api/artifacts/bulk-download` already zips a
+     selection of artifacts instead of everything. An unknown slug is
+     skipped rather than failing the whole batch; 404s only if none of
+     the requested slugs exist. A **⬇ Export selected as zip** button
+     added to the Saved Pipelines panel's bulk-action row, using the
+     existing blob-download pattern from the artifact bulk-download
+     button).
+256. **Add tests for all of Batch 40**: an audit-log.json round trip
+     confirming the exported list matches `GET /api/audit-log` at the
+     same limit, plus a limit-respecting test; an artifact-duplicate round
+     trip confirming the original file survives, the copy carries over
+     tags and note, and both have identical content, plus the existing
+     404/409/blank-name rejection patterns reused from the rename tests;
+     a bulk-pipeline-zip-export test confirming only the selected
+     pipelines' YAML files appear in the zip (with an unknown slug mixed
+     into the selection skipped) plus a 404-on-nothing-selected-exists
+     test. 653 tests total, stable across two repeated clean full-suite
+     runs (one transient single-test failure on an intermediate run
+     turned out to be a pre-existing test-ordering flake, not a
+     regression -- it passed cleanly in isolation and on both bracketing
+     full-suite runs). Live-verified end to end with Playwright against a
+     freshly started server: confirming the Recent Actions panel's
+     **Export JSON** link returns a well-formed, non-empty JSON array;
+     uploading a CSV, clicking its new **⧉ Duplicate** button, accepting a
+     browser-native prompt dialog with a new filename, and confirming
+     `GET /api/artifacts` lists both the original and the duplicate; and
+     checkbox-selecting two real saved pipelines, clicking **⬇ Export
+     selected as zip**, and confirming the downloaded zip contains exactly
+     those two pipelines' YAML files.
 
 ## 9. Roadmap
 

@@ -9,6 +9,7 @@ import hashlib
 import io
 import json
 import re
+import shutil
 import time
 from pathlib import Path
 from typing import Optional
@@ -520,3 +521,21 @@ def rename_artifact(old_name: str, new_name: str) -> None:
     if new_path.exists():
         raise ArtifactRenameError(f"An artifact named '{new_path.name}' already exists.")
     old_path.rename(new_path)
+
+
+def duplicate_artifact(old_name: str, new_name: str) -> None:
+    """Copy an ingested artifact's underlying file under a new name --
+    distinct from rename_artifact(), which moves the file rather than
+    copying it, leaving nothing behind under the old name. Same error
+    behavior as rename_artifact() (unknown source, name collision on the
+    destination); the caller is responsible for copying tags/notes onto
+    the new name, since those live in the state store, not on disk."""
+    old_path = ARTIFACTS_DIR / old_name
+    if not old_path.is_file():
+        raise ArtifactRenameError(f"No artifact named '{old_name}'.")
+    new_path = ARTIFACTS_DIR / Path(new_name).name
+    if new_path == old_path:
+        raise ArtifactRenameError("new_name must be different from the original.")
+    if new_path.exists():
+        raise ArtifactRenameError(f"An artifact named '{new_path.name}' already exists.")
+    shutil.copy2(old_path, new_path)

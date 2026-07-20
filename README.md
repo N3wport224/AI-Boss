@@ -1101,6 +1101,21 @@ A few things live in the header/subheader on every page load:
   selection to flip the per-snapshot protection flag (added last batch)
   for a whole batch of snapshots at once.
 
+## Audit log JSON export, artifact duplication, and bulk pipeline zip export
+
+- **Export the audit log to JSON** — an **Export JSON** link joins the
+  existing **Export CSV** link in the Recent Actions panel, mirroring the
+  existing runs.json/memory.json/notifications.json exports.
+- **Duplicate an artifact** — a **⧉ Duplicate** button per artifact row
+  copies the underlying file under a new name, carrying over its tags and
+  note; modules, saved pipelines, and schedules could already all be
+  duplicated, but artifacts were the one entity type in this app you
+  couldn't clone.
+- **Bulk export selected saved pipelines as a zip bundle** — a checkbox
+  selection can now be exported as its own zip via **⬇ Export selected as
+  zip**, distinct from the existing **Export all** (every saved pipeline,
+  no selection), mirroring the existing bulk artifact zip download.
+
 ## Tech stack
 
 - **Language:** Python 3.11+ — first-class async/sync support and native SDKs
