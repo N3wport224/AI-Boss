@@ -400,6 +400,34 @@ def test_prune_runs_removes_only_finished_runs_older_than_cutoff(tmp_path):
     reopened.close()
 
 
+def test_prune_runs_skips_a_protected_run_even_past_the_cutoff(tmp_path):
+    from datetime import datetime, timedelta, timezone
+
+    from engine.context import StepRecord
+    from engine.state_store import StateStore
+
+    isolated_store = StateStore(str(tmp_path / "prune_protected_test.db"))
+
+    old_run_id = isolated_store.start_run()
+    now = datetime.now(timezone.utc)
+    isolated_store.log_step(old_run_id, StepRecord("a", "automation", now, now, True, {}))
+    isolated_store.finish_run(old_run_id, "completed")
+    old_cutoff = (now - timedelta(hours=1)).isoformat()
+    isolated_store._conn.execute("UPDATE runs SET finished_at = ? WHERE id = ?", (old_cutoff, old_run_id))
+    isolated_store._conn.commit()
+    isolated_store.set_run_protected(old_run_id, True)
+
+    removed = isolated_store.prune_runs(older_than_hours=0.01)
+    isolated_store.close()
+
+    assert removed == 0
+
+    reopened = StateStore(str(tmp_path / "prune_protected_test.db"))
+    remaining_ids = {run["id"] for run in reopened.recent_runs(limit=10)}
+    assert old_run_id in remaining_ids
+    reopened.close()
+
+
 def test_purge_runs_endpoint_removes_old_runs():
     res = client.post("/api/pipeline/run", json={"inputs": {}})
     with client.stream("GET", f"/api/stream/{res.json()['stream_id']}") as response:
@@ -482,6 +510,71 @@ def test_bulk_delete_runs_endpoint_handles_empty_selection():
     res = client.post("/api/runs/bulk-delete", json={"run_ids": []})
     assert res.status_code == 200
     assert res.json()["removed_count"] == 0
+
+
+def test_protect_and_unprotect_a_run():
+    run_id = _run_full_pipeline_to_completion()
+
+    listed = {r["id"]: r for r in client.get("/api/runs?limit=50").json()}
+    assert listed[run_id]["protected"] is False
+
+    res = client.put(f"/api/runs/{run_id}/protect", json={"protected": True})
+    assert res.status_code == 200
+    assert res.json() == {"run_id": run_id, "protected": True}
+
+    listed2 = {r["id"]: r for r in client.get("/api/runs?limit=50").json()}
+    assert listed2[run_id]["protected"] is True
+
+    res2 = client.put(f"/api/runs/{run_id}/protect", json={"protected": False})
+    assert res2.json() == {"run_id": run_id, "protected": False}
+    listed3 = {r["id"]: r for r in client.get("/api/runs?limit=50").json()}
+    assert listed3[run_id]["protected"] is False
+
+
+def test_deleting_a_protected_run_still_succeeds_and_clears_its_protection_row():
+    from webapp.main import store
+
+    run_id = _run_full_pipeline_to_completion()
+    client.put(f"/api/runs/{run_id}/protect", json={"protected": True})
+    assert store.is_run_protected(run_id)
+
+    res = client.post("/api/runs/bulk-delete", json={"run_ids": [run_id]})
+    assert res.status_code == 200
+    assert res.json()["removed_count"] == 1
+    assert not store.is_run_protected(run_id)
+
+
+def test_protect_run_404s_for_an_unknown_run_id():
+    res = client.put("/api/runs/999999999/protect", json={"protected": True})
+    assert res.status_code == 404
+
+
+def test_bulk_protect_and_unprotect_selected_runs():
+    run_a = _run_full_pipeline_to_completion()
+    run_b = _run_full_pipeline_to_completion()
+
+    res = client.post("/api/runs/bulk-protect", json={"run_ids": [run_a, run_b, 999999999], "protected": True})
+    assert res.status_code == 200
+    body = res.json()
+    assert body["protected"] is True
+    assert set(body["updated"]) == {run_a, run_b}
+
+    listed = {r["id"]: r for r in client.get("/api/runs?limit=50").json()}
+    assert listed[run_a]["protected"] is True
+    assert listed[run_b]["protected"] is True
+
+    res2 = client.post("/api/runs/bulk-protect", json={"run_ids": [run_a], "protected": False})
+    assert res2.json()["updated"] == [run_a]
+
+    listed2 = {r["id"]: r for r in client.get("/api/runs?limit=50").json()}
+    assert listed2[run_a]["protected"] is False
+    assert listed2[run_b]["protected"] is True
+
+
+def test_bulk_protect_runs_is_a_no_op_on_an_empty_selection():
+    res = client.post("/api/runs/bulk-protect", json={"run_ids": [], "protected": True})
+    assert res.status_code == 200
+    assert res.json() == {"protected": True, "updated": []}
 
 
 def test_restore_snapshot_is_additive_and_idempotent(tmp_path):

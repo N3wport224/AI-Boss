@@ -541,6 +541,8 @@
           <span class="runs-purge-label">hours</span>
           <button id="runs-purge-btn" class="btn btn-secondary btn-small" type="button">Purge</button>
           <button id="runs-bulk-delete-btn" class="btn btn-secondary btn-small" type="button" disabled>Delete selected</button>
+          <button id="runs-bulk-protect-btn" class="btn btn-secondary btn-small" type="button" disabled title="Protect selected runs from age-based purge">Protect selected</button>
+          <button id="runs-bulk-unprotect-btn" class="btn btn-secondary btn-small" type="button" disabled title="Remove purge protection from selected runs">Unprotect selected</button>
           <a id="export-csv-link" class="btn btn-secondary btn-small" href="/api/runs.csv" download>Export CSV</a>
           <a id="export-xlsx-link" class="btn btn-secondary btn-small" href="/api/runs.xlsx" download>Export XLSX</a>
           <a id="export-json-link" class="btn btn-secondary btn-small" href="/api/runs.json" download>Export JSON</a>
@@ -563,6 +565,7 @@
         <button class="status-filter-chip" type="button" data-run-status-filter="completed">Completed</button>
         <button class="status-filter-chip" type="button" data-run-status-filter="failed">Failed</button>
         <button class="status-filter-chip" type="button" data-run-status-filter="running">Running</button>
+        <button class="status-filter-chip" type="button" data-run-status-filter="protected" title="Show only runs protected from age-based purge">🔒 Protected</button>
       </div>
       <div id="recent-runs-table" class="runs-table"></div>
       <div class="run-compare-bar">

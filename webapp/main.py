@@ -2286,8 +2286,10 @@ def stream_events(stream_id: int, request: Request):
 def recent_runs(limit: int = 10):
     runs = store.recent_runs(limit)
     notes_by_run = store.all_run_notes()
+    protected_ids = store.all_protected_run_ids()
     for run in runs:
         run["note"] = notes_by_run.get(run["id"], "")
+        run["protected"] = run["id"] in protected_ids
     return runs
 
 
@@ -2417,6 +2419,45 @@ def bulk_delete_runs(payload: BulkDeleteRuns):
     return {"removed_count": removed}
 
 
+class RunProtectUpdate(BaseModel):
+    protected: bool
+
+
+@app.put("/api/runs/{run_id}/protect")
+def set_run_protected(run_id: int, payload: RunProtectUpdate):
+    """Pin (or unpin) a run so it survives both /api/runs/purge's age-based
+    sweep and any future automatic pruning -- mirrors the automatic backup
+    snapshot protect endpoint. A run still shows up (and can be explicitly
+    deleted by id) either way; protection only exempts it from age-based
+    bulk removal. 404s for a run id that never existed, same as
+    PUT /api/runs/{run_id}/note."""
+    if not store.run_exists(run_id):
+        raise HTTPException(status_code=404, detail=f"No run with id {run_id}.")
+    protected = store.set_run_protected(run_id, payload.protected)
+    return {"run_id": run_id, "protected": protected}
+
+
+class BulkProtectRuns(BaseModel):
+    run_ids: list[int]
+    protected: bool
+
+
+@app.post("/api/runs/bulk-protect")
+def bulk_protect_runs(payload: BulkProtectRuns):
+    """Flip the protected flag for a whole checkbox selection of runs at
+    once, mirroring the existing bulk-protect pattern for automatic backup
+    snapshots (POST /api/backup/auto/bulk-protect). An unknown run id is
+    skipped rather than failing the whole batch, same as every other bulk
+    action in this app."""
+    updated = []
+    for run_id in payload.run_ids:
+        if not store.run_exists(run_id):
+            continue
+        store.set_run_protected(run_id, payload.protected)
+        updated.append(run_id)
+    return {"protected": payload.protected, "updated": updated}
+
+
 def _parsed_steps_for_run(run_id: int) -> list[dict]:
     steps = store.steps_for_run(run_id)
     for step in steps:
@@ -2468,6 +2509,7 @@ def _run_detail(run_id: int) -> dict:
         "steps": steps,
         "blackboard": store.get_run_blackboard(run_id),
         "note": store.get_run_note(run_id) or "",
+        "protected": store.is_run_protected(run_id),
     }
 
 

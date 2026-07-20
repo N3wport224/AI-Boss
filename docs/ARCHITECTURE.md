@@ -3360,6 +3360,47 @@ only a JSON parse error or timeout falls back to an empty issue list.
      selected** and confirming both are gone while the duplicate
      survives.
 
+278. **Add protecting a run from age-based retention pruning**
+     (a `protected_runs` table plus `StateStore.set_run_protected()`/
+     `is_run_protected()`/`all_protected_run_ids()`, mirroring the
+     automatic-backup-snapshot protection pattern
+     (`set_backup_protected()`, Batch 38 #248) exactly, but for run
+     history instead of backup files -- `prune_runs()`'s age-based sweep
+     (Batch 5 #60) now skips any protected run id, and `delete_runs()`
+     cleans up a stale protection row when a protected run is explicitly
+     deleted by id (mirroring how a manual backup-snapshot delete clears
+     its own protection row). `PUT /api/runs/{run_id}/protect` 404s for
+     an unknown run id, same as the existing run-note endpoint. A
+     🔒/🔓 **Protect** toggle button added inline on each Recent Runs row).
+279. **Add bulk-protecting/unprotecting selected runs**
+     (`POST /api/runs/bulk-protect`, body `{run_ids: list[int], protected:
+     bool}` -- mirrors `POST /api/backup/auto/bulk-protect`'s exact
+     shape, skipping an unknown run id rather than failing the whole
+     batch. **Protect selected** / **Unprotect selected** buttons added
+     to Recent Runs' existing bulk-action row, alongside the pre-existing
+     **Delete selected**).
+280. **Add a "🔒 Protected" quick-filter chip for Recent Runs**
+     (joins the existing status-filter chips -- All/Completed/Failed/
+     Running, Batch 26 #195 -- narrowing the already-rendered list to
+     just protected runs, the same client-side row-hiding mechanism the
+     status chips already use).
+281. **Add tests for all of Batch 46**: a `prune_runs()` unit test
+     confirming a protected run survives its own age cutoff (mirroring
+     the existing automatic-backup-purge protection test); single
+     protect/unprotect API round trips plus a 404-for-unknown-run-id
+     test; a test confirming an explicit delete of a protected run still
+     succeeds and clears its protection row; a bulk-protect round trip
+     confirming an unknown run id is skipped, plus a
+     no-op-on-empty-selection test. 689 tests total, stable across two
+     repeated clean full-suite runs. Live-verified end to end with
+     Playwright against a freshly started server: running two real
+     pipelines, clicking a run's new 🔒/🔓 toggle and confirming both the
+     button state and `GET /api/runs/{run_id}` reflect it; checkbox-
+     selecting both runs and clicking **Protect selected**, confirming
+     both show as protected; and clicking the new **🔒 Protected** filter
+     chip and confirming it narrows Recent Runs to exactly those two
+     runs.
+
 ## 9. Roadmap
 
 The current engine is intentionally a single-process, synchronous, SQLite-backed

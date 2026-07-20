@@ -1182,6 +1182,18 @@ A few things live in the header/subheader on every page load:
   type in this app (modules, pipelines, schedules, artifacts) already had
   a duplicate feature, memory was the one gap.
 
+## Protecting runs from retention pruning
+
+- **Protect/unprotect a run** — a 🔒/🔓 toggle button on each Recent Runs
+  row pins that run so `POST /api/runs/purge`'s age-based sweep skips it
+  indefinitely, mirroring the existing automatic-backup-snapshot
+  protection feature.
+- **Bulk protect/unprotect selected runs** — **Protect selected** /
+  **Unprotect selected** buttons join the existing **Delete selected**
+  button in Recent Runs' bulk-action row.
+- **"🔒 Protected" filter chip** — joins the existing status-filter chips,
+  narrowing Recent Runs to just the protected ones.
+
 ## Tech stack
 
 - **Language:** Python 3.11+ — first-class async/sync support and native SDKs

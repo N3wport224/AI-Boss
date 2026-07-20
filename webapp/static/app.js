@@ -1131,6 +1131,7 @@ const selectedRunIds = new Set();
 function updateBulkDeleteButton() {
   runsBulkDeleteBtn.disabled = selectedRunIds.size === 0;
   runsBulkDeleteBtn.textContent = selectedRunIds.size ? `Delete selected (${selectedRunIds.size})` : "Delete selected";
+  updateRunsBulkProtectButtons();
 }
 
 async function loadRecentRuns() {
@@ -1157,9 +1158,9 @@ async function loadRecentRuns() {
           : "–";
       const checked = selectedRunIds.has(r.id) ? "checked" : "";
       return `
-        <tr class="history-row" data-run-id="${r.id}" data-status="${r.status}">
+        <tr class="history-row" data-run-id="${r.id}" data-status="${r.status}" data-protected="${r.protected}">
           <td class="run-select-cell"><input type="checkbox" class="run-select-checkbox" data-run-id="${r.id}" ${checked} /></td>
-          <td><span class="run-expand-chevron">▸</span> #${r.id} <span class="run-note-indicator" title="This run has a note">${r.note ? "📝" : ""}</span></td>
+          <td><span class="run-expand-chevron">▸</span> #${r.id} <span class="run-note-indicator" title="This run has a note">${r.note ? "📝" : ""}</span> <button class="run-protect-toggle" data-run-id="${r.id}" data-protected="${r.protected}" title="${r.protected ? "Unprotect this run (allow it to be purged by age)" : "Protect this run from age-based purge"}">${r.protected ? "🔒" : "🔓"}</button></td>
           <td class="status-${r.status}">${r.status}</td>
           <td>${new Date(r.started_at).toLocaleString()}</td>
           <td>${duration}</td>
@@ -1182,8 +1183,27 @@ async function loadRecentRuns() {
 
   recentRunsTableEl.querySelectorAll(".history-row").forEach((row) => {
     row.addEventListener("click", (e) => {
-      if (e.target.closest(".run-select-cell")) return;
+      if (e.target.closest(".run-select-cell") || e.target.closest(".run-protect-toggle")) return;
       toggleRunDetail(row.dataset.runId);
+    });
+  });
+
+  recentRunsTableEl.querySelectorAll(".run-protect-toggle").forEach((btn) => {
+    btn.addEventListener("click", async (e) => {
+      e.stopPropagation();
+      const runId = Number(btn.dataset.runId);
+      const nextProtected = btn.dataset.protected !== "true";
+      const res = await fetch(`/api/runs/${runId}/protect`, {
+        method: "PUT",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ protected: nextProtected }),
+      });
+      const body = await res.json();
+      showToast(
+        body.protected ? `Run #${runId} protected from age-based purge.` : `Run #${runId} unprotected.`,
+        "success"
+      );
+      await loadRecentRuns();
     });
   });
 
@@ -1219,7 +1239,12 @@ let currentRunStatusFilter = "all";
 
 function applyRunStatusFilter() {
   recentRunsTableEl.querySelectorAll(".history-row").forEach((row) => {
-    const matches = currentRunStatusFilter === "all" || row.dataset.status === currentRunStatusFilter;
+    const matches =
+      currentRunStatusFilter === "all"
+        ? true
+        : currentRunStatusFilter === "protected"
+        ? row.dataset.protected === "true"
+        : row.dataset.status === currentRunStatusFilter;
     row.classList.toggle("status-filter-hidden", !matches);
   });
 }
@@ -5612,6 +5637,30 @@ runsBulkDeleteBtn.addEventListener("click", async () => {
   await refreshTelemetry();
   await loadAuditLog();
 });
+
+const runsBulkProtectBtn = document.getElementById("runs-bulk-protect-btn");
+const runsBulkUnprotectBtn = document.getElementById("runs-bulk-unprotect-btn");
+
+function updateRunsBulkProtectButtons() {
+  const disabled = selectedRunIds.size === 0;
+  runsBulkProtectBtn.disabled = disabled;
+  runsBulkUnprotectBtn.disabled = disabled;
+}
+
+async function bulkSetRunsProtected(protected_) {
+  if (!selectedRunIds.size) return;
+  const runIds = [...selectedRunIds];
+  await fetch("/api/runs/bulk-protect", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ run_ids: runIds, protected: protected_ }),
+  });
+  showToast(`${protected_ ? "Protected" : "Unprotected"} ${runIds.length} selected run(s).`, "success");
+  await loadRecentRuns();
+}
+
+runsBulkProtectBtn.addEventListener("click", () => bulkSetRunsProtected(true));
+runsBulkUnprotectBtn.addEventListener("click", () => bulkSetRunsProtected(false));
 
 // ---- Full-text search across run history (step outputs + errors) ----
 

@@ -91,6 +91,11 @@ CREATE TABLE IF NOT EXISTS protected_backups (
     updated_at TEXT NOT NULL
 );
 
+CREATE TABLE IF NOT EXISTS protected_runs (
+    run_id INTEGER PRIMARY KEY,
+    updated_at TEXT NOT NULL
+);
+
 CREATE TABLE IF NOT EXISTS module_overrides (
     tier TEXT NOT NULL,
     name TEXT NOT NULL,
@@ -364,13 +369,17 @@ class StateStore:
         mirroring artifact purge — scoped strictly to `runs`/`steps`, never
         touching schedules, memory, or the result cache. Returns how many
         runs were removed. A run still in progress (`finished_at IS NULL`)
-        is never a candidate, no matter how old `started_at` is."""
+        is never a candidate, no matter how old `started_at` is. A run
+        explicitly protected via set_run_protected() is also never a
+        candidate, mirroring how a protected automatic backup snapshot
+        survives its own age-based purge."""
         cutoff = (datetime.now(timezone.utc) - timedelta(hours=older_than_hours)).isoformat()
+        protected_ids = self.all_protected_run_ids()
         with self._lock:
             rows = self._conn.execute(
                 "SELECT id FROM runs WHERE finished_at IS NOT NULL AND finished_at < ?", (cutoff,)
             ).fetchall()
-            run_ids = [row[0] for row in rows]
+            run_ids = [row[0] for row in rows if row[0] not in protected_ids]
             if run_ids:
                 placeholders = ",".join("?" * len(run_ids))
                 self._conn.execute(f"DELETE FROM steps WHERE run_id IN ({placeholders})", run_ids)
@@ -398,6 +407,7 @@ class StateStore:
                 self._conn.execute(f"DELETE FROM steps WHERE run_id IN ({existing_placeholders})", existing_ids)
                 self._conn.execute(f"DELETE FROM run_notes WHERE run_id IN ({existing_placeholders})", existing_ids)
                 self._conn.execute(f"DELETE FROM runs WHERE id IN ({existing_placeholders})", existing_ids)
+                self._conn.execute(f"DELETE FROM protected_runs WHERE run_id IN ({existing_placeholders})", existing_ids)
                 self._conn.commit()
         return len(existing_ids)
 
@@ -1077,6 +1087,35 @@ class StateStore:
         with self._lock:
             self._conn.execute("DELETE FROM protected_backups WHERE filename = ?", (filename,))
             self._conn.commit()
+
+    def set_run_protected(self, run_id: int, protected: bool) -> bool:
+        """Pin (or unpin) a run against prune_runs()'s age-based sweep --
+        mirrors set_backup_protected()'s exact shape. A manual, explicit
+        delete_runs() call still removes a protected run regardless;
+        protection only exempts a run from the automatic/bulk age-based
+        prune, not from an explicit user action. Presence of the row is
+        the flag; unprotecting just deletes it."""
+        with self._lock:
+            if protected:
+                self._conn.execute(
+                    "INSERT INTO protected_runs (run_id, updated_at) VALUES (?, ?) "
+                    "ON CONFLICT(run_id) DO UPDATE SET updated_at = excluded.updated_at",
+                    (run_id, datetime.now(timezone.utc).isoformat()),
+                )
+            else:
+                self._conn.execute("DELETE FROM protected_runs WHERE run_id = ?", (run_id,))
+            self._conn.commit()
+        return protected
+
+    def is_run_protected(self, run_id: int) -> bool:
+        with self._lock:
+            row = self._conn.execute("SELECT 1 FROM protected_runs WHERE run_id = ?", (run_id,)).fetchone()
+        return row is not None
+
+    def all_protected_run_ids(self) -> set[int]:
+        with self._lock:
+            rows = self._conn.execute("SELECT run_id FROM protected_runs").fetchall()
+        return {row[0] for row in rows}
 
     def set_pipeline_tags(self, slug: str, tags: list[str]) -> list[str]:
         """Replace the full tag set for a saved pipeline (keyed by its slug).
