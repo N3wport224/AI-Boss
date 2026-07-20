@@ -132,6 +132,52 @@ def test_purge_older_than_is_a_no_op_when_backups_dir_does_not_exist(tmp_path):
     assert backup.purge_older_than(24) == 0
 
 
+def test_purge_older_than_skips_a_protected_snapshot_even_past_the_cutoff(tmp_path):
+    import re
+
+    protected_names = set()
+    backup = AutoBackup(tmp_path / "backups", _dummy_snapshot, get_protected=lambda: protected_names)
+    backup.run_now()
+    time.sleep(1.1)
+    backup.run_now()
+
+    files = sorted((tmp_path / "backups").glob("backup_*.json"))
+    older_name = files[0].name
+    match = re.match(r"backup_(\d{8})T(\d{6})Z\.json", older_name)
+    stale_time = (datetime.strptime(match.group(1) + match.group(2), "%Y%m%d%H%M%S") - timedelta(hours=48)).strftime(
+        "%Y%m%dT%H%M%SZ"
+    )
+    stale_name = f"backup_{stale_time}.json"
+    files[0].rename(files[0].with_name(stale_name))
+    protected_names.add(stale_name)
+
+    deleted = backup.purge_older_than(24)
+    assert deleted == 0
+    remaining = {p.name for p in (tmp_path / "backups").glob("backup_*.json")}
+    assert stale_name in remaining
+
+
+def test_prune_skips_a_protected_snapshot_beyond_the_keep_count(tmp_path):
+    protected_names = set()
+    backup = AutoBackup(tmp_path / "backups", _dummy_snapshot, get_protected=lambda: protected_names)
+    backup.configure(enabled=True, interval_hours=24.0, keep_count=1)
+
+    backup.run_now()
+    first_file = next((tmp_path / "backups").glob("backup_*.json"))
+    protected_names.add(first_file.name)
+
+    time.sleep(1.1)
+    backup.run_now()
+    time.sleep(1.1)
+    backup.run_now()
+
+    remaining = {p.name for p in (tmp_path / "backups").glob("backup_*.json")}
+    assert first_file.name in remaining
+    # keep_count=1 plus the one protected file that would otherwise have
+    # been pruned
+    assert len(remaining) == 2
+
+
 def test_run_now_still_raises_directly_when_called_outside_the_background_loop(tmp_path):
     def _broken_snapshot():
         raise RuntimeError("disk is full")

@@ -575,7 +575,12 @@ def _notify_auto_backup_failure(error: Exception) -> None:
     _notify("backup_failed", f"Automatic backup snapshot failed: {error}")
 
 
-_auto_backup = AutoBackup(BACKUPS_DIR, _build_backup_snapshot, on_failure=_notify_auto_backup_failure)
+_auto_backup = AutoBackup(
+    BACKUPS_DIR,
+    _build_backup_snapshot,
+    on_failure=_notify_auto_backup_failure,
+    get_protected=lambda: store.all_protected_backup_filenames(),
+)
 _auto_backup.start()
 
 
@@ -2428,9 +2433,15 @@ async def restore_backup(file: UploadFile = File(...)):
 def _list_auto_backups() -> list[dict]:
     if not BACKUPS_DIR.exists():
         return []
+    protected = store.all_protected_backup_filenames()
     files = sorted(BACKUPS_DIR.glob("backup_*.json"), key=lambda p: p.name, reverse=True)
     return [
-        {"filename": f.name, "size_bytes": f.stat().st_size, "modified_at": datetime.fromtimestamp(f.stat().st_mtime, timezone.utc).isoformat()}
+        {
+            "filename": f.name,
+            "size_bytes": f.stat().st_size,
+            "modified_at": datetime.fromtimestamp(f.stat().st_mtime, timezone.utc).isoformat(),
+            "protected": f.name in protected,
+        }
         for f in files
     ]
 
@@ -2449,7 +2460,7 @@ def list_auto_backups_csv():
     """Same snapshot listing as GET /api/backup/auto/list, as a downloadable
     CSV -- mirroring every other list-to-CSV export in this app."""
     buffer = io.StringIO()
-    writer = csv.DictWriter(buffer, fieldnames=["filename", "size_bytes", "modified_at"])
+    writer = csv.DictWriter(buffer, fieldnames=["filename", "size_bytes", "modified_at", "protected"])
     writer.writeheader()
     writer.writerows(_list_auto_backups())
     return StreamingResponse(
@@ -2554,8 +2565,27 @@ def delete_auto_backup_snapshot(filename: str):
     want to keep around as a restore option."""
     path = _resolve_auto_backup_path(filename)
     path.unlink()
+    store.clear_backup_protection(filename)
     store.record_audit_event("backup_snapshot_deleted", f"Deleted automatic backup snapshot '{filename}'.")
     return {"deleted": filename}
+
+
+class BackupProtectUpdate(BaseModel):
+    protected: bool
+
+
+@app.put("/api/backup/auto/snapshot/{filename}/protect")
+def set_auto_backup_protected(filename: str, payload: BackupProtectUpdate):
+    """Pin (or unpin) a snapshot so it survives both the keep_count-based
+    background prune and POST /api/backup/auto/purge's age-based cutoff --
+    for a snapshot worth keeping around indefinitely regardless of how old
+    it gets or how many newer ones pile up. Deleting the file directly via
+    DELETE /api/backup/auto/snapshot/{filename} still works regardless of
+    this flag; protection only exempts a snapshot from the two automatic/
+    bulk removal paths, not from an explicit single-file delete."""
+    _resolve_auto_backup_path(filename)
+    protected = store.set_backup_protected(filename, payload.protected)
+    return {"filename": filename, "protected": protected}
 
 
 def _snapshot_counts(snapshot: dict) -> dict:
@@ -2671,6 +2701,21 @@ def notifications_csv(limit: int = 1000):
         iter([buffer.getvalue()]),
         media_type="text/csv",
         headers={"Content-Disposition": "attachment; filename=notifications.csv"},
+    )
+
+
+@app.get("/api/notifications.json")
+def notifications_json(limit: int = 1000):
+    """Same alert/notification history as GET /api/notifications.csv, as a
+    downloadable JSON file instead -- mirrors the existing runs.json and
+    memory.json exports, which offer the same data both plain (for the UI
+    to fetch) and as a Content-Disposition attachment (for saving to
+    disk)."""
+    buffer = json.dumps(store.list_notifications(limit=limit), indent=2)
+    return StreamingResponse(
+        iter([buffer]),
+        media_type="application/json",
+        headers={"Content-Disposition": "attachment; filename=notifications.json"},
     )
 
 

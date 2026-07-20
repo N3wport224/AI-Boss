@@ -660,6 +660,7 @@ function renderNotificationsPanel() {
       <h4>Alerts</h4>
       <div class="notification-section-actions">
         <a class="btn btn-secondary btn-small" href="/api/notifications.csv" download>Export CSV</a>
+        <a class="btn btn-secondary btn-small" href="/api/notifications.json" download>Export JSON</a>
         ${hasReadAlerts ? `<button class="btn btn-secondary btn-small" id="notifications-clear-read-btn" type="button">Clear read</button>` : ""}
       </div>
     </div>
@@ -5603,7 +5604,7 @@ function renderSchedulesList() {
   const filtered = [
     ...(filterQuery
       ? schedules.filter((s) => {
-          const haystack = `${s.kind} ${s.tier || ""} ${s.name}`.toLowerCase();
+          const haystack = `${s.kind} ${s.tier || ""} ${s.name} ${s.label || ""}`.toLowerCase();
           return haystack.includes(filterQuery);
         })
       : schedules),
@@ -6306,9 +6307,10 @@ async function loadAutoBackupSnapshots() {
       (s) => `
         <div class="schedule-row">
           <input type="checkbox" class="snapshot-select-checkbox" data-snapshot="${escapeHtml(s.filename)}" ${selectedSnapshotFilenames.has(s.filename) ? "checked" : ""} title="Select for comparison" />
-          <span>${escapeHtml(s.filename)}</span>
+          <span>${escapeHtml(s.filename)}${s.protected ? ' <span class="tag-chip" title="Protected from keep-count pruning and age-based purge">📌 protected</span>' : ""}</span>
           <span class="runs-purge-label">${formatBytes(s.size_bytes)} — ${new Date(s.modified_at).toLocaleString()}</span>
           <a class="btn btn-secondary btn-small" href="/api/backup/auto/snapshot/${encodeURIComponent(s.filename)}" download title="Download this snapshot's raw JSON file">⬇ Download</a>
+          <button class="btn btn-secondary btn-small" data-auto-backup-protect="${escapeHtml(s.filename)}" data-protected="${s.protected ? "1" : "0"}" title="Exempt this snapshot from keep-count pruning and age-based purge">${s.protected ? "Unprotect" : "📌 Protect"}</button>
           <button class="btn btn-secondary btn-small" data-auto-backup-restore="${escapeHtml(s.filename)}">Restore</button>
           <button class="btn btn-danger btn-small" data-auto-backup-delete="${escapeHtml(s.filename)}">Delete</button>
         </div>`
@@ -6320,6 +6322,24 @@ async function loadAutoBackupSnapshots() {
       if (checkbox.checked) selectedSnapshotFilenames.add(filename);
       else selectedSnapshotFilenames.delete(filename);
       autoBackupCompareBtn.disabled = selectedSnapshotFilenames.size !== 2;
+    });
+  });
+  autoBackupSnapshotsListEl.querySelectorAll("[data-auto-backup-protect]").forEach((btn) => {
+    btn.addEventListener("click", async () => {
+      const filename = btn.dataset.autoBackupProtect;
+      const nextProtected = btn.dataset.protected !== "1";
+      const res = await fetch(`/api/backup/auto/snapshot/${encodeURIComponent(filename)}/protect`, {
+        method: "PUT",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ protected: nextProtected }),
+      });
+      const body = await res.json();
+      if (!res.ok) {
+        showToast(body.detail || "Could not update protection.", "error");
+        return;
+      }
+      showToast(nextProtected ? `Protected ${filename}.` : `Unprotected ${filename}.`, "success");
+      await loadAutoBackupSnapshots();
     });
   });
   autoBackupSnapshotsListEl.querySelectorAll("[data-auto-backup-restore]").forEach((btn) => {

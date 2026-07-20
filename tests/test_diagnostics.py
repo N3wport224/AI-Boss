@@ -640,6 +640,62 @@ def test_download_auto_backup_snapshot_404s_for_an_unknown_or_unsafe_filename():
     assert res.status_code == 404
 
 
+def test_protect_and_unprotect_an_automatic_backup_snapshot():
+    from webapp.main import BACKUPS_DIR, _auto_backup
+    import shutil
+
+    shutil.rmtree(BACKUPS_DIR, ignore_errors=True)
+    try:
+        client.post("/api/backup/auto/run-now")
+        filename = next(BACKUPS_DIR.glob("backup_*.json")).name
+
+        listed = client.get("/api/backup/auto/list").json()
+        assert listed[0]["protected"] is False
+
+        res = client.put(f"/api/backup/auto/snapshot/{filename}/protect", json={"protected": True})
+        assert res.status_code == 200
+        assert res.json() == {"filename": filename, "protected": True}
+
+        listed = client.get("/api/backup/auto/list").json()
+        assert listed[0]["protected"] is True
+
+        res2 = client.put(f"/api/backup/auto/snapshot/{filename}/protect", json={"protected": False})
+        assert res2.json() == {"filename": filename, "protected": False}
+        listed = client.get("/api/backup/auto/list").json()
+        assert listed[0]["protected"] is False
+    finally:
+        _auto_backup.configure(enabled=False, interval_hours=24.0, keep_count=7)
+        shutil.rmtree(BACKUPS_DIR, ignore_errors=True)
+
+
+def test_protect_auto_backup_snapshot_404s_for_an_unknown_or_unsafe_filename():
+    res = client.put("/api/backup/auto/snapshot/does-not-exist.json/protect", json={"protected": True})
+    assert res.status_code == 404
+
+    res = client.put("/api/backup/auto/snapshot/..%2F..%2Fetc%2Fpasswd/protect", json={"protected": True})
+    assert res.status_code == 404
+
+
+def test_deleting_a_protected_snapshot_still_succeeds_and_clears_its_protection_row():
+    from webapp.main import BACKUPS_DIR, _auto_backup, store
+    import shutil
+
+    shutil.rmtree(BACKUPS_DIR, ignore_errors=True)
+    try:
+        client.post("/api/backup/auto/run-now")
+        filename = next(BACKUPS_DIR.glob("backup_*.json")).name
+        client.put(f"/api/backup/auto/snapshot/{filename}/protect", json={"protected": True})
+        assert store.is_backup_protected(filename)
+
+        res = client.delete(f"/api/backup/auto/snapshot/{filename}")
+        assert res.status_code == 200
+        assert not (BACKUPS_DIR / filename).exists()
+        assert not store.is_backup_protected(filename)
+    finally:
+        _auto_backup.configure(enabled=False, interval_hours=24.0, keep_count=7)
+        shutil.rmtree(BACKUPS_DIR, ignore_errors=True)
+
+
 def test_auto_backup_list_csv_export_has_a_header_and_matches_the_json_list():
     from webapp.main import BACKUPS_DIR, _auto_backup
     import shutil
@@ -655,7 +711,7 @@ def test_auto_backup_list_csv_export_has_a_header_and_matches_the_json_list():
         assert csv_res.headers["content-type"].startswith("text/csv")
 
         lines = csv_res.text.strip().splitlines()
-        assert lines[0] == "filename,size_bytes,modified_at"
+        assert lines[0] == "filename,size_bytes,modified_at,protected"
         assert len(lines) == 2
         assert lines[1].startswith(json_list[0]["filename"])
     finally:
@@ -670,7 +726,7 @@ def test_auto_backup_list_csv_export_is_just_a_header_when_empty():
     shutil.rmtree(BACKUPS_DIR, ignore_errors=True)
     res = client.get("/api/backup/auto/list.csv")
     assert res.status_code == 200
-    assert res.text.strip().splitlines() == ["filename,size_bytes,modified_at"]
+    assert res.text.strip().splitlines() == ["filename,size_bytes,modified_at,protected"]
 
 
 def test_download_all_auto_backups_bundles_every_snapshot_into_a_zip():

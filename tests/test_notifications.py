@@ -502,3 +502,29 @@ def test_bulk_export_notifications_returns_only_selected_as_csv():
     client.post(
         "/api/notifications/bulk-delete", json={"notification_ids": [a["id"], b["id"], other["id"]]}
     )
+
+
+# ---- Batch 38: export notifications to JSON ----
+
+
+def test_notifications_json_export_matches_the_list_endpoint():
+    unique_message = "json export marker message 4001"
+    created = client.post("/api/notifications", json={"kind": "info", "message": unique_message}).json()
+
+    res = client.get("/api/notifications.json")
+    assert res.status_code == 200
+    assert res.headers["content-type"].startswith("application/json")
+    assert "attachment; filename=notifications.json" in res.headers["content-disposition"]
+
+    exported = res.json()
+    assert any(n["id"] == created["id"] and n["message"] == unique_message for n in exported)
+    assert exported == client.get("/api/notifications", params={"limit": 1000}).json()
+
+
+def test_notifications_json_export_respects_limit():
+    for i in range(5):
+        client.post("/api/notifications", json={"kind": "info", "message": f"json limit test {4002 + i}"})
+
+    res = client.get("/api/notifications.json", params={"limit": 2})
+    assert res.status_code == 200
+    assert len(res.json()) == 2

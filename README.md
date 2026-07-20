@@ -1068,6 +1068,22 @@ A few things live in the header/subheader on every page load:
   the other module CSV exports carries the description and status fields
   in the same row.
 
+## Schedule label filtering, protected backup snapshots, and notification JSON export
+
+- **Extend the schedule filter to match label text** — the "Filter by
+  target, tier, or kind" box now also matches a schedule's free-text
+  label (added in an earlier batch), so a labeled schedule is findable by
+  its label rather than only its target module/pipeline name.
+- **Protect an automatic backup snapshot from purge** — a **📌 Protect**
+  toggle per snapshot row pins it against both the keep_count-based
+  background prune and the age-based purge, for a snapshot worth keeping
+  indefinitely; deleting the file directly still works regardless, since
+  protection only exempts a snapshot from those two automatic/bulk
+  removal paths.
+- **Export notifications to JSON** — an **Export JSON** link joins the
+  existing **Export CSV** link in the Alerts panel, mirroring the
+  existing runs.json and memory.json exports.
+
 ## Tech stack
 
 - **Language:** Python 3.11+ — first-class async/sync support and native SDKs

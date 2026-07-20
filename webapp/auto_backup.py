@@ -22,11 +22,13 @@ class AutoBackup:
         build_snapshot: Callable[[], dict],
         poll_interval: float = 60.0,
         on_failure: Optional[Callable[[Exception], None]] = None,
+        get_protected: Optional[Callable[[], set]] = None,
     ):
         self.backups_dir = backups_dir
         self.build_snapshot = build_snapshot
         self.poll_interval = poll_interval
         self.on_failure = on_failure
+        self.get_protected = get_protected or (lambda: set())
         self.enabled = False
         self.interval_hours = 24.0
         self.keep_count = 7
@@ -113,8 +115,11 @@ class AutoBackup:
     def _prune(self, keep_count: int) -> None:
         if not self.backups_dir.exists():
             return
+        protected = self.get_protected()
         files = sorted(self.backups_dir.glob("backup_*.json"), key=lambda p: p.name, reverse=True)
         for stale in files[keep_count:]:
+            if stale.name in protected:
+                continue
             stale.unlink()
 
     def purge_older_than(self, hours: float) -> int:
@@ -122,13 +127,17 @@ class AutoBackup:
         encoded in their own filename -- an age-based counterpart to the
         keep_count-based _prune() the background timer already does after
         every write, for a manual "clear out anything past this age"
-        rather than "always keep exactly N". Returns how many files were
-        deleted."""
+        rather than "always keep exactly N". A snapshot pinned via
+        get_protected() survives this regardless of age. Returns how many
+        files were deleted."""
         if not self.backups_dir.exists():
             return 0
+        protected = self.get_protected()
         cutoff = datetime.now(timezone.utc) - timedelta(hours=hours)
         deleted = 0
         for path in self.backups_dir.glob("backup_*.json"):
+            if path.name in protected:
+                continue
             try:
                 timestamp = datetime.strptime(path.stem, "backup_%Y%m%dT%H%M%SZ").replace(tzinfo=timezone.utc)
             except ValueError:

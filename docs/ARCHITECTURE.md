@@ -2972,6 +2972,66 @@ only a JSON parse error or timeout falls back to an empty issue list.
      right filename and note text; and confirming the **Export directory
      CSV** link's target returns a well-formed CSV with the expected
      header row and at least one data row.
+245. **Add matching schedule labels in the schedule keyword filter**
+     (`renderSchedulesList()`'s haystack in `webapp/static/app.js` was
+     `${kind} ${tier} ${name}` -- the free-text label field (added in
+     Batch 26) was never included, so a labeled schedule was only
+     findable by its target module/pipeline name. Extended the haystack
+     to include `s.label`. No backend change: `label` was already
+     returned on every schedule object).
+246. **Add protecting an automatic backup snapshot from purge**
+     (a new `protected_backups` table in `engine/state_store.py`, keyed
+     by filename like `artifact_notes`/`artifact_tags` -- presence of the
+     row is the flag. `AutoBackup` (`webapp/auto_backup.py`) takes an
+     optional `get_protected: Callable[[], set]` constructor argument,
+     used by both `_prune()` (the keep_count-based background pruning)
+     and `purge_older_than()` (the age-based manual purge) to skip any
+     filename it returns -- two independent removal paths, one shared
+     protection check. `webapp/main.py` wires
+     `get_protected=lambda: store.all_protected_backup_filenames()` into
+     the single `_auto_backup` instance. `PUT
+     /api/backup/auto/snapshot/{filename}/protect` toggles the flag,
+     reusing `_resolve_auto_backup_path()` for the same 404/path-
+     traversal protection every sibling snapshot endpoint gets.
+     `GET /api/backup/auto/list` (and its CSV export) now carries a
+     `protected` field per snapshot. A single-file `DELETE` still works
+     regardless of the flag -- protection only exempts a snapshot from
+     the two automatic/bulk removal paths, not from an explicit user
+     action -- and deleting one now also clears its now-orphaned
+     `protected_backups` row via `store.clear_backup_protection()`. A
+     **📌 Protect**/**Unprotect** toggle button and a "📌 protected" badge
+     were added to each snapshot row).
+247. **Add exporting notifications to JSON**
+     (`GET /api/notifications.json`, mirroring the existing
+     `GET /api/runs.json` and `GET /api/memory.json` pattern -- a
+     `StreamingResponse` with a `Content-Disposition: attachment` header
+     around `json.dumps(store.list_notifications(...), indent=2)`.
+     Distinct from the existing `GET /api/notifications.csv`, which only
+     offered CSV. An **Export JSON** link was added next to the existing
+     **Export CSV** link in the Alerts panel).
+248. **Add tests for all of Batch 38**: two `AutoBackup` unit tests
+     confirming `purge_older_than()` and `_prune()` each skip a filename
+     returned by a `get_protected` callback that would otherwise have
+     been deleted by cutoff-age or keep_count respectively; an API-level
+     protect/unprotect round trip confirming the `protected` field
+     flips in `GET /api/backup/auto/list`, the existing 404-on-unknown/
+     unsafe-filename pattern reused for the new protect endpoint, and a
+     test confirming a `DELETE` on a protected snapshot still succeeds
+     and clears its now-stale protection row; both existing auto-backup-
+     list CSV header tests updated for the new trailing `protected`
+     column; a notifications.json round trip confirming the exported
+     list matches `GET /api/notifications` at the same limit, plus a
+     limit-respecting test. 640 tests total, stable across two repeated
+     clean full-suite runs. Live-verified end to end with Playwright
+     against a freshly started server: labeling a schedule with a unique
+     marker and confirming the schedule filter box surfaces it by that
+     label text alone (and a nonsense query hides it); triggering a real
+     backup snapshot, clicking its **📌 Protect** button, confirming
+     `GET /api/backup/auto/list` reports `protected: true` and the button
+     now reads **Unprotect**, then unprotecting via the API directly and
+     confirming the list reflects it; and confirming the notifications
+     panel's **Export JSON** link's target returns valid JSON containing
+     a freshly posted notification.
 
 ## 9. Roadmap
 

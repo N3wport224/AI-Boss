@@ -86,6 +86,11 @@ CREATE TABLE IF NOT EXISTS artifact_notes (
     updated_at TEXT NOT NULL
 );
 
+CREATE TABLE IF NOT EXISTS protected_backups (
+    filename TEXT PRIMARY KEY,
+    updated_at TEXT NOT NULL
+);
+
 CREATE TABLE IF NOT EXISTS module_overrides (
     tier TEXT NOT NULL,
     name TEXT NOT NULL,
@@ -1003,6 +1008,45 @@ class StateStore:
                 (like_pattern, limit),
             ).fetchall()
         return [{"filename": filename, "note": note} for filename, note in rows]
+
+    def set_backup_protected(self, filename: str, protected: bool) -> bool:
+        """Pin (or unpin) an automatic backup snapshot file against both the
+        keep_count-based background prune and the age-based purge -- a
+        manual single-file DELETE still works regardless, since protection
+        only exempts a snapshot from those two bulk/automatic removal
+        paths, not from an explicit user action. Presence of the filename
+        row is the flag; unprotecting just deletes the row."""
+        with self._lock:
+            if protected:
+                self._conn.execute(
+                    "INSERT INTO protected_backups (filename, updated_at) VALUES (?, ?) "
+                    "ON CONFLICT(filename) DO UPDATE SET updated_at = excluded.updated_at",
+                    (filename, datetime.now(timezone.utc).isoformat()),
+                )
+            else:
+                self._conn.execute("DELETE FROM protected_backups WHERE filename = ?", (filename,))
+            self._conn.commit()
+        return protected
+
+    def is_backup_protected(self, filename: str) -> bool:
+        with self._lock:
+            row = self._conn.execute(
+                "SELECT 1 FROM protected_backups WHERE filename = ?", (filename,)
+            ).fetchone()
+        return row is not None
+
+    def all_protected_backup_filenames(self) -> set[str]:
+        with self._lock:
+            rows = self._conn.execute("SELECT filename FROM protected_backups").fetchall()
+        return {row[0] for row in rows}
+
+    def clear_backup_protection(self, filename: str) -> None:
+        """Drop a stale protected-backup row when the underlying snapshot
+        file itself is deleted directly -- otherwise the row would be
+        orphaned, referring to a file that no longer exists."""
+        with self._lock:
+            self._conn.execute("DELETE FROM protected_backups WHERE filename = ?", (filename,))
+            self._conn.commit()
 
     def set_pipeline_tags(self, slug: str, tags: list[str]) -> list[str]:
         """Replace the full tag set for a saved pipeline (keyed by its slug).
