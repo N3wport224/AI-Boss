@@ -1084,6 +1084,23 @@ A few things live in the header/subheader on every page load:
   existing **Export CSV** link in the Alerts panel, mirroring the
   existing runs.json and memory.json exports.
 
+## Artifact sorting, pipeline tag rename, and bulk snapshot protection
+
+- **Sort artifacts by name, size, or date modified** — a **Sort** dropdown
+  joins the existing search and tag-filter controls above the artifact
+  list, mirroring the sort controls schedules and notifications already
+  had.
+- **Rename a tag across all saved pipelines at once** — a **Rename tag
+  everywhere** control renames a tag on every saved pipeline that carries
+  it in one action, the pipeline counterpart to the existing
+  artifact-tag-rename feature; pipelines have their own independent tag
+  set, so this was a genuine gap.
+- **Bulk protect/unprotect selected automatic backup snapshots** — **📌
+  Protect selected** / **Unprotect selected** buttons join **Compare
+  selected** in the auto-backup panel, reusing the same checkbox
+  selection to flip the per-snapshot protection flag (added last batch)
+  for a whole batch of snapshots at once.
+
 ## Tech stack
 
 - **Language:** Python 3.11+ — first-class async/sync support and native SDKs

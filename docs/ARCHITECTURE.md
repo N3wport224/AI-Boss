@@ -3032,6 +3032,62 @@ only a JSON parse error or timeout falls back to an empty issue list.
      confirming the list reflects it; and confirming the notifications
      panel's **Export JSON** link's target returns valid JSON containing
      a freshly posted notification.
+249. **Add sorting artifacts by name, size, or date modified**
+     (discovered while starting the originally-planned "search modules by
+     keyword" task that the modules panel is already fully covered by the
+     existing global search omnibar -- `data-search-text` on each module
+     card (name + description) was already wired to `applySearchFilter()`
+     since Batch 1, so a dedicated modules search box would have been a
+     pure duplicate. Swapped for a genuinely missing feature instead:
+     schedules got a sort control in Batch 28 (#205) and notifications in
+     Batch 29 (#208), but artifacts never did. A new `#artifact-sort`
+     `<select>` (name / size / date modified) added next to the existing
+     search and tag-filter inputs; `loadArtifacts()` sorts the fetched
+     `files` array client-side before rendering, exactly like the
+     existing `renderSchedulesList()` sort branch).
+250. **Add renaming a tag across all saved pipelines at once**
+     (`POST /api/pipelines/rename-tag`, mirroring
+     `POST /api/artifacts/rename-tag` (Batch 16) exactly but applied to
+     `pipeline_store`'s own independent tag set (`store.all_pipeline_tags()`
+     / `store.set_pipeline_tags()`) instead of the artifact one -- pipeline
+     tags and artifact tags have always been two separate tag systems, and
+     only the artifact one had a bulk rename. If a pipeline already
+     carries the new tag too, the rename merges into that rather than
+     duplicating, same as every other tag-set operation in this app. A
+     **Rename tag everywhere** control (two text inputs + a button) added
+     to the Saved Pipelines panel's filter row).
+251. **Add bulk protect/unprotect for selected automatic backup snapshots**
+     (`POST /api/backup/auto/bulk-protect`, body
+     `{filenames: list[str], protected: bool}` -- the bulk counterpart to
+     last batch's single-snapshot `PUT
+     /api/backup/auto/snapshot/{filename}/protect`, reusing the exact same
+     `selectedSnapshotFilenames` checkbox selection the Compare feature
+     already puts on each row. An unknown or unsafe filename in the
+     selection is skipped rather than failing the whole batch, matching
+     every other bulk action in this app. **📌 Protect selected** /
+     **Unprotect selected** buttons added next to **Compare selected**,
+     enabled whenever at least one snapshot is checked -- unlike Compare,
+     which requires exactly two).
+252. **Add tests for all of Batch 39**: a pipeline-tag-rename round trip
+     confirming a tag is relabeled only on pipelines that carry it and
+     other tags on those pipelines survive untouched, a merge-into-an-
+     existing-tag test (no duplicate), and a blank/identical-tag rejection
+     test; a bulk-protect round trip protecting two snapshots at once
+     (with an unknown filename mixed into the selection skipped rather
+     than failing the batch) then unprotecting one of them and confirming
+     the other stays protected, plus a no-op-on-empty-selection test. 645
+     tests total, stable across two repeated clean full-suite runs.
+     Live-verified end to end with Playwright against a freshly started
+     server: uploading two CSVs with names on opposite ends of the
+     alphabet, switching the new artifact sort dropdown to "name" and
+     confirming the rendered order changes, then switching to "date" and
+     confirming the newest upload sorts first; tagging a saved pipeline,
+     typing the tag into the new rename-tag inputs and clicking **Rename
+     tag everywhere**, then confirming `GET /api/pipelines` shows the
+     pipeline's tag updated; and checkbox-selecting two real backup
+     snapshots, clicking **📌 Protect selected**, confirming both report
+     `protected: true` in `GET /api/backup/auto/list`, then clicking
+     **Unprotect selected** and confirming both flip back to `false`.
 
 ## 9. Roadmap
 

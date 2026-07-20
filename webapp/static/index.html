@@ -144,6 +144,11 @@
           <div class="artifacts-controls">
             <input type="search" id="artifact-search" placeholder="Search ingested content…" class="artifact-search-input" />
             <input type="text" id="artifact-tag-filter" placeholder="Filter by tag…" class="artifact-search-input" />
+            <select id="artifact-sort">
+              <option value="date">Sort: date modified</option>
+              <option value="name">Sort: name</option>
+              <option value="size">Sort: size</option>
+            </select>
             <label for="purge-hours">Purge older than</label>
             <input type="number" id="purge-hours" value="24" min="0" step="1" />
             <span>hours</span>
@@ -244,6 +249,11 @@
         <button id="pipelines-bulk-untag-btn" class="btn btn-secondary btn-small" type="button" disabled title="Remove this tag from every selected pipeline">Remove tag from selected</button>
         <button id="pipelines-bulk-duplicate-btn" class="btn btn-secondary btn-small" type="button" disabled>Duplicate selected</button>
         <button id="pipelines-bulk-delete-btn" class="btn btn-danger btn-small" type="button" disabled>Delete selected</button>
+      </div>
+      <div class="pipeline-filter-row">
+        <input type="text" id="pipelines-rename-tag-old" class="artifact-search-input" placeholder="Rename tag…" />
+        <input type="text" id="pipelines-rename-tag-new" class="artifact-search-input" placeholder="…to" />
+        <button id="pipelines-rename-tag-btn" class="btn btn-secondary btn-small" type="button" title="Rename this tag across every saved pipeline that carries it">Rename tag everywhere</button>
       </div>
       <div id="pipeline-deep-search-results" class="hidden"></div>
       <div class="card-grid" id="saved-pipelines-grid"></div>
@@ -471,6 +481,8 @@
         <span>hours</span>
         <button id="auto-backup-purge-btn" class="btn btn-secondary btn-small" type="button">Purge</button>
         <button id="auto-backup-compare-btn" class="btn btn-secondary btn-small" type="button" disabled title="Select exactly two snapshots below to compare their record counts">Compare selected</button>
+        <button id="auto-backup-bulk-protect-btn" class="btn btn-secondary btn-small" type="button" disabled title="Protect every selected snapshot from keep-count pruning and age-based purge">📌 Protect selected</button>
+        <button id="auto-backup-bulk-unprotect-btn" class="btn btn-secondary btn-small" type="button" disabled title="Remove protection from every selected snapshot">Unprotect selected</button>
       </div>
       <div id="auto-backup-snapshots-list" class="runs-empty"></div>
       <div id="auto-backup-compare-result" class="log-tabs-wrap hidden"></div>

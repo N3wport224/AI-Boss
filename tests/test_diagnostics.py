@@ -696,6 +696,50 @@ def test_deleting_a_protected_snapshot_still_succeeds_and_clears_its_protection_
         shutil.rmtree(BACKUPS_DIR, ignore_errors=True)
 
 
+def test_bulk_protect_and_unprotect_selected_automatic_backup_snapshots():
+    import time as _time
+    from webapp.main import BACKUPS_DIR, _auto_backup
+    import shutil
+
+    shutil.rmtree(BACKUPS_DIR, ignore_errors=True)
+    try:
+        client.post("/api/backup/auto/run-now")
+        _time.sleep(1.1)  # filenames are second-resolution timestamps -- force distinct names
+        client.post("/api/backup/auto/run-now")
+        files = sorted(BACKUPS_DIR.glob("backup_*.json"))
+        assert len(files) == 2
+        a_name, b_name = files[0].name, files[1].name
+
+        res = client.post(
+            "/api/backup/auto/bulk-protect",
+            json={"filenames": [a_name, b_name, "does-not-exist.json"], "protected": True},
+        )
+        assert res.status_code == 200
+        body = res.json()
+        assert body["protected"] is True
+        assert set(body["updated"]) == {a_name, b_name}
+
+        listed = {s["filename"]: s for s in client.get("/api/backup/auto/list").json()}
+        assert listed[a_name]["protected"] is True
+        assert listed[b_name]["protected"] is True
+
+        res2 = client.post("/api/backup/auto/bulk-protect", json={"filenames": [a_name], "protected": False})
+        assert res2.json()["updated"] == [a_name]
+
+        listed2 = {s["filename"]: s for s in client.get("/api/backup/auto/list").json()}
+        assert listed2[a_name]["protected"] is False
+        assert listed2[b_name]["protected"] is True
+    finally:
+        _auto_backup.configure(enabled=False, interval_hours=24.0, keep_count=7)
+        shutil.rmtree(BACKUPS_DIR, ignore_errors=True)
+
+
+def test_bulk_protect_auto_backups_is_a_no_op_on_an_empty_selection():
+    res = client.post("/api/backup/auto/bulk-protect", json={"filenames": [], "protected": True})
+    assert res.status_code == 200
+    assert res.json() == {"protected": True, "updated": []}
+
+
 def test_auto_backup_list_csv_export_has_a_header_and_matches_the_json_list():
     from webapp.main import BACKUPS_DIR, _auto_backup
     import shutil
@@ -1183,6 +1227,50 @@ def test_bulk_untag_pipelines_skips_unknown_slugs_without_failing():
 def test_bulk_untag_pipelines_rejects_a_blank_tag():
     res = client.post("/api/pipelines/bulk-untag", json={"slugs": [], "tag": "   "})
     assert res.status_code == 400
+
+
+def test_rename_pipeline_tag_relabels_it_on_every_pipeline_that_carries_it():
+    client.post(
+        "/api/pipelines",
+        json={"name": "Rename Tag A", "steps": [{"tier": "automation", "name": "fetch_raw_metrics"}]},
+    )
+    client.post(
+        "/api/pipelines",
+        json={"name": "Rename Tag B", "steps": [{"tier": "automation", "name": "fetch_raw_metrics"}]},
+    )
+    client.put("/api/pipelines/rename_tag_a/tags", json={"tags": ["typo_tag", "keep_me"]})
+    client.put("/api/pipelines/rename_tag_b/tags", json={"tags": ["unrelated"]})
+
+    res = client.post("/api/pipelines/rename-tag", json={"old_tag": "typo_tag", "new_tag": "fixed_tag"})
+    assert res.status_code == 200
+    body = res.json()
+    assert body == {"old_tag": "typo_tag", "new_tag": "fixed_tag", "renamed": ["rename_tag_a"]}
+
+    updated = {p["slug"]: p for p in client.get("/api/pipelines").json()}
+    assert set(updated["rename_tag_a"]["tags"]) == {"fixed_tag", "keep_me"}
+    assert updated["rename_tag_b"]["tags"] == ["unrelated"]
+
+
+def test_rename_pipeline_tag_merges_into_an_existing_new_tag_without_duplicating():
+    client.post(
+        "/api/pipelines",
+        json={"name": "Rename Tag Merge", "steps": [{"tier": "automation", "name": "fetch_raw_metrics"}]},
+    )
+    client.put("/api/pipelines/rename_tag_merge/tags", json={"tags": ["old_name", "already_there"]})
+
+    res = client.post("/api/pipelines/rename-tag", json={"old_tag": "old_name", "new_tag": "already_there"})
+    assert res.status_code == 200
+
+    updated = {p["slug"]: p for p in client.get("/api/pipelines").json()}
+    assert updated["rename_tag_merge"]["tags"] == ["already_there"]
+
+
+def test_rename_pipeline_tag_rejects_blank_or_identical_tags():
+    res = client.post("/api/pipelines/rename-tag", json={"old_tag": "", "new_tag": "x"})
+    assert res.status_code == 400
+
+    res2 = client.post("/api/pipelines/rename-tag", json={"old_tag": "same", "new_tag": "same"})
+    assert res2.status_code == 400
 
 
 def test_run_history_search_finds_step_outputs_and_errors():

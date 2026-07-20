@@ -1545,6 +1545,38 @@ def bulk_untag_pipelines(payload: PipelineBulkUntag):
     return {"tag": tag, "untagged": untagged}
 
 
+class PipelineTagRename(BaseModel):
+    old_tag: str
+    new_tag: str
+
+
+@app.post("/api/pipelines/rename-tag")
+def rename_pipeline_tag(payload: PipelineTagRename):
+    """Rename a tag across every saved pipeline that carries it in one
+    action -- the pipeline counterpart to POST /api/artifacts/rename-tag,
+    applied to pipeline_store's own independent tag set instead of the
+    artifact one. If a pipeline already carries new_tag too, the rename
+    just merges into that (no duplicate, same as any other tag set, which
+    is stored as a de-duplicated, sorted list)."""
+    old_tag = payload.old_tag.strip()
+    new_tag = payload.new_tag.strip()
+    if not old_tag or not new_tag:
+        raise HTTPException(status_code=400, detail="Both old_tag and new_tag are required.")
+    if old_tag == new_tag:
+        raise HTTPException(status_code=400, detail="new_tag must be different from old_tag.")
+
+    renamed = []
+    for slug, tags in store.all_pipeline_tags().items():
+        if old_tag not in tags:
+            continue
+        current = set(tags)
+        current.discard(old_tag)
+        current.add(new_tag)
+        store.set_pipeline_tags(slug, sorted(current))
+        renamed.append(slug)
+    return {"old_tag": old_tag, "new_tag": new_tag, "renamed": renamed}
+
+
 @app.get("/api/pipelines/compare")
 def compare_pipelines(a: str, b: str):
     """Side-by-side key-level diff between two saved pipelines' current
@@ -2586,6 +2618,31 @@ def set_auto_backup_protected(filename: str, payload: BackupProtectUpdate):
     _resolve_auto_backup_path(filename)
     protected = store.set_backup_protected(filename, payload.protected)
     return {"filename": filename, "protected": protected}
+
+
+class BackupBulkProtect(BaseModel):
+    filenames: list[str]
+    protected: bool
+
+
+@app.post("/api/backup/auto/bulk-protect")
+def bulk_protect_auto_backups(payload: BackupBulkProtect):
+    """Flip the protected flag for a whole checkbox selection of snapshots
+    at once -- the bulk counterpart to PUT
+    /api/backup/auto/snapshot/{filename}/protect, reusing the same
+    selection checkboxes the Compare feature already puts on each
+    snapshot row. An unknown or unsafe filename in the selection is
+    skipped rather than failing the whole batch, matching every other
+    bulk action in this app."""
+    updated = []
+    for filename in payload.filenames:
+        if "/" in filename or "\\" in filename or not filename.startswith("backup_") or not filename.endswith(".json"):
+            continue
+        if not (BACKUPS_DIR / filename).is_file():
+            continue
+        store.set_backup_protected(filename, payload.protected)
+        updated.append(filename)
+    return {"protected": payload.protected, "updated": updated}
 
 
 def _snapshot_counts(snapshot: dict) -> dict:

@@ -198,6 +198,37 @@ pipelinesBulkUntagBtn.addEventListener("click", async () => {
   }
 });
 
+const pipelinesRenameTagOldInput = document.getElementById("pipelines-rename-tag-old");
+const pipelinesRenameTagNewInput = document.getElementById("pipelines-rename-tag-new");
+const pipelinesRenameTagBtn = document.getElementById("pipelines-rename-tag-btn");
+
+pipelinesRenameTagBtn.addEventListener("click", async () => {
+  const oldTag = pipelinesRenameTagOldInput.value.trim();
+  const newTag = pipelinesRenameTagNewInput.value.trim();
+  if (!oldTag || !newTag) {
+    showToast("Enter both the tag to rename and its new name.", "error");
+    return;
+  }
+  try {
+    const res = await fetch("/api/pipelines/rename-tag", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ old_tag: oldTag, new_tag: newTag }),
+    });
+    const body = await res.json();
+    if (!res.ok) {
+      showToast(body.detail || "Failed to rename tag.", "error");
+      return;
+    }
+    showToast(`Renamed "${oldTag}" to "${newTag}" on ${body.renamed.length} pipeline(s).`, "success");
+    pipelinesRenameTagOldInput.value = "";
+    pipelinesRenameTagNewInput.value = "";
+    await loadSavedPipelines();
+  } catch (err) {
+    showToast(`Rename tag failed: ${err}`, "error");
+  }
+});
+
 const pipelineTemplatesGrid = document.getElementById("pipeline-templates-grid");
 
 const scheduleAddToggleBtn = document.getElementById("schedule-add-toggle");
@@ -4588,6 +4619,7 @@ const purgeBtn = document.getElementById("purge-btn");
 const artifactSearchInput = document.getElementById("artifact-search");
 const artifactSearchResultsEl = document.getElementById("artifact-search-results");
 const artifactTagFilterInput = document.getElementById("artifact-tag-filter");
+const artifactSortSelect = document.getElementById("artifact-sort");
 const artifactTagDirectoryEl = document.getElementById("artifact-tag-directory");
 const artifactBulkTagInput = document.getElementById("artifact-bulk-tag-input");
 const artifactBulkTagBtn = document.getElementById("artifact-bulk-tag-btn");
@@ -4704,6 +4736,13 @@ async function loadArtifacts() {
   const url = tagFilter ? `/api/artifacts?tag=${encodeURIComponent(tagFilter)}` : "/api/artifacts";
   const res = await fetch(url);
   const files = await res.json();
+  if (artifactSortSelect.value === "name") {
+    files.sort((a, b) => a.name.localeCompare(b.name));
+  } else if (artifactSortSelect.value === "size") {
+    files.sort((a, b) => b.size_bytes - a.size_bytes);
+  } else {
+    files.sort((a, b) => b.modified_at - a.modified_at);
+  }
   currentArtifacts = files;
   loadArtifactTagDirectory();
 
@@ -4916,6 +4955,8 @@ artifactTagFilterInput.addEventListener("input", () => {
   clearTimeout(artifactTagFilterDebounce);
   artifactTagFilterDebounce = setTimeout(() => loadArtifacts(), 250);
 });
+
+artifactSortSelect.addEventListener("change", () => loadArtifacts());
 
 let artifactSearchDebounce = null;
 
@@ -6286,7 +6327,15 @@ autoBackupRunNowBtn.addEventListener("click", async () => {
 const autoBackupSnapshotsListEl = document.getElementById("auto-backup-snapshots-list");
 const autoBackupCompareBtn = document.getElementById("auto-backup-compare-btn");
 const autoBackupCompareResultEl = document.getElementById("auto-backup-compare-result");
+const autoBackupBulkProtectBtn = document.getElementById("auto-backup-bulk-protect-btn");
+const autoBackupBulkUnprotectBtn = document.getElementById("auto-backup-bulk-unprotect-btn");
 let selectedSnapshotFilenames = new Set();
+
+function updateAutoBackupBulkProtectBtns() {
+  const disabled = selectedSnapshotFilenames.size === 0;
+  autoBackupBulkProtectBtn.disabled = disabled;
+  autoBackupBulkUnprotectBtn.disabled = disabled;
+}
 
 async function loadAutoBackupSnapshots() {
   const res = await fetch("/api/backup/auto/list");
@@ -6296,6 +6345,7 @@ async function loadAutoBackupSnapshots() {
     if (!liveNames.has(name)) selectedSnapshotFilenames.delete(name);
   });
   autoBackupCompareBtn.disabled = selectedSnapshotFilenames.size !== 2;
+  updateAutoBackupBulkProtectBtns();
   if (!snapshots.length) {
     autoBackupSnapshotsListEl.className = "runs-empty";
     autoBackupSnapshotsListEl.textContent = "No automatic backup snapshots on disk yet.";
@@ -6322,6 +6372,7 @@ async function loadAutoBackupSnapshots() {
       if (checkbox.checked) selectedSnapshotFilenames.add(filename);
       else selectedSnapshotFilenames.delete(filename);
       autoBackupCompareBtn.disabled = selectedSnapshotFilenames.size !== 2;
+      updateAutoBackupBulkProtectBtns();
     });
   });
   autoBackupSnapshotsListEl.querySelectorAll("[data-auto-backup-protect]").forEach((btn) => {
@@ -6408,6 +6459,30 @@ autoBackupCompareBtn.addEventListener("click", async () => {
     autoBackupCompareResultEl.innerHTML = `<div class="runs-empty">Compare failed: ${err}</div>`;
   }
 });
+
+async function bulkSetAutoBackupProtection(protected_) {
+  if (!selectedSnapshotFilenames.size) return;
+  const res = await fetch("/api/backup/auto/bulk-protect", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ filenames: [...selectedSnapshotFilenames], protected: protected_ }),
+  });
+  const body = await res.json();
+  if (!res.ok) {
+    showToast(body.detail || "Could not update protection.", "error");
+    return;
+  }
+  showToast(
+    protected_
+      ? `Protected ${body.updated.length} snapshot(s).`
+      : `Unprotected ${body.updated.length} snapshot(s).`,
+    "success"
+  );
+  await loadAutoBackupSnapshots();
+}
+
+autoBackupBulkProtectBtn.addEventListener("click", () => bulkSetAutoBackupProtection(true));
+autoBackupBulkUnprotectBtn.addEventListener("click", () => bulkSetAutoBackupProtection(false));
 
 const autoBackupPurgeHoursInput = document.getElementById("auto-backup-purge-hours");
 const autoBackupPurgeBtn = document.getElementById("auto-backup-purge-btn");
